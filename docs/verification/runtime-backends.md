@@ -215,6 +215,16 @@ Two Herdr behaviors this depends on were established directly and are not modele
 | An open call can adopt any workspace on that checkout | `herdr worktree open --workspace <parent> --path <home>` with no `--label`, against a checkout already carrying a hand-named workspace | Reported `already_open: true` for that workspace, which kept its own name; Firstmate labelled only workspaces the call itself created, with `herdr workspace rename <id> <label>` afterwards. |
 | Pane id is positional | `herdr pane report-metadata <pane> --source <s> --token owner=<v>` | Read back as `.result.pane.tokens.owner`; the pane id must precede the options despite the `--help` synopsis showing it last. |
 
+The worktree-backed path is never gated on a protocol or version number, and no failure it can hit fails a spawn; each one falls back to the flat, ungrouped create.
+That is safe by call shape rather than by version: `worktree open` is never passed `--label`, so no response it can return can produce a workspace carrying a home label, and only the explicit `workspace rename` applies one.
+
+A `worktree open` response missing `already_open` is unreachable across the supported range, established by reading the Herdr source rather than by running a command.
+Commit 9817820 ("feat: add worktree cli and socket api", v0.6.2~10, protocol 10) added the worktree CLI subcommands, the `WorktreeOpened` response variant and the `already_open` field in one commit.
+The field is declared `already_open: bool` at `src/api/schema/response.rs:80`, plain and non-`Option` with no `skip_serializing_if`, so serde always emits it; only that commit and the mechanical file split fbd20ad have ever touched it.
+`FM_BACKEND_HERDR_MIN_PROTOCOL` is 14, enforced as a hard floor, so every reachable client predates the floor by four protocol revisions with the field already present.
+A build old enough to lack the field lacks the worktree subcommands entirely and exits non-zero, which is the CLI-never-ran case that already falls back.
+The adapter still reads a missing flag as "reused" rather than trusting that, so an unexpected shape can never talk it into renaming a workspace it did not create.
+
 The complete projection suite ran on 2026-07-21 against Herdr 0.7.4 protocol 16:
 
 ```sh

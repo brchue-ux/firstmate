@@ -976,44 +976,53 @@ fm_backend_herdr_worktree_parent_workspace() {  # <session> <cwd>
 # membership survives it.
 #
 # Sets the same two globals fm_backend_herdr_workspace_ensure documents, and is
-# only ever called by it. Its two distinct failure codes are load-bearing,
-# because the caller's fallback is a `workspace create --label <label>` and a
-# SECOND workspace carrying this home's label would make
-# fm_backend_herdr_workspace_find (label match, head -1) non-deterministic -
-# the exact lookup breakage the no-parent guard below exists to prevent:
+# only ever called by it. EVERY failure path here is a safe fallback to the
+# plain `workspace create --label <label>`, and none of them can ever fail a
+# spawn: grouping is cosmetic, and losing it must never cost the ability to
+# launch an agent.
 #
-#   return 1 - FALL BACK. Nothing here created or renamed a workspace carrying
-#     this home's label, so the plain create is safe. Reached when:
-#       - <cwd> is not a git work tree, or is a subdirectory rather than a
-#         checkout root (herdr finds no matching worktree entry and errors).
-#       - <cwd> is a linked worktree and no workspace is open on the repo's
-#         main checkout yet. This guard is the load-bearing one: given only
-#         --cwd, herdr would INVENT a parent workspace at the repo root,
-#         labelled from the repo directory's basename. For the firstmate repo
-#         that basename is literally "firstmate", so a stray second workspace
-#         would collide with the primary home's own label. Passing an
-#         already-resolved --workspace <parent> instead makes inventing a
-#         parent structurally impossible: herdr only creates one when it has
-#         no source workspace index.
-#       - The CLI call itself failed, i.e. it never got far enough to mutate.
-#       - herdr ADOPTED a workspace already open at <cwd> (see below).
-#   return 2 - FAIL CLOSED, do not fall back. The call exited 0, so herdr may
-#     already hold a workspace for this home, but its response could not be
-#     parsed (schema drift, partial JSON) or the label could not be applied.
-#     Minting a second workspace from here is precisely how two workspaces end
-#     up sharing one label, so this path reports and refuses instead.
+# What makes that unconditional fallback safe is structural, not defensive. The
+# `worktree open` call carries NO --label at all, so it can neither create nor
+# rename a workspace carrying this home's label, no matter how its response
+# reads. ONLY the explicit `workspace rename` below applies that label, and
+# only to a workspace the call itself reported creating. A second workspace
+# labelled e.g. "firstmate" would make fm_backend_herdr_workspace_find (label
+# match, head -1) non-deterministic; that hazard is now ruled out by the call
+# shape rather than by refusing to fall back.
+#
+# Fallback is taken when:
+#   - <cwd> is not a git work tree, or is a subdirectory rather than a checkout
+#     root (herdr finds no matching worktree entry and the call errors).
+#   - <cwd> is a linked worktree and no workspace is open on the repo's main
+#     checkout yet. This guard is the load-bearing one: given only --cwd, herdr
+#     would INVENT a parent workspace at the repo root, labelled from the repo
+#     directory's basename. For the firstmate repo that basename is literally
+#     "firstmate", so a stray second workspace would collide with the primary
+#     home's own label. Passing an already-resolved --workspace <parent>
+#     instead makes inventing a parent structurally impossible: herdr only
+#     creates one when it has no source workspace index.
+#   - The CLI call itself failed, including a client too old to have the
+#     worktree subcommands at all (it exits non-zero on an unknown subcommand).
+#   - The response carried no readable workspace id, or no readable
+#     already_open flag. Both are reported, since a capable client silently
+#     losing grouping is worth a line.
+#   - herdr ADOPTED a workspace already open at <cwd> (see below).
+#   - The rename failed, leaving a workspace firstmate created but could not
+#     name. That one is reported by id and label, because it stays at that
+#     checkout as the repo-parent row and this home stays ungrouped until an
+#     operator renames or deletes it.
 #
 # already_open discipline: herdr reuses an existing workspace whose checkout is
 # <cwd> instead of creating a second one, and reports already_open=true. That
 # workspace is one firstmate did not create - the reachable set is ANY
 # workspace open on that checkout, including one the captain opened by hand -
-# so it is never relabelled and never becomes this home's Space. The `worktree
-# open` call therefore carries NO --label at all; the label is applied
-# afterwards, with `workspace rename`, only to a workspace this call itself
-# created. An adopted workspace serves purely as the grouping parent, and this
-# home's own Space falls back to the ordinary label-first create. That also
-# keeps FM_BACKEND_HERDR_WS_SEEDED_TAB_ID empty for an adopted workspace, so
-# its tabs can never enter the destructive default-tab prune path.
+# so it is never relabelled and never becomes this home's Space. It serves
+# purely as the grouping parent, and this home's own Space comes from the
+# ordinary label-first create. An UNREADABLE flag is read the same way as
+# true, the conservative direction: firstmate renames only what it is certain
+# it just created. That also keeps FM_BACKEND_HERDR_WS_SEEDED_TAB_ID empty for
+# an adopted workspace, so its tabs can never enter the destructive
+# default-tab prune path.
 fm_backend_herdr_workspace_create_worktree_backed() {  # <session> <cwd> <label>
   local session=$1 cwd=$2 label=$3 kind parent out wsid already
   kind=$(fm_backend_herdr_worktree_kind "$cwd") || return 1
@@ -1028,19 +1037,19 @@ fm_backend_herdr_workspace_create_worktree_backed() {  # <session> <cwd> <label>
   fi
   wsid=$(printf '%s' "$out" | jq -r '.result.workspace.workspace_id // empty' 2>/dev/null)
   # `// empty` cannot read already_open: jq's `//` treats false as absent, and
-  # false is the case that owns the workspace. Distinguish it from a MISSING
-  # flag explicitly, because a missing flag means the response is unparseable
-  # and adoption can no longer be ruled out.
+  # false is the one value that says this call owns the workspace. Read a
+  # MISSING flag as "adopted" instead, so an unreadable response can never talk
+  # firstmate into renaming a workspace it did not create.
   already=$(printf '%s' "$out" \
-    | jq -r 'if (.result.already_open | type) == "boolean" then (.result.already_open | tostring) else "" end' 2>/dev/null)
-  if [ -z "$wsid" ] || [ -z "$already" ]; then
-    echo "error: herdr worktree open exited 0 for $cwd but its response carried no readable workspace id and already_open flag; refusing to create a second workspace labelled '$label', which would make home-space lookup ambiguous. Inspect 'herdr workspace list' in session '$session' and remove or relabel the stray workspace at that checkout, then retry." >&2
-    return 2
+    | jq -r 'if (.result.already_open | type) == "boolean" then (.result.already_open | tostring) else "unknown" end' 2>/dev/null)
+  if [ -z "$wsid" ] || [ "$already" = unknown ]; then
+    echo "warning: herdr worktree open exited 0 for $cwd but reported no readable workspace id and already_open flag; nothing was labelled '$label' and this home's space falls back to the flat, ungrouped create" >&2
+    return 1
   fi
   [ "$already" = false ] || return 1
   fm_backend_herdr_cli "$session" workspace rename "$wsid" "$label" >/dev/null 2>&1 || {
-    echo "error: herdr created workspace $wsid for $cwd but could not label it '$label'; refusing to create a second workspace under that label, which would make home-space lookup ambiguous. Rename $wsid to '$label' by hand, or delete it, then retry." >&2
-    return 2
+    echo "warning: herdr created workspace $wsid at $cwd but it could not be renamed to '$label'; it keeps its herdr-derived label and stays the repo-parent row at that checkout, and this home's space falls back to the flat, ungrouped create until $wsid is renamed to '$label' or deleted" >&2
+    return 1
   }
   FM_BACKEND_HERDR_WS_ID=$wsid
   FM_BACKEND_HERDR_WS_SEEDED_TAB_ID=$(printf '%s' "$out" | jq -r '.result.tab.tab_id // empty' 2>/dev/null)
@@ -1088,7 +1097,7 @@ fm_backend_herdr_workspace_create_worktree_backed() {  # <session> <cwd> <label>
 # attach to). --no-focus is passed unconditionally anyway, for defense in
 # depth and because it is a no-op in the already-safe case.
 fm_backend_herdr_workspace_ensure() {  # <session> <cwd>
-  local session=$1 cwd=$2 wsid out label rc=0
+  local session=$1 cwd=$2 wsid out label
   FM_BACKEND_HERDR_WS_ID=""
   FM_BACKEND_HERDR_WS_SEEDED_TAB_ID=""
   wsid=$(fm_backend_herdr_workspace_find "$session")
@@ -1099,17 +1108,14 @@ fm_backend_herdr_workspace_ensure() {  # <session> <cwd>
   fi
   label=$(fm_backend_herdr_workspace_label)
   # Preferred shape: a worktree-BACKED workspace, so herdr's sidebar renders
-  # this home indented under its repo parent. Only its rc 1 means the plain
-  # create below is safe; rc 2 says herdr may already hold a workspace for this
-  # home, so creating another under the same label would break the very lookup
-  # this function exists to serve
+  # this home indented under its repo parent. Every way it can fail degrades to
+  # the plain create below, which is safe because that call is the only one
+  # that ever applies this home's label
   # (fm_backend_herdr_workspace_create_worktree_backed).
-  fm_backend_herdr_workspace_create_worktree_backed "$session" "$cwd" "$label" || rc=$?
-  if [ "$rc" -eq 0 ]; then
+  if fm_backend_herdr_workspace_create_worktree_backed "$session" "$cwd" "$label"; then
     printf '%s' "$FM_BACKEND_HERDR_WS_ID"
     return 0
   fi
-  [ "$rc" -eq 1 ] || return 1
   out=$(fm_backend_herdr_cli "$session" workspace create --cwd "$cwd" --label "$label" --no-focus 2>/dev/null) || return 1
   wsid=$(printf '%s' "$out" | jq -r '.result.workspace.workspace_id // empty' 2>/dev/null)
   [ -n "$wsid" ] || return 1

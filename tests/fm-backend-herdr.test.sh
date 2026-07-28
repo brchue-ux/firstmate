@@ -424,31 +424,86 @@ EOF
   pass "fm_backend_herdr_workspace_ensure: a worktree-backed ADOPTION never relabels a foreign workspace and leaves this home its own labelled space"
 }
 
-test_worktree_backed_unparseable_success_fails_closed() {
-  local dir log resp fb main linked out rc
-  dir="$TMP_ROOT/wt-ambiguous"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+# run_worktree_backed_degradation: drive workspace_ensure over a scripted
+# worktree open response and report "<ws-id>|<seeded-tab-id>" plus the ensure's
+# own exit status, so each degraded shape can assert the SAME contract: never
+# fail the spawn, never rename, always land on the flat labelled create.
+run_worktree_backed_degradation() {  # <dir> <open-response> [<rename-exit>] -> echoes "<rc>|<ws>|<seeded>"
+  local dir=$1 open=$2 rename_exit=${3:-} log resp fb main linked out rc
+  mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   read -r main linked <<EOF
 $(make_worktree_fixture "$dir")
 EOF
   : "$linked"
   printf '{"result":{"workspaces":[]}}\n' > "$resp/1.out"
-  # The call EXITED 0, so herdr may already hold a workspace for this home,
-  # but the response says neither which one nor whether it was adopted (schema
-  # drift, partial JSON). Falling back here is what would mint a SECOND
-  # workspace labelled "firstmate" and make label lookup non-deterministic.
-  printf '{"result":{}}\n' > "$resp/2.out"
-  printf '{"result":{"workspace":{"workspace_id":"w5","label":"firstmate"},"tab":{"tab_id":"w5:t1"}}}\n' > "$resp/3.out"
+  printf '%s\n' "$open" > "$resp/2.out"
+  if [ -n "$rename_exit" ]; then
+    printf '%s\n' "$rename_exit" > "$resp/3.exit"
+    printf '{"result":{"workspace":{"workspace_id":"w5","label":"firstmate"},"tab":{"tab_id":"w5:t1"}}}\n' > "$resp/4.out"
+  else
+    printf '{"result":{"workspace":{"workspace_id":"w5","label":"firstmate"},"tab":{"tab_id":"w5:t1"}}}\n' > "$resp/3.out"
+  fi
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" HERDR_SESSION=fmtest \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_ensure fmtest "$1"' "$ROOT" "$main" 2>"$dir/err" )
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_ensure fmtest "$1" >/dev/null; printf "%s|%s" "$FM_BACKEND_HERDR_WS_ID" "$FM_BACKEND_HERDR_WS_SEEDED_TAB_ID"' \
+      "$ROOT" "$main" 2>"$dir/err" )
   rc=$?
-  [ "$rc" -ne 0 ] || fail "an ambiguous worktree open (exited 0, unparseable response) must fail the ensure, not fall back"
-  [ -z "$out" ] || fail "a failed ensure must resolve no workspace id, got '$out'"
-  assert_not_contains "$(cat "$log")" $'\x1f''workspace'$'\x1f''create' \
-    "after a mutating call whose outcome is unknown, minting a second workspace under this home's label is the exact ambiguity the guard exists to prevent"
+  printf '%s|%s' "$rc" "$out"
+  printf '%s\n' "$main" > "$dir/main-checkout"
+}
+
+assert_degraded_to_flat_create() {  # <dir> <result> <what>
+  local dir=$1 result=$2 what=$3 main
+  main=$(cat "$dir/main-checkout")
+  [ "${result%%|*}" = 0 ] \
+    || fail "$what must never fail the spawn: grouping is cosmetic, launching an agent is not (ensure exited ${result%%|*})"
+  [ "${result#*|}" = 'w5|w5:t1' ] \
+    || fail "$what must land on the flat labelled create, got '${result#*|}'"
+  assert_contains "$(cat "$dir/log")" $'\x1f''workspace'$'\x1f''create'$'\x1f''--cwd'$'\x1f'"$main"$'\x1f''--label'$'\x1f''firstmate' \
+    "$what must fall back to the ordinary label-first create"
+}
+
+test_worktree_backed_unreadable_response_falls_back_safely() {
+  local dir result
+  dir="$TMP_ROOT/wt-ambiguous"
+  # The call EXITED 0 but its response names no workspace (schema drift,
+  # partial JSON). Falling back is safe REGARDLESS: the open call carries no
+  # --label, so whatever it may have touched cannot be carrying this home's
+  # label, and only the rename below ever applies one.
+  result=$(run_worktree_backed_degradation "$dir" '{"result":{}}')
+  assert_degraded_to_flat_create "$dir" "$result" "an unreadable worktree open response"
+  assert_not_contains "$(cat "$dir/log")" $'\x1f''workspace'$'\x1f''rename' \
+    "an unreadable response must never talk firstmate into renaming a workspace it cannot confirm it created"
   assert_contains "$(cat "$dir/err")" 'firstmate' \
-    "failing closed must say which label it refused to duplicate, so the operator can find the stray workspace"
-  pass "fm_backend_herdr_workspace_ensure: an ambiguous worktree open fails closed with a diagnostic instead of duplicating this home's label"
+    "a capable client silently losing grouping is worth a diagnostic naming the label that was not applied"
+  pass "fm_backend_herdr_workspace_ensure: an unreadable worktree open response falls back to the flat create without renaming or failing the spawn"
+}
+
+test_worktree_backed_missing_already_open_falls_back_safely() {
+  local dir result
+  dir="$TMP_ROOT/wt-no-flag"
+  # A workspace id but no already_open flag: unreachable on any client past the
+  # enforced protocol floor, and read as "reused" anyway, which is the
+  # conservative direction - firstmate renames only what it is certain it just
+  # created.
+  result=$(run_worktree_backed_degradation "$dir" '{"result":{"workspace":{"workspace_id":"w1","label":"firstmate-scratch"},"tab":{"tab_id":"w1:t9"}}}')
+  assert_degraded_to_flat_create "$dir" "$result" "a worktree open response with no already_open flag"
+  assert_not_contains "$(cat "$dir/log")" $'\x1f''workspace'$'\x1f''rename' \
+    "with no already_open flag the workspace must be treated as one firstmate did not create, so its name is left alone"
+  pass "fm_backend_herdr_workspace_ensure: a missing already_open flag is read as reused, falling back to the flat create without renaming"
+}
+
+test_worktree_backed_rename_failure_falls_back_with_a_naming_diagnostic() {
+  local dir result err
+  dir="$TMP_ROOT/wt-rename-fail"
+  result=$(run_worktree_backed_degradation "$dir" \
+    '{"result":{"already_open":false,"workspace":{"workspace_id":"w1","label":"firstmate-scratch"},"tab":{"tab_id":"w1:t9"}}}' 1)
+  assert_degraded_to_flat_create "$dir" "$result" "a failed workspace rename"
+  err=$(cat "$dir/err")
+  assert_contains "$err" 'w1' "the warning must name the workspace firstmate created but could not name, so an operator can find it"
+  assert_contains "$err" 'firstmate' "the warning must name the label that never got applied"
+  assert_contains "$err" 'ungrouped' "the warning must say this home stays ungrouped until that workspace is renamed or deleted"
+  pass "fm_backend_herdr_workspace_ensure: a failed rename falls back to the flat create and names the workspace it stranded"
 }
 
 test_report_owner_token_stamps_the_calling_mate() {
@@ -3029,7 +3084,9 @@ test_workspace_ensure_opens_main_checkout_as_repo_parent
 test_workspace_ensure_opens_linked_home_against_resolved_parent
 test_workspace_ensure_falls_back_flat_without_a_repo_parent
 test_worktree_backed_adoption_never_relabels_a_foreign_workspace
-test_worktree_backed_unparseable_success_fails_closed
+test_worktree_backed_unreadable_response_falls_back_safely
+test_worktree_backed_missing_already_open_falls_back_safely
+test_worktree_backed_rename_failure_falls_back_with_a_naming_diagnostic
 test_report_owner_token_stamps_the_calling_mate
 test_report_owner_token_ignores_an_empty_target_or_owner
 test_container_ensure_starts_server_and_workspace

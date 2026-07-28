@@ -71,7 +71,10 @@ An existing ungrouped home workspace is not migrated; it keeps its flat shape un
 When a home workspace is created, Herdr reuses ANY workspace already open on that exact checkout instead of adding a second one, including one Firstmate never created and one the captain opened by hand.
 Firstmate never renames a workspace it did not create, so the open call carries no label at all and the home label is applied afterwards, only to a workspace that call itself created.
 A reused workspace therefore keeps its own name and acts only as the grouping parent; this home's own Space is then created by the ordinary label-first path and stays ungrouped.
-If the open call succeeds but its response cannot be read, or the home label cannot be applied to a workspace Herdr just created, the spawn fails with a diagnostic naming the workspace rather than creating a second one under the home label, because two workspaces sharing a label make home-space lookup ambiguous.
+Because the open call never carries a label, no response it can return is able to produce a workspace under the home label, so every way the worktree-backed path can fail degrades to the flat, ungrouped create.
+That fallback is unconditional and is never gated on a protocol or version number: grouping is decided by what the client actually returns at runtime, and losing it never fails a spawn.
+An unreadable response is reported and falls back, and a missing `already_open` flag is read as if the workspace was reused, so Firstmate renames only what it is certain it just created.
+If the home label cannot be applied to a workspace Herdr just created, the warning names that workspace by id and label, because it stays at that checkout as the repo-parent row and this home stays ungrouped until an operator renames or deletes it.
 
 ## Standalone-clone secondmate ownership
 
