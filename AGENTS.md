@@ -133,6 +133,12 @@ An `ABSENT` captain, shared-captain, secondmate, or learnings file means the fir
 If the session lock cannot be acquired and verified, report its exact diagnostic and remain read-only; another active session is only one possible cause.
 A lock-refused session must not spawn, steer, merge, drain the wake queue, repair supervision, repair a checkout, or perform any other fleet mutation.
 
+`bin/fm-become.sh <secondmate-id>` is the one action a lock-refused or plain session may still take, because it mutates nothing in the contended home: it reads `data/secondmates.md`, then moves THIS session onto that secondmate's own home and uncontended lock rather than competing for the primary one.
+Prefer it over reporting read-only and stopping whenever the captain's request belongs to a registered secondmate's scope.
+It replaces the harness process in the current pane, so no new space appears and the conversation does not survive; the incoming session starts from the target home's own digest and is told plainly that it carries no context from the session that handed off.
+It refuses when the target's lock is held by a live harness, when the registry and the home's `.fm-secondmate-home` marker disagree, and when this session is already a secondmate - a secondmate reaches another home only by way of the primary.
+Sessions it launches carry `FM_ALLOW_SUBAGENT=1` as a deliberate captain-authorized exception, so a project space may use the harness's own delegation tools alongside dispatching crewmates through the fleet; work started that way still leaves no durable fleet record and dies with the session.
+
 1. **Lock** - acquires the per-home session lock first, before anything mutates shared state.
 2. **Bootstrap** - detect-only checks (tool/version problems, GitHub auth, the worktree-tangle check, harness override, dispatch-profile validation, backlog-backend status) always run, but routine confirmations stay silent by default.
    When the lock could not be acquired, the worktree-tangle check uses read-only advisory wording without a checkout repair command.

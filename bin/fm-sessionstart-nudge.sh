@@ -18,6 +18,26 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-operational-input.sh"
 
 fm_is_gate_agent "$FM_ROOT" && exit 0
+
+# One-shot handover notice left by bin/fm-become.sh. Becoming a secondmate
+# replaces the harness process, so the incoming session inherits none of the
+# handing-off session's conversation and must say so rather than imply
+# continuity. Consumed before the scope and lock gates below so a suppressed
+# nudge never swallows it, and removed first so a failed encode cannot leave it
+# to reappear at every later session start.
+NOTICE="$STATE/.fm-handover-notice"
+if [ -f "$NOTICE" ] && [ ! -L "$NOTICE" ]; then
+  IFS= read -r notice_id < "$NOTICE" 2>/dev/null || notice_id=
+  rm -f "$NOTICE" 2>/dev/null || true
+  notice_id=${notice_id//[[:space:]]/}
+  notice=
+  if [ -n "$notice_id" ] && fm_operational_input_encode session-start \
+    "This is a new session in the $notice_id secondmate home. It has no context from the firstmate session that handed off." \
+    notice; then
+    printf '%s\n' "$notice"
+  fi
+fi
+
 fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 
 lock_is_in_ancestry() {
