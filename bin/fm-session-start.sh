@@ -4,8 +4,9 @@
 # Collapses AGENTS.md sections 3 (bootstrap) and 5 (recovery) into ONE script
 # producing ONE ordered digest, so a session starts in one or two turns
 # instead of the six-plus separate reads the old docs required: run
-# fm-bootstrap.sh, then separately read data/projects.md, data/secondmates.md,
-# data/captain.md, data/captain-shared.md, data/learnings.md, then run
+# fm-bootstrap.sh, then separately read data/charter.md, data/projects.md,
+# data/secondmates.md, data/captain.md, data/captain-shared.md,
+# data/learnings.md, then run
 # fm-lock.sh, fm-wake-drain.sh, then read data/backlog.md, every state/*.meta,
 # and every state/*.status.
 # Every one of those reads is UNCONDITIONAL at every session start, so they
@@ -35,9 +36,10 @@
 #                       also run only when locked.
 #   3. wake-drain     - mutates the durable wake queue, so it also only runs
 #                       when locked.
-#   4. context digest - data/projects.md, data/secondmates.md, data/captain.md,
-#                       data/captain-shared.md, data/learnings.md: read-only,
-#                       always safe, always runs.
+#   4. context digest - data/charter.md (first: identity governs how the rest
+#                       is read), data/projects.md, data/secondmates.md,
+#                       data/captain.md, data/captain-shared.md,
+#                       data/learnings.md: read-only, always safe, always runs.
 #   5. fleet digest   - a compact data/backlog.md identity/metadata listing,
 #                       every state/*.meta, a bounded state/*.status tail,
 #                       state/.afk, and a cheap per-task endpoint-liveness read:
@@ -334,6 +336,10 @@ fi
 
 # --- 4. context digest -----------------------------------------------------
 section "CONTEXT"
+# charter.md FIRST: it answers "who am I" (secondmate for a named domain vs
+# primary home), which governs how everything after it is read. ABSENT here
+# means this is a primary home, not a secondmate.
+print_file_or_absent "$DATA/charter.md" "data/charter.md (secondmate charter; ABSENT = this is a primary home)"
 print_file_or_absent "$DATA/projects.md" "data/projects.md"
 print_file_or_absent "$DATA/secondmates.md" "data/secondmates.md"
 print_file_or_absent "$DATA/captain.md" "data/captain.md"
@@ -426,7 +432,7 @@ EOF
 fi
 cat <<'EOF'
 The digest above is complete for this session start. Do NOT re-read
-data/projects.md, data/secondmates.md, data/captain.md,
+data/charter.md, data/projects.md, data/secondmates.md, data/captain.md,
 data/captain-shared.md, data/learnings.md,
 or state/*.meta now - they were just printed in full.
 Do NOT bulk-read data/backlog.md now either: the compact identity/metadata

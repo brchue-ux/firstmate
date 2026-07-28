@@ -563,7 +563,8 @@ EOF
 
   printf '%s\n' '- demo [no-mistakes] - a demo project (added 2026-07-01)' > "$home/data/projects.md"
   : > "$home/data/captain.md"
-  # secondmates.md, captain-shared.md, and learnings.md deliberately absent
+  # charter.md, secondmates.md, captain-shared.md, and learnings.md
+  # deliberately absent
 
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
 
@@ -577,16 +578,83 @@ EOF
   assert_contains "$out" "data/secondmates.md" "digest did not label the secondmates.md section"
   assert_contains "$out" "data/learnings.md" "digest did not label the learnings.md section"
 
-  # Exactly four context ABSENT markers (secondmates.md, captain-shared.md,
-  # learnings.md; backlog.md is covered by its own test) - and the
-  # present-but-empty captain.md must NOT print ABSENT.
+  # Exactly five context ABSENT markers (charter.md, secondmates.md,
+  # captain-shared.md, learnings.md; backlog.md is covered by its own test) -
+  # and the present-but-empty captain.md must NOT print ABSENT.
   absent_count=$(printf '%s\n' "$out" | grep -c '^ABSENT$')
-  [ "$absent_count" -eq 4 ] || fail "expected 4 ABSENT markers (secondmates.md, captain-shared.md, learnings.md, backlog.md), got $absent_count: $out"
+  [ "$absent_count" -eq 5 ] || fail "expected 5 ABSENT markers (charter.md, secondmates.md, captain-shared.md, learnings.md, backlog.md), got $absent_count: $out"
 
   cap_section=$(printf '%s\n' "$out" | awk '/^data\/captain\.md$/{flag=1;next}/^data\//{flag=0}flag')
   assert_contains "$cap_section" "(present, empty)" "empty-but-present captain.md was not distinguished from ABSENT"
 
   pass "context digest distinguishes ABSENT, empty-but-present, and populated files"
+}
+
+# --- context digest: charter identity ---------------------------------------
+#
+# A seeded secondmate home carries data/charter.md. Without it in the digest,
+# AGENTS.md's "You are the first mate." is the only identity line the session
+# ever loads, so a second mate opens every session claiming the wrong role.
+# The charter must print FIRST in CONTEXT (identity governs how the rest is
+# read), and its absence must stay distinguishable from an empty file because
+# ABSENT is what marks a primary home.
+
+test_context_digest_charter_present() {
+  local rec root home fakebin out charter_line projects_line
+  rec=$(new_world context-charter)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+
+  printf '%s\n' 'You are a persistent second mate managed by the main firstmate.' \
+    'Your domain is the budget app.' > "$home/data/charter.md"
+  printf '%s\n' '- home_budget_app [no-mistakes] - the budget app (added 2026-07-01)' > "$home/data/projects.md"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  assert_contains "$out" "data/charter.md (secondmate charter; ABSENT = this is a primary home)" \
+    "digest did not label the charter.md section"
+  assert_contains "$out" "You are a persistent second mate managed by the main firstmate." \
+    "digest did not print charter.md content"
+  assert_contains "$out" "Your domain is the budget app." \
+    "digest did not print the charter's domain line"
+
+  charter_line=$(printf '%s\n' "$out" | grep -n '^data/charter\.md ' | head -1 | cut -d: -f1)
+  projects_line=$(printf '%s\n' "$out" | grep -n '^data/projects\.md$' | head -1 | cut -d: -f1)
+  [ -n "$charter_line" ] || fail "charter.md section header not found: $out"
+  [ -n "$projects_line" ] || fail "projects.md section header not found: $out"
+  [ "$charter_line" -lt "$projects_line" ] || fail "charter.md did not print first in CONTEXT"
+
+  assert_contains "$out" "data/charter.md, data/projects.md" \
+    "closing reminder did not list charter.md among the already-printed context files"
+
+  pass "context digest prints the secondmate charter first, before projects.md"
+}
+
+test_context_digest_charter_absent() {
+  local rec root home fakebin out charter_section
+  rec=$(new_world context-charter-absent)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+
+  # charter.md deliberately absent: this is a primary home.
+  printf '%s\n' '- demo [no-mistakes] - a demo project (added 2026-07-01)' > "$home/data/projects.md"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  assert_contains "$out" "data/charter.md (secondmate charter; ABSENT = this is a primary home)" \
+    "digest did not label the charter.md section when absent"
+  charter_section=$(printf '%s\n' "$out" | awk '/^data\/charter\.md /{flag=1;next}/^data\//{flag=0}flag')
+  assert_contains "$charter_section" "ABSENT" "absent charter.md did not print the ABSENT marker"
+  assert_not_contains "$charter_section" "(present, empty)" \
+    "absent charter.md was reported as empty-but-present"
+
+  pass "context digest marks a missing charter ABSENT, identifying a primary home"
 }
 
 # --- lock refusal: read-only path --------------------------------------------
@@ -1386,6 +1454,8 @@ EOF
 }
 
 test_context_digest_absent_empty_present
+test_context_digest_charter_present
+test_context_digest_charter_absent
 test_lock_refusal_read_only_path
 test_lock_write_failure_read_only_path
 test_session_lock_concurrent_single_winner
