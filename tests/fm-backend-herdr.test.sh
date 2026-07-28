@@ -110,6 +110,15 @@ case "$cmd $sub" in
   "workspace list")
     jq_state '{result:{workspaces:.workspaces}}'
     ;;
+  "worktree list"|"worktree open")
+    # This fake models a herdr build without the worktree path. The real CLI
+    # rejects an unknown subcommand non-zero, and that non-zero is exactly what
+    # tells the adapter its worktree-backed attempt never mutated anything and
+    # the flat create is safe - so the fake must refuse the same way rather
+    # than exiting 0 with empty stdout like the silent-success commands below.
+    printf 'error: unrecognized subcommand\n' >&2
+    exit 2
+    ;;
   "workspace create")
     n=$(jq_state -r '.next'); wsid="w$n"; dn=$((n + 1))
     jq_state --arg wsid "$wsid" --arg wlabel "$label" \
@@ -325,16 +334,20 @@ $(make_worktree_fixture "$dir")
 EOF
   : "$linked"
   printf '{"result":{"workspaces":[]}}\n' > "$resp/1.out"
-  printf '{"result":{"already_open":false,"workspace":{"workspace_id":"w1","label":"firstmate"},"tab":{"tab_id":"w1:t9"}}}\n' > "$resp/2.out"
+  printf '{"result":{"already_open":false,"workspace":{"workspace_id":"w1","label":"firstmate-scratch"},"tab":{"tab_id":"w1:t9"}}}\n' > "$resp/2.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" HERDR_SESSION=fmtest \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_ensure fmtest "$1"' "$ROOT" "$main" )
   [ "$out" = w1 ] || fail "workspace_ensure should echo the opened workspace id, got '$out'"
-  assert_contains "$(cat "$log")" $'\x1f''worktree'$'\x1f''open'$'\x1f''--cwd'$'\x1f'"$main"$'\x1f''--path'$'\x1f'"$main"$'\x1f''--label'$'\x1f''firstmate'$'\x1f''--no-focus' \
+  assert_contains "$(cat "$log")" $'\x1f''worktree'$'\x1f''open'$'\x1f''--cwd'$'\x1f'"$main"$'\x1f''--path'$'\x1f'"$main"$'\x1f''--no-focus' \
     "a main-checkout home must be opened as its own repo parent, so its worktree membership survives the seeded-tab prune"
+  assert_not_contains "$(cat "$log")" $'\x1f''worktree'$'\x1f''open'$'\x1f''--cwd'$'\x1f'"$main"$'\x1f''--path'$'\x1f'"$main"$'\x1f''--label' \
+    "the open call must carry no --label: it can adopt a workspace firstmate never created, and firstmate must never rename one"
+  assert_contains "$(cat "$log")" $'\x1f''workspace'$'\x1f''rename'$'\x1f''w1'$'\x1f''firstmate' \
+    "the home label must be applied afterwards, to the workspace this call itself created"
   assert_not_contains "$(cat "$log")" $'\x1f''workspace'$'\x1f''create' \
     "a main-checkout home must not fall back to the plain create that leaves worktree null"
-  pass "fm_backend_herdr_workspace_ensure: opens a main-checkout home as its own repo parent, not through a plain workspace create"
+  pass "fm_backend_herdr_workspace_ensure: opens a main-checkout home as its own repo parent, then labels only the workspace it created"
 }
 
 test_workspace_ensure_opens_linked_home_against_resolved_parent() {
@@ -346,7 +359,7 @@ EOF
   : "$main"
   printf '{"result":{"workspaces":[]}}\n' > "$resp/1.out"
   printf '{"result":{"source":{"source_workspace_id":"w1"}}}\n' > "$resp/2.out"
-  printf '{"result":{"already_open":false,"workspace":{"workspace_id":"w7","label":"2ndmate-sm1"},"tab":{"tab_id":"w7:t1"}}}\n' > "$resp/3.out"
+  printf '{"result":{"already_open":false,"workspace":{"workspace_id":"w7","label":"linked"},"tab":{"tab_id":"w7:t1"}}}\n' > "$resp/3.out"
   fb=$(make_herdr_fakebin "$dir")
   printf 'sm1\n' > "$dir/.fm-secondmate-home"
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" HERDR_SESSION=fmtest FM_HOME="$dir" \
@@ -354,8 +367,12 @@ EOF
   [ "$out" = w7 ] || fail "workspace_ensure should echo the opened workspace id, got '$out'"
   assert_contains "$(cat "$log")" $'\x1f''worktree'$'\x1f''list'$'\x1f''--cwd'$'\x1f'"$linked" \
     "a linked home must resolve its repo parent first, read-only"
-  assert_contains "$(cat "$log")" $'\x1f''worktree'$'\x1f''open'$'\x1f''--workspace'$'\x1f''w1'$'\x1f''--path'$'\x1f'"$linked"$'\x1f''--label'$'\x1f''2ndmate-sm1'$'\x1f''--no-focus' \
+  assert_contains "$(cat "$log")" $'\x1f''worktree'$'\x1f''open'$'\x1f''--workspace'$'\x1f''w1'$'\x1f''--path'$'\x1f'"$linked"$'\x1f''--no-focus' \
     "a linked home must be opened against the ALREADY-RESOLVED parent id, which is what makes inventing a stray parent impossible"
+  assert_not_contains "$(cat "$log")" $'\x1f''--path'$'\x1f'"$linked"$'\x1f''--label' \
+    "the open call must carry no --label: it can adopt a workspace firstmate never created, and firstmate must never rename one"
+  assert_contains "$(cat "$log")" $'\x1f''workspace'$'\x1f''rename'$'\x1f''w7'$'\x1f''2ndmate-sm1' \
+    "the home label must be applied afterwards, to the workspace this call itself created"
   assert_not_contains "$(cat "$log")" $'\x1f''workspace'$'\x1f''create' "the linked path should not fall back to a plain create here"
   pass "fm_backend_herdr_workspace_ensure: opens a linked-worktree home against its already-resolved repo parent"
 }
@@ -383,7 +400,7 @@ EOF
   pass "fm_backend_herdr_workspace_ensure: falls back to the flat create when no workspace is open on the repo parent, never inventing one"
 }
 
-test_worktree_backed_adoption_reports_no_seeded_tab() {
+test_worktree_backed_adoption_never_relabels_a_foreign_workspace() {
   local dir log resp fb main linked out
   dir="$TMP_ROOT/wt-adopt"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   read -r main linked <<EOF
@@ -391,14 +408,47 @@ $(make_worktree_fixture "$dir")
 EOF
   : "$linked"
   printf '{"result":{"workspaces":[]}}\n' > "$resp/1.out"
-  # already_open: herdr reused a workspace this call did not create, and the
-  # tab it reports is that workspace's existing active tab, not a fresh seed.
-  printf '{"result":{"already_open":true,"workspace":{"workspace_id":"w2","label":"firstmate"},"tab":{"tab_id":"w2:t5"}}}\n' > "$resp/2.out"
+  # already_open: herdr reused a workspace this call did not create. The
+  # reachable set is ANY workspace open on that checkout, including one the
+  # captain opened by hand, so it keeps its own label and its own tabs.
+  printf '{"result":{"already_open":true,"workspace":{"workspace_id":"w2","label":"captains-own"},"tab":{"tab_id":"w2:t5"}}}\n' > "$resp/2.out"
+  printf '{"result":{"workspace":{"workspace_id":"w3","label":"firstmate"},"tab":{"tab_id":"w3:t1"}}}\n' > "$resp/3.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" HERDR_SESSION=fmtest \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_ensure fmtest "$1" >/dev/null; printf "%s|%s" "$FM_BACKEND_HERDR_WS_ID" "$FM_BACKEND_HERDR_WS_SEEDED_TAB_ID"' "$ROOT" "$main" )
-  [ "$out" = 'w2|' ] || fail "an adopted (already_open) workspace must report its id with an EMPTY seeded tab id, so its tabs are never prune candidates, got '$out'"
-  pass "fm_backend_herdr_workspace_ensure: a worktree-backed ADOPTION reports no seeded default tab, keeping an existing workspace's tabs out of the prune path"
+  assert_not_contains "$(cat "$log")" $'\x1f''workspace'$'\x1f''rename' \
+    "a workspace firstmate did not create must keep its own name - it serves as the grouping parent only"
+  assert_contains "$(cat "$log")" $'\x1f''workspace'$'\x1f''create'$'\x1f''--cwd'$'\x1f'"$main"$'\x1f''--label'$'\x1f''firstmate' \
+    "declining to relabel an adopted workspace must leave this home's own space to the ordinary label-first create"
+  [ "$out" = 'w3|w3:t1' ] || fail "this home's space must be the one the label-first create minted, with its own seeded tab, got '$out'"
+  pass "fm_backend_herdr_workspace_ensure: a worktree-backed ADOPTION never relabels a foreign workspace and leaves this home its own labelled space"
+}
+
+test_worktree_backed_unparseable_success_fails_closed() {
+  local dir log resp fb main linked out rc
+  dir="$TMP_ROOT/wt-ambiguous"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  read -r main linked <<EOF
+$(make_worktree_fixture "$dir")
+EOF
+  : "$linked"
+  printf '{"result":{"workspaces":[]}}\n' > "$resp/1.out"
+  # The call EXITED 0, so herdr may already hold a workspace for this home,
+  # but the response says neither which one nor whether it was adopted (schema
+  # drift, partial JSON). Falling back here is what would mint a SECOND
+  # workspace labelled "firstmate" and make label lookup non-deterministic.
+  printf '{"result":{}}\n' > "$resp/2.out"
+  printf '{"result":{"workspace":{"workspace_id":"w5","label":"firstmate"},"tab":{"tab_id":"w5:t1"}}}\n' > "$resp/3.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" HERDR_SESSION=fmtest \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_ensure fmtest "$1"' "$ROOT" "$main" 2>"$dir/err" )
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "an ambiguous worktree open (exited 0, unparseable response) must fail the ensure, not fall back"
+  [ -z "$out" ] || fail "a failed ensure must resolve no workspace id, got '$out'"
+  assert_not_contains "$(cat "$log")" $'\x1f''workspace'$'\x1f''create' \
+    "after a mutating call whose outcome is unknown, minting a second workspace under this home's label is the exact ambiguity the guard exists to prevent"
+  assert_contains "$(cat "$dir/err")" 'firstmate' \
+    "failing closed must say which label it refused to duplicate, so the operator can find the stray workspace"
+  pass "fm_backend_herdr_workspace_ensure: an ambiguous worktree open fails closed with a diagnostic instead of duplicating this home's label"
 }
 
 test_report_owner_token_stamps_the_calling_mate() {
@@ -2978,7 +3028,8 @@ test_worktree_kind_classifies_linked_main_and_non_repo
 test_workspace_ensure_opens_main_checkout_as_repo_parent
 test_workspace_ensure_opens_linked_home_against_resolved_parent
 test_workspace_ensure_falls_back_flat_without_a_repo_parent
-test_worktree_backed_adoption_reports_no_seeded_tab
+test_worktree_backed_adoption_never_relabels_a_foreign_workspace
+test_worktree_backed_unparseable_success_fails_closed
 test_report_owner_token_stamps_the_calling_mate
 test_report_owner_token_ignores_an_empty_target_or_owner
 test_container_ensure_starts_server_and_workspace

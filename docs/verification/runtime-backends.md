@@ -201,6 +201,7 @@ ok - real herdr E2E: the primary and secondmate spaces share one repo key with e
 ok - real herdr E2E: space lookup by label still resolves both homes to exactly the right space
 ok - real herdr E2E: a worker pane is stamped with its calling mate's moniker and a secondmate pane is left unstamped
 ok - real herdr E2E: a worker spawned by a secondmate is stamped with that secondmate's moniker and lands in its space
+ok - real herdr E2E: a workspace already open on a home checkout keeps its own name and the home still gets its own labelled space
 ```
 
 Two Herdr behaviors this depends on were established directly and are not modeled by any fake:
@@ -211,6 +212,7 @@ Two Herdr behaviors this depends on were established directly and are not modele
 | A child must originate from the parent | `herdr worktree open --workspace <child> --path <child>` | Refused with `linked_worktree_source`, "New and open worktree actions start from the repo parent workspace." |
 | A parent probe is read-only | `herdr worktree open --workspace <parent> --path <linked>` after `herdr worktree list --cwd <path>` | The list call left an empty session's workspace list untouched, and the open call produced `is_linked_worktree: true` under the parent's repo root. |
 | Membership must be stamped at creation | plain create at a repo root, then task tab, then seeded-tab prune | The workspace stopped resolving as the repo parent once its seeded tab was pruned; a workspace opened through the worktree path kept its membership. |
+| An open call can adopt any workspace on that checkout | `herdr worktree open --workspace <parent> --path <home>` with no `--label`, against a checkout already carrying a hand-named workspace | Reported `already_open: true` for that workspace, which kept its own name; Firstmate labelled only workspaces the call itself created, with `herdr workspace rename <id> <label>` afterwards. |
 | Pane id is positional | `herdr pane report-metadata <pane> --source <s> --token owner=<v>` | Read back as `.result.pane.tokens.owner`; the pane id must precede the options despite the `--help` synopsis showing it last. |
 
 The complete projection suite ran on 2026-07-21 against Herdr 0.7.4 protocol 16:

@@ -27,6 +27,8 @@
 #     fm-spawn.sh resolves every worker placement through)
 #   - a worker pane carries owner=<calling mate>, and a secondmate pane
 #     carries no owner token at all
+#   - adoption discipline: a workspace already open on a home's checkout keeps
+#     its own name and the home still gets its own labelled space
 #   - the no-parent guard: with no space open on the repo's main checkout,
 #     the spawn falls back to a flat space and does NOT let herdr invent a
 #     stray parent workspace labelled from the repo directory basename
@@ -233,6 +235,40 @@ CM2_WSID=$(herdr pane get "$CM2_PANE" --session "$SESSION_MAIN" 2>/dev/null | jq
 pass "real herdr E2E: a worker spawned by a secondmate is stamped with that secondmate's moniker and lands in its space"
 
 [ -n "$CM2_WT" ] && command -v treehouse >/dev/null 2>&1 && treehouse return --force "$CM2_WT" >/dev/null 2>&1
+
+# --- part 4: adoption never renames a workspace firstmate did not create -----
+# Herdr reuses ANY workspace already open on the exact checkout a home sits on,
+# including one opened by hand. Firstmate must leave that workspace's own name
+# alone and mint its own labelled space instead of relabelling it.
+
+SM2_HOME="$TMP_ROOT/sm-home-2"
+git -C "$PRIMARY_HOME" worktree add -q -b e2e-sm2 "$SM2_HOME"
+mkdir -p "$SM2_HOME/state" "$SM2_HOME/data" "$SM2_HOME/config" "$SM2_HOME/projects" "$SM2_HOME/bin"
+printf '# scratch secondmate home AGENTS.md placeholder\n' > "$SM2_HOME/AGENTS.md"
+printf 'e2egrp2\n' > "$SM2_HOME/.fm-secondmate-home"
+printf 'trivial e2e secondmate charter: nothing to do.\n' > "$SM2_HOME/data/charter.md"
+
+FOREIGN_WSID=$(herdr worktree open --workspace "$PRIMARY_WSID" --path "$SM2_HOME" --no-focus --session "$SESSION_MAIN" 2>/dev/null \
+  | jq -r '.result.workspace.workspace_id // empty')
+[ -n "$FOREIGN_WSID" ] || fail "could not open the by-hand workspace the adoption fixture needs"
+herdr workspace rename "$FOREIGN_WSID" captains-own --session "$SESSION_MAIN" >/dev/null 2>&1 \
+  || fail "could not name the by-hand workspace"
+
+SM2_OUT="$TMP_ROOT/sm2.out"; SM2_ERR="$TMP_ROOT/sm2.err"
+FM_SPAWN_NO_GUARD=1 FM_HOME="$PRIMARY_HOME" FM_ROOT_OVERRIDE="$ROOT" \
+  "$ROOT/bin/fm-spawn.sh" e2egrp2 "$SM2_HOME" "sh -c 'echo adopt-sm-ok'" --secondmate --backend herdr \
+  >"$SM2_OUT" 2>"$SM2_ERR"
+rc=$?
+[ "$rc" -eq 0 ] || fail "the adoption-scenario --secondmate spawn failed"$'\n'"--- stdout ---"$'\n'"$(cat "$SM2_OUT")"$'\n'"--- stderr ---"$'\n'"$(cat "$SM2_ERR")"
+[ "$(ws_field "$SESSION_MAIN" "$FOREIGN_WSID" .label)" = "captains-own" ] \
+  || fail "a workspace firstmate did not create must keep its own name, got '$(ws_field "$SESSION_MAIN" "$FOREIGN_WSID" .label)'"
+SM2_PANE=$(grep '^herdr_pane_id=' "$PRIMARY_HOME/state/e2egrp2.meta" | cut -d= -f2-)
+SM2_WSID=$(herdr pane get "$SM2_PANE" --session "$SESSION_MAIN" 2>/dev/null | jq -r '.result.pane.workspace_id // empty')
+[ -n "$SM2_WSID" ] && [ "$SM2_WSID" != "$FOREIGN_WSID" ] \
+  || fail "the secondmate must get its own space rather than taking over the by-hand one"
+[ "$(ws_id_for_label "$SESSION_MAIN" 2ndmate-e2egrp2)" = "$SM2_WSID" ] \
+  || fail "label lookup must still resolve the secondmate's own space in the adoption scenario"
+pass "real herdr E2E: a workspace already open on a home checkout keeps its own name and the home still gets its own labelled space"
 
 cleanup_all
 trap - EXIT

@@ -68,8 +68,10 @@ Membership is stamped when the workspace is created, because a workspace's git i
 Grouping requires a workspace already open on the repository's main checkout.
 Without one, the spawn falls back to an ungrouped workspace rather than letting Herdr invent a parent, whose basename-derived label would collide with the primary home's own label and break workspace lookup.
 An existing ungrouped home workspace is not migrated; it keeps its flat shape until it is recreated.
-When a home workspace is created, Herdr reuses any workspace already open on that exact checkout instead of adding a second one, and applies the home label to it.
-That reuse is keyed on the checkout path rather than on a label, so it cannot repeat the label-collision failure described under default-tab prune safety, but it does mean a manually renamed workspace sitting on a home directory is relabelled rather than duplicated.
+When a home workspace is created, Herdr reuses ANY workspace already open on that exact checkout instead of adding a second one, including one Firstmate never created and one the captain opened by hand.
+Firstmate never renames a workspace it did not create, so the open call carries no label at all and the home label is applied afterwards, only to a workspace that call itself created.
+A reused workspace therefore keeps its own name and acts only as the grouping parent; this home's own Space is then created by the ordinary label-first path and stays ungrouped.
+If the open call succeeds but its response cannot be read, or the home label cannot be applied to a workspace Herdr just created, the spawn fails with a diagnostic naming the workspace rather than creating a second one under the home label, because two workspaces sharing a label make home-space lookup ambiguous.
 
 ## Standalone-clone secondmate ownership
 
