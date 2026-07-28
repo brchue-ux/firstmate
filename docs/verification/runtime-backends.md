@@ -215,13 +215,14 @@ Two Herdr behaviors this depends on were established directly and are not modele
 | An open call can adopt any workspace on that checkout | `herdr worktree open --workspace <parent> --path <home>` with no `--label`, against a checkout already carrying a hand-named workspace | Reported `already_open: true` for that workspace, which kept its own name; Firstmate labelled only workspaces the call itself created, with `herdr workspace rename <id> <label>` afterwards. |
 | Pane id is positional | `herdr pane report-metadata <pane> --source <s> --token owner=<v>` | Read back as `.result.pane.tokens.owner`; the pane id must precede the options despite the `--help` synopsis showing it last. |
 
-The worktree-backed path is never gated on a protocol or version number, and no failure it can hit fails a spawn; each one degrades to an ungrouped home workspace.
+The worktree-backed path is never gated on a protocol or version number, and no failure it can hit fails a spawn; each one degrades to an existing or ungrouped home workspace.
 
 `worktree open` is never passed `--label`, so Firstmate itself names a workspace only through the explicit `workspace rename`, and only one the call reported creating.
 That alone does not make the fallback safe for the PRIMARY home.
 Herdr's `fallback_label_from_cwd` (`src/workspace/git/discovery.rs:31-43`) returns the checkout directory's basename, and `WorkspaceInfo.label` is the custom name if set and otherwise that basename (`src/app/creation.rs:496`, `src/workspace.rs:1123-1143`).
 The primary home lives at `/home/bchue/projects/firstmate`, whose basename is literally `firstmate`, identical to the label `fm_backend_herdr_workspace_label` returns for the primary; a secondmate home's basename is unrelated to its `2ndmate-<id>` label and cannot collide.
 So a failed attempt can strand a workspace already reading as the primary's label, and the adapter re-runs its label lookup after any failed attempt and adopts a match before creating anything.
+It also waits for that re-find before reporting the failure, so a warning never suggests renaming or deleting a workspace the re-find has just adopted as the live home Space.
 
 A `worktree open` response missing `already_open` is unreachable across the supported range, established by reading the Herdr source rather than by running a command.
 Commit 9817820 ("feat: add worktree cli and socket api", v0.6.2~10, protocol 10) added the worktree CLI subcommands, the `WorktreeOpened` response variant and the `already_open` field in one commit.

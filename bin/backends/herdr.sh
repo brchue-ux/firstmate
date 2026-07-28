@@ -1009,13 +1009,15 @@ fm_backend_herdr_worktree_parent_workspace() {  # <session> <cwd>
 #   - The CLI call itself failed, including a client too old to have the
 #     worktree subcommands at all (it exits non-zero on an unknown subcommand).
 #   - The response carried no readable workspace id, or no readable
-#     already_open flag. Both are reported, since a capable client silently
-#     losing grouping is worth a line.
+#     already_open flag.
 #   - herdr ADOPTED a workspace already open at <cwd> (see below).
 #   - The rename failed, leaving a workspace firstmate created but could not
-#     name. That one is reported by id and label, because it stays at that
-#     checkout as the repo-parent row and this home stays ungrouped until an
-#     operator renames or deletes it.
+#     name.
+#
+# The last two set FM_BACKEND_HERDR_WT_DEGRADE_REASON / _WS rather than
+# reporting here, because what the failure actually cost is not known yet:
+# fm_backend_herdr_report_worktree_degrade says it once the caller's re-find
+# has resolved.
 #
 # already_open discipline: herdr reuses an existing workspace whose checkout is
 # <cwd> instead of creating a second one, and reports already_open=true. That
@@ -1048,17 +1050,49 @@ fm_backend_herdr_workspace_create_worktree_backed() {  # <session> <cwd> <label>
   already=$(printf '%s' "$out" \
     | jq -r 'if (.result.already_open | type) == "boolean" then (.result.already_open | tostring) else "unknown" end' 2>/dev/null)
   if [ -z "$wsid" ] || [ "$already" = unknown ]; then
-    echo "warning: herdr worktree open exited 0 for $cwd but reported no readable workspace id and already_open flag; firstmate named nothing '$label' itself and this home's space stays ungrouped" >&2
+    FM_BACKEND_HERDR_WT_DEGRADE_REASON=unreadable
     return 1
   fi
   [ "$already" = false ] || return 1
   fm_backend_herdr_cli "$session" workspace rename "$wsid" "$label" >/dev/null 2>&1 || {
-    echo "warning: herdr created workspace $wsid at $cwd but it could not be renamed to '$label'; it keeps its herdr-derived label and stays the repo-parent row at that checkout, and this home's space stays ungrouped until $wsid is renamed to '$label' or deleted" >&2
+    FM_BACKEND_HERDR_WT_DEGRADE_REASON=rename-failed
+    FM_BACKEND_HERDR_WT_DEGRADE_WS=$wsid
     return 1
   }
   FM_BACKEND_HERDR_WS_ID=$wsid
   FM_BACKEND_HERDR_WS_SEEDED_TAB_ID=$(printf '%s' "$out" | jq -r '.result.tab.tab_id // empty' 2>/dev/null)
   return 0
+}
+
+# fm_backend_herdr_report_worktree_degrade: report what a failed worktree-backed
+# attempt actually cost, AFTER fm_backend_herdr_workspace_ensure's re-find has
+# resolved. Which outcome a failure produces is not knowable at the point it
+# happens: the same rename failure either leaves a stranded workspace behind,
+# or - when herdr's own basename-derived name already reads as this home's
+# label - leaves the workspace the re-find then ADOPTS as this home's Space.
+# Advice written before that resolves would tell an operator to rename or
+# delete the live home Space, which is why nothing is emitted until here.
+# <adopted> is the workspace the re-find matched, empty when it matched none.
+fm_backend_herdr_report_worktree_degrade() {  # <cwd> <label> <adopted_workspace_id>
+  local cwd=$1 label=$2 adopted=$3 stranded=${FM_BACKEND_HERDR_WT_DEGRADE_WS:-}
+  case ${FM_BACKEND_HERDR_WT_DEGRADE_REASON:-} in
+    unreadable)
+      if [ -n "$adopted" ]; then
+        echo "warning: herdr worktree open exited 0 for $cwd but reported no readable workspace id and already_open flag; firstmate named nothing itself, and the existing workspace labelled '$label' ($adopted) is this home's space" >&2
+      else
+        echo "warning: herdr worktree open exited 0 for $cwd but reported no readable workspace id and already_open flag; nothing was named '$label' and this home's space falls back to the flat, ungrouped create" >&2
+      fi
+      ;;
+    rename-failed)
+      if [ -n "$adopted" ] && [ "$adopted" = "$stranded" ]; then
+        echo "warning: herdr created workspace $adopted at $cwd but firstmate could not apply the label '$label' to it; herdr's own name for it already reads as '$label', so it IS this home's space - worktree-backed, grouped and in use. No action needed." >&2
+      elif [ -n "$adopted" ]; then
+        echo "warning: herdr created workspace $stranded at $cwd but it could not be renamed to '$label'; this home's space is $adopted instead, and $stranded is left over at that checkout under herdr's own name - rename or delete $stranded, never $adopted" >&2
+      else
+        echo "warning: herdr created workspace $stranded at $cwd but it could not be renamed to '$label'; it keeps herdr's own name and stays the repo-parent row at that checkout, and this home's space falls back to the flat, ungrouped create until $stranded is renamed to '$label' or deleted" >&2
+      fi
+      ;;
+  esac
 }
 
 # fm_backend_herdr_workspace_ensure: this HOME's persistent workspace inside
@@ -1105,6 +1139,8 @@ fm_backend_herdr_workspace_ensure() {  # <session> <cwd>
   local session=$1 cwd=$2 wsid out label
   FM_BACKEND_HERDR_WS_ID=""
   FM_BACKEND_HERDR_WS_SEEDED_TAB_ID=""
+  FM_BACKEND_HERDR_WT_DEGRADE_REASON=""
+  FM_BACKEND_HERDR_WT_DEGRADE_WS=""
   wsid=$(fm_backend_herdr_workspace_find "$session")
   if [ -n "$wsid" ]; then
     FM_BACKEND_HERDR_WS_ID=$wsid
@@ -1129,6 +1165,7 @@ fm_backend_herdr_workspace_ensure() {  # <session> <cwd>
   # FM_BACKEND_HERDR_WS_SEEDED_TAB_ID stays empty and none of its tabs can
   # enter the destructive default-tab prune path.
   wsid=$(fm_backend_herdr_workspace_find "$session")
+  fm_backend_herdr_report_worktree_degrade "$cwd" "$label" "$wsid"
   if [ -n "$wsid" ]; then
     FM_BACKEND_HERDR_WS_ID=$wsid
     printf '%s' "$wsid"

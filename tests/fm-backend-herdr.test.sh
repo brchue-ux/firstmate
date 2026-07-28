@@ -514,6 +514,8 @@ test_worktree_backed_rename_failure_falls_back_with_a_naming_diagnostic() {
   assert_contains "$err" 'w1' "the warning must name the workspace firstmate created but could not name, so an operator can find it"
   assert_contains "$err" 'firstmate' "the warning must name the label that never got applied"
   assert_contains "$err" 'ungrouped' "the warning must say this home stays ungrouped until that workspace is renamed or deleted"
+  assert_contains "$err" 'deleted' \
+    "nothing was adopted here, so the stranded workspace really is an orphan and the rename-or-delete advice belongs"
   pass "fm_backend_herdr_workspace_ensure: a failed rename falls back to the flat create and names the workspace it stranded"
 }
 
@@ -534,6 +536,15 @@ assert_adopted_stranded_home_workspace() {  # <dir> <result> <what>
     || fail "$what must ADOPT the stranded workspace with no seeded tab id, keeping its tabs out of the prune path, got '${result#*|}'"
   assert_not_contains "$(cat "$dir/log")" $'\x1f''workspace'$'\x1f''create' \
     "$what must not mint a SECOND workspace labelled 'firstmate' beside the stranded one - that is exactly what makes home-space lookup non-deterministic"
+  # Safety: w1 is now the LIVE home space. A diagnostic that told an operator
+  # to delete or rename it would destroy exactly the workspace firstmate is
+  # using, so no adopted path may carry that advice.
+  assert_not_contains "$(cat "$dir/err")" 'delete' \
+    "$what must never advise deleting the workspace firstmate just adopted as this home's space"
+  assert_not_contains "$(cat "$dir/err")" 'rename or ' \
+    "$what must never advise renaming the workspace firstmate just adopted as this home's space"
+  assert_not_contains "$(cat "$dir/err")" 'ungrouped' \
+    "$what adopted a worktree-backed workspace, so claiming this home stays ungrouped is false"
 }
 
 test_rename_failure_adopts_a_stranded_colliding_home_workspace() {
@@ -543,6 +554,8 @@ test_rename_failure_adopts_a_stranded_colliding_home_workspace() {
     '{"result":{"already_open":false,"workspace":{"workspace_id":"w1","label":"firstmate"},"tab":{"tab_id":"w1:t9"}}}' 1 \
     '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate"}]}}')
   assert_adopted_stranded_home_workspace "$dir" "$result" "a rename that failed over a workspace herdr had already named 'firstmate'"
+  assert_contains "$(cat "$dir/err")" 'No action needed' \
+    "the adopted case must say the outcome plainly: the label never landed, but that workspace IS the home space and needs nothing done to it"
   pass "fm_backend_herdr_workspace_ensure: a failed rename over a colliding basename adopts the stranded workspace instead of duplicating the home label"
 }
 
