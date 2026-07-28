@@ -491,7 +491,7 @@ test_worktree_backed_unreadable_response_falls_back_safely() {
 }
 
 test_worktree_backed_missing_already_open_falls_back_safely() {
-  local dir result
+  local dir result err
   dir="$TMP_ROOT/wt-no-flag"
   # A workspace id but no already_open flag: unreachable on any client past the
   # enforced protocol floor, and read as "reused" anyway, which is the
@@ -501,6 +501,13 @@ test_worktree_backed_missing_already_open_falls_back_safely() {
   assert_degraded_to_flat_create "$dir" "$result" "a worktree open response with no already_open flag"
   assert_not_contains "$(cat "$dir/log")" $'\x1f''workspace'$'\x1f''rename' \
     "with no already_open flag the workspace must be treated as one firstmate did not create, so its name is left alone"
+  err=$(cat "$dir/err")
+  assert_contains "$err" 'w1' \
+    "the id WAS readable here, so the warning must name the workspace left at that checkout instead of claiming herdr reported none"
+  assert_not_contains "$err" 'no readable workspace id' \
+    "the degrade condition is an OR: with a readable id the warning must say the already_open flag was the unreadable half"
+  assert_not_contains "$err" 'delete' \
+    "firstmate cannot tell whether it created that workspace, so it must never advise deleting it"
   pass "fm_backend_herdr_workspace_ensure: a missing already_open flag is read as reused, falling back to the flat create without renaming"
 }
 

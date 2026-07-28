@@ -1014,10 +1014,14 @@ fm_backend_herdr_worktree_parent_workspace() {  # <session> <cwd>
 #   - The rename failed, leaving a workspace firstmate created but could not
 #     name.
 #
-# The last two set FM_BACKEND_HERDR_WT_DEGRADE_REASON / _WS rather than
-# reporting here, because what the failure actually cost is not known yet:
+# Of those, the unreadable response and the failed rename set
+# FM_BACKEND_HERDR_WT_DEGRADE_REASON ("unreadable" / "rename-failed") and, when
+# a workspace id was readable, _WS, rather than reporting here, because what
+# the failure actually cost is not known yet:
 # fm_backend_herdr_report_worktree_degrade says it once the caller's re-find
-# has resolved.
+# has resolved. An ADOPTION sets no reason and reports nothing: it is the
+# routine, accepted outcome of never relabelling a workspace firstmate did not
+# create, not a fault, and warning on it would fire on ordinary spawns.
 #
 # already_open discipline: herdr reuses an existing workspace whose checkout is
 # <cwd> instead of creating a second one, and reports already_open=true. That
@@ -1051,6 +1055,7 @@ fm_backend_herdr_workspace_create_worktree_backed() {  # <session> <cwd> <label>
     | jq -r 'if (.result.already_open | type) == "boolean" then (.result.already_open | tostring) else "unknown" end' 2>/dev/null)
   if [ -z "$wsid" ] || [ "$already" = unknown ]; then
     FM_BACKEND_HERDR_WT_DEGRADE_REASON=unreadable
+    FM_BACKEND_HERDR_WT_DEGRADE_WS=$wsid
     return 1
   fi
   [ "$already" = false ] || return 1
@@ -1074,13 +1079,24 @@ fm_backend_herdr_workspace_create_worktree_backed() {  # <session> <cwd> <label>
 # delete the live home Space, which is why nothing is emitted until here.
 # <adopted> is the workspace the re-find matched, empty when it matched none.
 fm_backend_herdr_report_worktree_degrade() {  # <cwd> <label> <adopted_workspace_id>
-  local cwd=$1 label=$2 adopted=$3 stranded=${FM_BACKEND_HERDR_WT_DEGRADE_WS:-}
+  local cwd=$1 label=$2 adopted=$3 stranded=${FM_BACKEND_HERDR_WT_DEGRADE_WS:-} saw
   case ${FM_BACKEND_HERDR_WT_DEGRADE_REASON:-} in
     unreadable)
-      if [ -n "$adopted" ]; then
-        echo "warning: herdr worktree open exited 0 for $cwd but reported no readable workspace id and already_open flag; firstmate named nothing itself, and the existing workspace labelled '$label' ($adopted) is this home's space" >&2
+      # The condition that got here is an OR, so say which half failed. With a
+      # readable id, firstmate still could not tell whether that workspace is
+      # one this call created or one it merely reused, so the id is named but
+      # never carries rename-or-delete advice.
+      if [ -n "$stranded" ]; then
+        saw="reported workspace $stranded with no readable already_open flag, so firstmate could not tell whether it created that workspace and left its name alone"
       else
-        echo "warning: herdr worktree open exited 0 for $cwd but reported no readable workspace id and already_open flag; nothing was named '$label' and this home's space falls back to the flat, ungrouped create" >&2
+        saw="reported no readable workspace id"
+      fi
+      if [ -n "$adopted" ] && [ "$adopted" = "$stranded" ]; then
+        echo "warning: herdr worktree open exited 0 for $cwd but $saw; herdr's own name for it already reads as '$label', so it IS this home's space - worktree-backed, grouped and in use. No action needed." >&2
+      elif [ -n "$adopted" ]; then
+        echo "warning: herdr worktree open exited 0 for $cwd but $saw; firstmate named nothing itself, and the existing workspace labelled '$label' ($adopted) is this home's space" >&2
+      else
+        echo "warning: herdr worktree open exited 0 for $cwd but $saw; nothing was named '$label' and this home's space falls back to the flat, ungrouped create" >&2
       fi
       ;;
     rename-failed)
