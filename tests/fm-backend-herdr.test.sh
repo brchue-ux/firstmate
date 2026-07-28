@@ -282,6 +282,150 @@ test_cli_helper_sets_env_and_appends_trailing_session_flag() {
   pass "fm_backend_herdr_cli: sets HERDR_SESSION AND appends a trailing --session flag on every call"
 }
 
+# --- worktree-backed home spaces ---------------------------------------------
+# These cover the CALL SHAPE the adapter must emit; that the resulting space
+# actually carries worktree membership, and that herdr's sidebar then groups
+# it, is a property only the real binary has and is asserted end to end in
+# tests/fm-backend-herdr-space-grouping-e2e.test.sh.
+
+# make_worktree_fixture: a real main checkout plus a real linked worktree of
+# it, since fm_backend_herdr_worktree_kind asks git itself, not a stub.
+make_worktree_fixture() {  # <dir> -> echoes "<main-checkout> <linked-worktree>"
+  local dir=$1
+  mkdir -p "$dir/main"
+  git -C "$dir/main" init -q
+  printf 'x\n' > "$dir/main/f"
+  git -C "$dir/main" add f
+  git -C "$dir/main" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm initial
+  git -C "$dir/main" worktree add -q -b wt "$dir/linked"
+  printf '%s %s\n' "$dir/main" "$dir/linked"
+}
+
+test_worktree_kind_classifies_linked_main_and_non_repo() {
+  local dir main linked out
+  dir="$TMP_ROOT/wt-kind"; mkdir -p "$dir/plain"
+  read -r main linked <<EOF
+$(make_worktree_fixture "$dir")
+EOF
+  out=$( bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_worktree_kind "$1"' "$ROOT" "$main" )
+  [ "$out" = main ] || fail "a repository's main checkout should classify as 'main', got '$out'"
+  out=$( bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_worktree_kind "$1"' "$ROOT" "$linked" )
+  [ "$out" = linked ] || fail "a git worktree checkout should classify as 'linked', got '$out'"
+  if bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_worktree_kind "$1"' "$ROOT" "$dir/plain" >/dev/null 2>&1; then
+    fail "a directory outside any git work tree must not classify as a worktree kind"
+  fi
+  pass "fm_backend_herdr_worktree_kind: distinguishes a linked worktree from a main checkout and refuses a non-repository path"
+}
+
+test_workspace_ensure_opens_main_checkout_as_repo_parent() {
+  local dir log resp fb main linked out
+  dir="$TMP_ROOT/wt-parent"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  read -r main linked <<EOF
+$(make_worktree_fixture "$dir")
+EOF
+  : "$linked"
+  printf '{"result":{"workspaces":[]}}\n' > "$resp/1.out"
+  printf '{"result":{"already_open":false,"workspace":{"workspace_id":"w1","label":"firstmate"},"tab":{"tab_id":"w1:t9"}}}\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" HERDR_SESSION=fmtest \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_ensure fmtest "$1"' "$ROOT" "$main" )
+  [ "$out" = w1 ] || fail "workspace_ensure should echo the opened workspace id, got '$out'"
+  assert_contains "$(cat "$log")" $'\x1f''worktree'$'\x1f''open'$'\x1f''--cwd'$'\x1f'"$main"$'\x1f''--path'$'\x1f'"$main"$'\x1f''--label'$'\x1f''firstmate'$'\x1f''--no-focus' \
+    "a main-checkout home must be opened as its own repo parent, so its worktree membership survives the seeded-tab prune"
+  assert_not_contains "$(cat "$log")" $'\x1f''workspace'$'\x1f''create' \
+    "a main-checkout home must not fall back to the plain create that leaves worktree null"
+  pass "fm_backend_herdr_workspace_ensure: opens a main-checkout home as its own repo parent, not through a plain workspace create"
+}
+
+test_workspace_ensure_opens_linked_home_against_resolved_parent() {
+  local dir log resp fb main linked out
+  dir="$TMP_ROOT/wt-child"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  read -r main linked <<EOF
+$(make_worktree_fixture "$dir")
+EOF
+  : "$main"
+  printf '{"result":{"workspaces":[]}}\n' > "$resp/1.out"
+  printf '{"result":{"source":{"source_workspace_id":"w1"}}}\n' > "$resp/2.out"
+  printf '{"result":{"already_open":false,"workspace":{"workspace_id":"w7","label":"2ndmate-sm1"},"tab":{"tab_id":"w7:t1"}}}\n' > "$resp/3.out"
+  fb=$(make_herdr_fakebin "$dir")
+  printf 'sm1\n' > "$dir/.fm-secondmate-home"
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" HERDR_SESSION=fmtest FM_HOME="$dir" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_ensure fmtest "$1"' "$ROOT" "$linked" )
+  [ "$out" = w7 ] || fail "workspace_ensure should echo the opened workspace id, got '$out'"
+  assert_contains "$(cat "$log")" $'\x1f''worktree'$'\x1f''list'$'\x1f''--cwd'$'\x1f'"$linked" \
+    "a linked home must resolve its repo parent first, read-only"
+  assert_contains "$(cat "$log")" $'\x1f''worktree'$'\x1f''open'$'\x1f''--workspace'$'\x1f''w1'$'\x1f''--path'$'\x1f'"$linked"$'\x1f''--label'$'\x1f''2ndmate-sm1'$'\x1f''--no-focus' \
+    "a linked home must be opened against the ALREADY-RESOLVED parent id, which is what makes inventing a stray parent impossible"
+  assert_not_contains "$(cat "$log")" $'\x1f''workspace'$'\x1f''create' "the linked path should not fall back to a plain create here"
+  pass "fm_backend_herdr_workspace_ensure: opens a linked-worktree home against its already-resolved repo parent"
+}
+
+test_workspace_ensure_falls_back_flat_without_a_repo_parent() {
+  local dir log resp fb main linked out
+  dir="$TMP_ROOT/wt-noparent"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  read -r main linked <<EOF
+$(make_worktree_fixture "$dir")
+EOF
+  : "$main"
+  printf '{"result":{"workspaces":[]}}\n' > "$resp/1.out"
+  # No workspace is open on the repo's main checkout: herdr reports no source
+  # workspace, which is exactly when passing --cwd would make it invent one.
+  printf '{"result":{"source":{"repo_root":"%s"}}}\n' "$main" > "$resp/2.out"
+  printf '{"result":{"workspace":{"workspace_id":"w4","label":"firstmate"},"tab":{"tab_id":"w4:t1"}}}\n' > "$resp/3.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" HERDR_SESSION=fmtest \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_ensure fmtest "$1"' "$ROOT" "$linked" )
+  [ "$out" = w4 ] || fail "workspace_ensure should still produce a workspace on the flat fallback, got '$out'"
+  assert_not_contains "$(cat "$log")" $'\x1f''worktree'$'\x1f''open' \
+    "with no repo parent resolved, the adapter must never issue a worktree open that could invent a stray parent workspace"
+  assert_contains "$(cat "$log")" $'\x1f''workspace'$'\x1f''create'$'\x1f''--cwd'$'\x1f'"$linked" \
+    "with no repo parent resolved, the adapter must fall back to the plain flat create"
+  pass "fm_backend_herdr_workspace_ensure: falls back to the flat create when no workspace is open on the repo parent, never inventing one"
+}
+
+test_worktree_backed_adoption_reports_no_seeded_tab() {
+  local dir log resp fb main linked out
+  dir="$TMP_ROOT/wt-adopt"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  read -r main linked <<EOF
+$(make_worktree_fixture "$dir")
+EOF
+  : "$linked"
+  printf '{"result":{"workspaces":[]}}\n' > "$resp/1.out"
+  # already_open: herdr reused a workspace this call did not create, and the
+  # tab it reports is that workspace's existing active tab, not a fresh seed.
+  printf '{"result":{"already_open":true,"workspace":{"workspace_id":"w2","label":"firstmate"},"tab":{"tab_id":"w2:t5"}}}\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" HERDR_SESSION=fmtest \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_ensure fmtest "$1" >/dev/null; printf "%s|%s" "$FM_BACKEND_HERDR_WS_ID" "$FM_BACKEND_HERDR_WS_SEEDED_TAB_ID"' "$ROOT" "$main" )
+  [ "$out" = 'w2|' ] || fail "an adopted (already_open) workspace must report its id with an EMPTY seeded tab id, so its tabs are never prune candidates, got '$out'"
+  pass "fm_backend_herdr_workspace_ensure: a worktree-backed ADOPTION reports no seeded default tab, keeping an existing workspace's tabs out of the prune path"
+}
+
+test_report_owner_token_stamps_the_calling_mate() {
+  local dir log resp fb
+  dir="$TMP_ROOT/owner-token"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" HERDR_SESSION=fmtest \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_report_owner_token fmtest w1:p3 2ndmate-sm1' "$ROOT"
+  assert_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''report-metadata'$'\x1f''w1:p3'$'\x1f''--source'$'\x1f''firstmate-spawn'$'\x1f''--token'$'\x1f''owner=2ndmate-sm1' \
+    "the owner token must be reported for the exact pane, under firstmate's own metadata source, with the pane id FIRST (the real CLI reads it as a positional)"
+  assert_not_contains "$(cat "$log")" $'\x1f''--ttl-ms' \
+    "the owner token must not expire mid-task"
+  pass "fm_backend_herdr_report_owner_token: stamps owner=<calling mate> on the exact pane with no expiry"
+}
+
+test_report_owner_token_ignores_an_empty_target_or_owner() {
+  local dir log resp fb
+  dir="$TMP_ROOT/owner-token-empty"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" HERDR_SESSION=fmtest \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_report_owner_token fmtest "" firstmate; fm_backend_herdr_report_owner_token fmtest w1:p3 ""' "$ROOT" \
+    || fail "reporting an owner token must never fail its caller"
+  assert_not_contains "$(cat "$log")" $'\x1f''report-metadata' \
+    "an empty pane or owner must issue no metadata call at all"
+  pass "fm_backend_herdr_report_owner_token: issues nothing, and still succeeds, for an empty pane or owner"
+}
+
 # --- container_ensure / create_task ------------------------------------------
 
 test_container_ensure_starts_server_and_workspace() {
@@ -2830,6 +2974,13 @@ test_workspace_label_secondmate_marker_trims_whitespace
 test_workspace_label_empty_marker_falls_back_to_primary
 test_workspace_label_different_secondmates_get_different_labels
 test_cli_helper_sets_env_and_appends_trailing_session_flag
+test_worktree_kind_classifies_linked_main_and_non_repo
+test_workspace_ensure_opens_main_checkout_as_repo_parent
+test_workspace_ensure_opens_linked_home_against_resolved_parent
+test_workspace_ensure_falls_back_flat_without_a_repo_parent
+test_worktree_backed_adoption_reports_no_seeded_tab
+test_report_owner_token_stamps_the_calling_mate
+test_report_owner_token_ignores_an_empty_target_or_owner
 test_container_ensure_starts_server_and_workspace
 test_container_ensure_reuses_existing_workspace
 test_container_ensure_creates_with_no_focus_flag

@@ -53,6 +53,24 @@ Existing task operations use recorded endpoint ids and do not move a live task w
 The per-home workspace is reused while it has task tabs.
 Closing its last tab can remove the workspace, and the next spawn recreates it.
 
+## Home workspace grouping
+
+A home's workspace is anchored at the home directory itself, not at whichever project its first task happened to use.
+Firstmate opens it through Herdr's worktree path so the workspace carries worktree membership, which is the only thing Herdr's sidebar grouping reads.
+A workspace created by a plain `workspace create` carries none regardless of its path and can never group.
+
+A home that is a repository's main checkout is opened as its own repo parent and renders un-indented.
+A home that is a linked worktree of that repository is opened against the already-resolved parent workspace and renders indented beneath it.
+Every secondmate home is a linked worktree of the Firstmate repository, so registered secondmates group under the primary home.
+
+Membership is stamped when the workspace is created, because a workspace's git identity is otherwise derived from its live panes and the seeded default tab is pruned once the first task tab exists.
+
+Grouping requires a workspace already open on the repository's main checkout.
+Without one, the spawn falls back to an ungrouped workspace rather than letting Herdr invent a parent, whose basename-derived label would collide with the primary home's own label and break workspace lookup.
+An existing ungrouped home workspace is not migrated; it keeps its flat shape until it is recreated.
+When a home workspace is created, Herdr reuses any workspace already open on that exact checkout instead of adding a second one, and applies the home label to it.
+That reuse is keyed on the checkout path rather than on a label, so it cannot repeat the label-collision failure described under default-tab prune safety, but it does mean a manually renamed workspace sitting on a home directory is relabelled rather than duplicated.
+
 ## Standalone-clone secondmate ownership
 
 Herdr groups workspaces by the repository their checkout belongs to, so a secondmate home that is a linked worktree of the primary's repo is already shown under the primary with no help from Firstmate.
@@ -60,6 +78,13 @@ A secondmate home created as its own standalone clone shares no repository with 
 Every `--secondmate` spawn on this backend therefore publishes the durable workspace token `owner=<the spawning home's own workspace label>` for a standalone-clone home only, so the placement converges on every launch and respawn rather than needing a one-time manual fix.
 A linked-worktree home receives no publish of any kind.
 `bin/fm-herdr-owner-publish.sh` owns that test, the token, and why it deliberately carries no expiry.
+
+## Worker owner token
+
+Every crewmate and scout pane is stamped with an `owner` metadata token naming the mate that launched it, under Firstmate's own metadata source and with no expiry.
+Firstmate publishes it at spawn because a worker's environment carries no home identity to derive it from.
+A mate's own pane is never stamped, so the token's presence distinguishes workers from mates for an agents-panel filter.
+The token is display-only and never authoritative; a failure to publish it does not fail a spawn.
 
 ## Optional presentation spaces
 
@@ -282,6 +307,7 @@ tests/fm-backend-herdr-smoke.test.sh
 tests/fm-backend-herdr-prune-safety-e2e.test.sh
 tests/fm-backend-herdr-respawn-idem-e2e.test.sh
 tests/fm-backend-herdr-workspace-per-home-e2e.test.sh
+tests/fm-backend-herdr-space-grouping-e2e.test.sh
 tests/fm-backend-herdr-presentation-e2e.test.sh
 tests/fm-backend-herdr-eventwait-smoke.test.sh
 tests/fm-herdr-session-cleanup.test.sh

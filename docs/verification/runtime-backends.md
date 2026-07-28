@@ -184,6 +184,35 @@ HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
 
 Observed guarantee: the primary and secondmate used distinct home workspaces, a child launched by the secondmate stayed in that secondmate workspace, list-live remained home-scoped, and exact cleanup did not affect sibling homes.
 
+Home workspace grouping and the worker owner token are owned by:
+
+```sh
+HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
+  tests/fm-backend-herdr-space-grouping-e2e.test.sh
+```
+
+The suite ran on 2026-07-28 against Herdr 0.7.5:
+
+```text
+ok - real herdr E2E: with no space open on the repo parent, a secondmate spawn falls back flat and invents no stray parent workspace
+ok - real herdr E2E: the primary home's space opens anchored at the home itself
+ok - real herdr E2E: a secondmate home gets a worktree-backed space naming the primary home as its repo parent
+ok - real herdr E2E: the primary and secondmate spaces share one repo key with exactly one un-indented parent - herdr's grouping precondition
+ok - real herdr E2E: space lookup by label still resolves both homes to exactly the right space
+ok - real herdr E2E: a worker pane is stamped with its calling mate's moniker and a secondmate pane is left unstamped
+ok - real herdr E2E: a worker spawned by a secondmate is stamped with that secondmate's moniker and lands in its space
+```
+
+Two Herdr behaviors this depends on were established directly and are not modeled by any fake:
+
+| Behavior | Command shape | Result |
+| --- | --- | --- |
+| A plain create never groups | `herdr workspace create --cwd <checkout> --label <l>` | The workspace reported `worktree: null` for both a main checkout and a linked worktree. |
+| A child must originate from the parent | `herdr worktree open --workspace <child> --path <child>` | Refused with `linked_worktree_source`, "New and open worktree actions start from the repo parent workspace." |
+| A parent probe is read-only | `herdr worktree open --workspace <parent> --path <linked>` after `herdr worktree list --cwd <path>` | The list call left an empty session's workspace list untouched, and the open call produced `is_linked_worktree: true` under the parent's repo root. |
+| Membership must be stamped at creation | plain create at a repo root, then task tab, then seeded-tab prune | The workspace stopped resolving as the repo parent once its seeded tab was pruned; a workspace opened through the worktree path kept its membership. |
+| Pane id is positional | `herdr pane report-metadata <pane> --source <s> --token owner=<v>` | Read back as `.result.pane.tokens.owner`; the pane id must precede the options despite the `--help` synopsis showing it last. |
+
 The complete projection suite ran on 2026-07-21 against Herdr 0.7.4 protocol 16:
 
 ```sh
