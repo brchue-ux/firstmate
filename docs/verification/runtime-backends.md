@@ -204,7 +204,7 @@ ok - real herdr E2E: a worker spawned by a secondmate is stamped with that secon
 ok - real herdr E2E: a workspace already open on a home checkout keeps its own name and the home still gets its own labelled space
 ```
 
-Two Herdr behaviors this depends on were established directly and are not modeled by any fake:
+The Herdr behaviors this depends on were established directly against the real binary and are not modeled by any fake:
 
 | Behavior | Command shape | Result |
 | --- | --- | --- |
@@ -220,7 +220,7 @@ The worktree-backed path is never gated on a protocol or version number, and no 
 `worktree open` is never passed `--label`, so Firstmate itself names a workspace only through the explicit `workspace rename`, and only one the call reported creating.
 That alone does not make the fallback safe for the PRIMARY home.
 Herdr's `fallback_label_from_cwd` (`src/workspace/git/discovery.rs:31-43`) returns the checkout directory's basename, and `WorkspaceInfo.label` is the custom name if set and otherwise that basename (`src/app/creation.rs:496`, `src/workspace.rs:1123-1143`).
-The primary home lives at `/home/bchue/projects/firstmate`, whose basename is literally `firstmate`, identical to the label `fm_backend_herdr_workspace_label` returns for the primary; a secondmate home's basename is unrelated to its `2ndmate-<id>` label and cannot collide.
+A primary home is a clone of this repository, so its checkout directory is normally named `firstmate`, identical to the label `fm_backend_herdr_workspace_label` returns for the primary; a secondmate home's basename is unrelated to its `2ndmate-<id>` label and cannot collide.
 So a failed attempt can strand a workspace already reading as the primary's label, and the adapter re-runs its label lookup after any failed attempt and adopts a match before creating anything.
 It also waits for that re-find before reporting the failure, so a warning never suggests renaming or deleting a workspace the re-find has just adopted as the live home Space.
 

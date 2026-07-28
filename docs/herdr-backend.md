@@ -65,7 +65,8 @@ Every secondmate home is a linked worktree of the Firstmate repository, so regis
 
 Membership is stamped when the workspace is created, because a workspace's git identity is otherwise derived from its live panes and the seeded default tab is pruned once the first task tab exists.
 
-Grouping requires a workspace already open on the repository's main checkout.
+A home that is itself a main checkout is its own parent and needs nothing pre-existing.
+A linked-worktree home instead requires a workspace already open on the repository's main checkout.
 Without one, the spawn falls back to an ungrouped workspace rather than letting Herdr invent a parent, whose basename-derived label would collide with the primary home's own label and break workspace lookup.
 An existing ungrouped home workspace is not migrated; it keeps its flat shape until it is recreated.
 When a home workspace is created, Herdr reuses ANY workspace already open on that exact checkout instead of adding a second one, including one Firstmate never created and one the captain opened by hand.
@@ -175,8 +176,8 @@ Operational compromises:
 
 ## Default-tab prune safety
 
-`herdr workspace create` seeds one default tab.
-Firstmate prunes it only after a real task tab exists and only when the same create response supplied the seeded tab id.
+Both `herdr workspace create` and the worktree-backed `herdr worktree open` seed one default tab.
+Firstmate prunes it only after a real task tab exists and only when the same creating response supplied the seeded tab id.
 An adopted workspace never supplies that id and can never enter the prune path, regardless of labels or tab count.
 Immediately before close, Firstmate rechecks the exact tab, expected seed label, and native agent state.
 A working seed pane is never closed.
