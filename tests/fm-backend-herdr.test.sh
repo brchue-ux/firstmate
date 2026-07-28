@@ -388,7 +388,10 @@ EOF
   # No workspace is open on the repo's main checkout: herdr reports no source
   # workspace, which is exactly when passing --cwd would make it invent one.
   printf '{"result":{"source":{"repo_root":"%s"}}}\n' "$main" > "$resp/2.out"
-  printf '{"result":{"workspace":{"workspace_id":"w4","label":"firstmate"},"tab":{"tab_id":"w4:t1"}}}\n' > "$resp/3.out"
+  # The re-find after a failed attempt: nothing was stranded here, since no
+  # worktree open ever ran.
+  printf '{"result":{"workspaces":[]}}\n' > "$resp/3.out"
+  printf '{"result":{"workspace":{"workspace_id":"w4","label":"firstmate"},"tab":{"tab_id":"w4:t1"}}}\n' > "$resp/4.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" HERDR_SESSION=fmtest \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_ensure fmtest "$1"' "$ROOT" "$linked" )
@@ -412,7 +415,10 @@ EOF
   # reachable set is ANY workspace open on that checkout, including one the
   # captain opened by hand, so it keeps its own label and its own tabs.
   printf '{"result":{"already_open":true,"workspace":{"workspace_id":"w2","label":"captains-own"},"tab":{"tab_id":"w2:t5"}}}\n' > "$resp/2.out"
-  printf '{"result":{"workspace":{"workspace_id":"w3","label":"firstmate"},"tab":{"tab_id":"w3:t1"}}}\n' > "$resp/3.out"
+  # The re-find after the failed attempt still sees only that foreign name, so
+  # it matches nothing and this home falls through to its own create.
+  printf '{"result":{"workspaces":[{"workspace_id":"w2","label":"captains-own"}]}}\n' > "$resp/3.out"
+  printf '{"result":{"workspace":{"workspace_id":"w3","label":"firstmate"},"tab":{"tab_id":"w3:t1"}}}\n' > "$resp/4.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" HERDR_SESSION=fmtest \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_ensure fmtest "$1" >/dev/null; printf "%s|%s" "$FM_BACKEND_HERDR_WS_ID" "$FM_BACKEND_HERDR_WS_SEEDED_TAB_ID"' "$ROOT" "$main" )
@@ -427,9 +433,15 @@ EOF
 # run_worktree_backed_degradation: drive workspace_ensure over a scripted
 # worktree open response and report "<ws-id>|<seeded-tab-id>" plus the ensure's
 # own exit status, so each degraded shape can assert the SAME contract: never
-# fail the spawn, never rename, always land on the flat labelled create.
-run_worktree_backed_degradation() {  # <dir> <open-response> [<rename-exit>] -> echoes "<rc>|<ws>|<seeded>"
-  local dir=$1 open=$2 rename_exit=${3:-} log resp fb main linked out rc
+# fail the spawn, never rename a workspace this home did not create, and never
+# end up with two workspaces sharing this home's label.
+#
+# <post-attempt-workspaces> is the workspace list the RE-FIND after a failed
+# attempt sees. It is what distinguishes a failure that stranded nothing (the
+# default, empty) from one that left a workspace herdr had already named from
+# the checkout basename - which for the primary home IS this home's label.
+run_worktree_backed_degradation() {  # <dir> <open-response> [<rename-exit>] [<post-attempt-workspaces>] -> echoes "<rc>|<ws>|<seeded>"
+  local dir=$1 open=$2 rename_exit=${3:-} refind=${4:-'{"result":{"workspaces":[]}}'} log resp fb main linked out rc n
   mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   read -r main linked <<EOF
 $(make_worktree_fixture "$dir")
@@ -437,12 +449,13 @@ EOF
   : "$linked"
   printf '{"result":{"workspaces":[]}}\n' > "$resp/1.out"
   printf '%s\n' "$open" > "$resp/2.out"
+  n=3
   if [ -n "$rename_exit" ]; then
     printf '%s\n' "$rename_exit" > "$resp/3.exit"
-    printf '{"result":{"workspace":{"workspace_id":"w5","label":"firstmate"},"tab":{"tab_id":"w5:t1"}}}\n' > "$resp/4.out"
-  else
-    printf '{"result":{"workspace":{"workspace_id":"w5","label":"firstmate"},"tab":{"tab_id":"w5:t1"}}}\n' > "$resp/3.out"
+    n=4
   fi
+  printf '%s\n' "$refind" > "$resp/$n.out"
+  printf '{"result":{"workspace":{"workspace_id":"w5","label":"firstmate"},"tab":{"tab_id":"w5:t1"}}}\n' > "$resp/$((n + 1)).out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" HERDR_SESSION=fmtest \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_ensure fmtest "$1" >/dev/null; printf "%s|%s" "$FM_BACKEND_HERDR_WS_ID" "$FM_BACKEND_HERDR_WS_SEEDED_TAB_ID"' \
@@ -467,9 +480,7 @@ test_worktree_backed_unreadable_response_falls_back_safely() {
   local dir result
   dir="$TMP_ROOT/wt-ambiguous"
   # The call EXITED 0 but its response names no workspace (schema drift,
-  # partial JSON). Falling back is safe REGARDLESS: the open call carries no
-  # --label, so whatever it may have touched cannot be carrying this home's
-  # label, and only the rename below ever applies one.
+  # partial JSON), and nothing was stranded at that checkout.
   result=$(run_worktree_backed_degradation "$dir" '{"result":{}}')
   assert_degraded_to_flat_create "$dir" "$result" "an unreadable worktree open response"
   assert_not_contains "$(cat "$dir/log")" $'\x1f''workspace'$'\x1f''rename' \
@@ -504,6 +515,44 @@ test_worktree_backed_rename_failure_falls_back_with_a_naming_diagnostic() {
   assert_contains "$err" 'firstmate' "the warning must name the label that never got applied"
   assert_contains "$err" 'ungrouped' "the warning must say this home stays ungrouped until that workspace is renamed or deleted"
   pass "fm_backend_herdr_workspace_ensure: a failed rename falls back to the flat create and names the workspace it stranded"
+}
+
+# The PRIMARY home is the colliding case, and the only one: herdr names a
+# workspace it creates from the checkout directory's basename, and the primary
+# home's basename is literally "firstmate" - byte-identical to the label
+# fm_backend_herdr_workspace_label returns for the primary. So a failed attempt
+# can strand a workspace ALREADY reading as this home's label, and a blind
+# fallback create would put a second "firstmate" beside it, making
+# fm_backend_herdr_workspace_find (label match, head -1) resolve every later
+# spawn to whichever herdr happens to list first. A secondmate home cannot
+# collide this way: its directory basename is unrelated to its 2ndmate-<id>
+# label.
+assert_adopted_stranded_home_workspace() {  # <dir> <result> <what>
+  local dir=$1 result=$2 what=$3
+  [ "${result%%|*}" = 0 ] || fail "$what must never fail the spawn (ensure exited ${result%%|*})"
+  [ "${result#*|}" = 'w1|' ] \
+    || fail "$what must ADOPT the stranded workspace with no seeded tab id, keeping its tabs out of the prune path, got '${result#*|}'"
+  assert_not_contains "$(cat "$dir/log")" $'\x1f''workspace'$'\x1f''create' \
+    "$what must not mint a SECOND workspace labelled 'firstmate' beside the stranded one - that is exactly what makes home-space lookup non-deterministic"
+}
+
+test_rename_failure_adopts_a_stranded_colliding_home_workspace() {
+  local dir result
+  dir="$TMP_ROOT/wt-rename-fail-collide"
+  result=$(run_worktree_backed_degradation "$dir" \
+    '{"result":{"already_open":false,"workspace":{"workspace_id":"w1","label":"firstmate"},"tab":{"tab_id":"w1:t9"}}}' 1 \
+    '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate"}]}}')
+  assert_adopted_stranded_home_workspace "$dir" "$result" "a rename that failed over a workspace herdr had already named 'firstmate'"
+  pass "fm_backend_herdr_workspace_ensure: a failed rename over a colliding basename adopts the stranded workspace instead of duplicating the home label"
+}
+
+test_unreadable_response_adopts_a_stranded_colliding_home_workspace() {
+  local dir result
+  dir="$TMP_ROOT/wt-ambiguous-collide"
+  result=$(run_worktree_backed_degradation "$dir" '{"result":{}}' '' \
+    '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate"}]}}')
+  assert_adopted_stranded_home_workspace "$dir" "$result" "an unreadable response that still left a workspace herdr had named 'firstmate'"
+  pass "fm_backend_herdr_workspace_ensure: an unreadable response that stranded a colliding workspace adopts it instead of duplicating the home label"
 }
 
 test_report_owner_token_stamps_the_calling_mate() {
@@ -545,9 +594,12 @@ test_container_ensure_starts_server_and_workspace() {
   printf '{"server":{"running":true}}\n' > "$resp/4.out"
   # 5: workspace list -> empty (no "firstmate" workspace yet)
   printf '{"result":{"workspaces":[]}}\n' > "$resp/5.out"
-  # 6: workspace create -> w1, seeding default tab w1:t9 (real herdr returns
+  # 6: the re-find after the worktree-backed attempt declined /tmp (not a
+  # checkout root) -> still empty, so nothing is adopted.
+  printf '{"result":{"workspaces":[]}}\n' > "$resp/6.out"
+  # 7: workspace create -> w1, seeding default tab w1:t9 (real herdr returns
   # the seeded tab/pane ids in the SAME response - verified empirically).
-  printf '{"result":{"workspace":{"workspace_id":"w1","label":"firstmate"},"tab":{"tab_id":"w1:t9"},"root_pane":{"pane_id":"w1:p9"}}}\n' > "$resp/6.out"
+  printf '{"result":{"workspace":{"workspace_id":"w1","label":"firstmate"},"tab":{"tab_id":"w1:t9"},"root_pane":{"pane_id":"w1:p9"}}}\n' > "$resp/7.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 HERDR_SESSION=fmtest \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_container_ensure /tmp' "$ROOT" )
@@ -824,7 +876,8 @@ test_container_ensure_creates_with_no_focus_flag() {
   printf '{"client":{"version":"0.7.1","protocol":14}}\n' > "$resp/1.out"
   printf '{"server":{"running":true}}\n' > "$resp/2.out"
   printf '{"result":{"workspaces":[]}}\n' > "$resp/3.out"
-  printf '{"result":{"workspace":{"workspace_id":"w1","label":"firstmate"},"tab":{"tab_id":"w1:t1"},"root_pane":{"pane_id":"w1:p1"}}}\n' > "$resp/4.out"
+  printf '{"result":{"workspaces":[]}}\n' > "$resp/4.out"
+  printf '{"result":{"workspace":{"workspace_id":"w1","label":"firstmate"},"tab":{"tab_id":"w1:t1"},"root_pane":{"pane_id":"w1:p1"}}}\n' > "$resp/5.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 HERDR_SESSION=fmtest \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_container_ensure /tmp' "$ROOT" )
@@ -841,7 +894,8 @@ test_container_ensure_uses_secondmate_home_label() {
   printf '{"client":{"version":"0.7.1","protocol":14}}\n' > "$resp/1.out"
   printf '{"server":{"running":true}}\n' > "$resp/2.out"
   printf '{"result":{"workspaces":[]}}\n' > "$resp/3.out"
-  printf '{"result":{"workspace":{"workspace_id":"w9","label":"2ndmate-sshhip-h7"},"tab":{"tab_id":"w9:t1"},"root_pane":{"pane_id":"w9:p1"}}}\n' > "$resp/4.out"
+  printf '{"result":{"workspaces":[]}}\n' > "$resp/4.out"
+  printf '{"result":{"workspace":{"workspace_id":"w9","label":"2ndmate-sshhip-h7"},"tab":{"tab_id":"w9:t1"},"root_pane":{"pane_id":"w9:p1"}}}\n' > "$resp/5.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HOME="$home" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 HERDR_SESSION=fmtest \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_container_ensure /tmp' "$ROOT" )
@@ -3087,6 +3141,8 @@ test_worktree_backed_adoption_never_relabels_a_foreign_workspace
 test_worktree_backed_unreadable_response_falls_back_safely
 test_worktree_backed_missing_already_open_falls_back_safely
 test_worktree_backed_rename_failure_falls_back_with_a_naming_diagnostic
+test_rename_failure_adopts_a_stranded_colliding_home_workspace
+test_unreadable_response_adopts_a_stranded_colliding_home_workspace
 test_report_owner_token_stamps_the_calling_mate
 test_report_owner_token_ignores_an_empty_target_or_owner
 test_container_ensure_starts_server_and_workspace

@@ -981,14 +981,19 @@ fm_backend_herdr_worktree_parent_workspace() {  # <session> <cwd>
 # spawn: grouping is cosmetic, and losing it must never cost the ability to
 # launch an agent.
 #
-# What makes that unconditional fallback safe is structural, not defensive. The
-# `worktree open` call carries NO --label at all, so it can neither create nor
-# rename a workspace carrying this home's label, no matter how its response
-# reads. ONLY the explicit `workspace rename` below applies that label, and
-# only to a workspace the call itself reported creating. A second workspace
-# labelled e.g. "firstmate" would make fm_backend_herdr_workspace_find (label
-# match, head -1) non-deterministic; that hazard is now ruled out by the call
-# shape rather than by refusing to fall back.
+# The `worktree open` call carries NO --label at all, so firstmate never
+# DELIBERATELY names anything but through the explicit `workspace rename`
+# below, and only a workspace the call itself reported creating. That is not
+# enough on its own: herdr labels a workspace it creates from the checkout
+# directory's BASENAME, and the primary home's basename is literally
+# "firstmate" - byte-identical to what fm_backend_herdr_workspace_label returns
+# for the primary. So a failed attempt CAN strand a workspace already reading
+# as this home's label (a secondmate home cannot collide this way, since its
+# directory basename is unrelated to its 2ndmate-<id> label). A second
+# workspace under one label makes fm_backend_herdr_workspace_find (label match,
+# head -1) non-deterministic, which is why fm_backend_herdr_workspace_ensure
+# re-runs that find and ADOPTS any match before it mints anything. Every
+# failure below is safe only in combination with that re-find.
 #
 # Fallback is taken when:
 #   - <cwd> is not a git work tree, or is a subdirectory rather than a checkout
@@ -1043,12 +1048,12 @@ fm_backend_herdr_workspace_create_worktree_backed() {  # <session> <cwd> <label>
   already=$(printf '%s' "$out" \
     | jq -r 'if (.result.already_open | type) == "boolean" then (.result.already_open | tostring) else "unknown" end' 2>/dev/null)
   if [ -z "$wsid" ] || [ "$already" = unknown ]; then
-    echo "warning: herdr worktree open exited 0 for $cwd but reported no readable workspace id and already_open flag; nothing was labelled '$label' and this home's space falls back to the flat, ungrouped create" >&2
+    echo "warning: herdr worktree open exited 0 for $cwd but reported no readable workspace id and already_open flag; firstmate named nothing '$label' itself and this home's space stays ungrouped" >&2
     return 1
   fi
   [ "$already" = false ] || return 1
   fm_backend_herdr_cli "$session" workspace rename "$wsid" "$label" >/dev/null 2>&1 || {
-    echo "warning: herdr created workspace $wsid at $cwd but it could not be renamed to '$label'; it keeps its herdr-derived label and stays the repo-parent row at that checkout, and this home's space falls back to the flat, ungrouped create until $wsid is renamed to '$label' or deleted" >&2
+    echo "warning: herdr created workspace $wsid at $cwd but it could not be renamed to '$label'; it keeps its herdr-derived label and stays the repo-parent row at that checkout, and this home's space stays ungrouped until $wsid is renamed to '$label' or deleted" >&2
     return 1
   }
   FM_BACKEND_HERDR_WS_ID=$wsid
@@ -1109,11 +1114,24 @@ fm_backend_herdr_workspace_ensure() {  # <session> <cwd>
   label=$(fm_backend_herdr_workspace_label)
   # Preferred shape: a worktree-BACKED workspace, so herdr's sidebar renders
   # this home indented under its repo parent. Every way it can fail degrades to
-  # the plain create below, which is safe because that call is the only one
-  # that ever applies this home's label
+  # the plain create below, and never fails the spawn
   # (fm_backend_herdr_workspace_create_worktree_backed).
   if fm_backend_herdr_workspace_create_worktree_backed "$session" "$cwd" "$label"; then
     printf '%s' "$FM_BACKEND_HERDR_WS_ID"
+    return 0
+  fi
+  # A failed attempt can leave a workspace behind that ALREADY carries this
+  # home's label, because herdr names one it creates from the checkout
+  # directory's basename and the primary home's basename is literally
+  # "firstmate". Re-running the label find here is what keeps the plain create
+  # below from minting a second workspace under one label and making
+  # fm_backend_herdr_workspace_find non-deterministic. A match is ADOPTED, so
+  # FM_BACKEND_HERDR_WS_SEEDED_TAB_ID stays empty and none of its tabs can
+  # enter the destructive default-tab prune path.
+  wsid=$(fm_backend_herdr_workspace_find "$session")
+  if [ -n "$wsid" ]; then
+    FM_BACKEND_HERDR_WS_ID=$wsid
+    printf '%s' "$wsid"
     return 0
   fi
   out=$(fm_backend_herdr_cli "$session" workspace create --cwd "$cwd" --label "$label" --no-focus 2>/dev/null) || return 1

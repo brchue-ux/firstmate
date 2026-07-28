@@ -71,9 +71,15 @@ An existing ungrouped home workspace is not migrated; it keeps its flat shape un
 When a home workspace is created, Herdr reuses ANY workspace already open on that exact checkout instead of adding a second one, including one Firstmate never created and one the captain opened by hand.
 Firstmate never renames a workspace it did not create, so the open call carries no label at all and the home label is applied afterwards, only to a workspace that call itself created.
 A reused workspace therefore keeps its own name and acts only as the grouping parent; this home's own Space is then created by the ordinary label-first path and stays ungrouped.
-Because the open call never carries a label, no response it can return is able to produce a workspace under the home label, so every way the worktree-backed path can fail degrades to the flat, ungrouped create.
+Every way the worktree-backed path can fail degrades to an ungrouped home workspace.
 That fallback is unconditional and is never gated on a protocol or version number: grouping is decided by what the client actually returns at runtime, and losing it never fails a spawn.
 An unreadable response is reported and falls back, and a missing `already_open` flag is read as if the workspace was reused, so Firstmate renames only what it is certain it just created.
+
+The open call carrying no label is not by itself enough to keep the fallback from duplicating a home label.
+Herdr names a workspace it creates from the checkout directory's basename, and the primary home's basename is literally `firstmate`, which is exactly the label the primary home's Space uses.
+A secondmate home cannot collide that way, because its directory basename is unrelated to its `2ndmate-<id>` label.
+So after any failed attempt the label lookup is re-run and a match is adopted before anything is created, which is what keeps a stranded workspace from being joined by a second one under the same label.
+An adopted match follows the usual adoption discipline: no seeded tab id is recorded and none of its tabs can ever be pruned.
 If the home label cannot be applied to a workspace Herdr just created, the warning names that workspace by id and label, because it stays at that checkout as the repo-parent row and this home stays ungrouped until an operator renames or deletes it.
 
 ## Standalone-clone secondmate ownership
