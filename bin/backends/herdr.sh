@@ -1832,6 +1832,13 @@ FM_BACKEND_HERDR_IDLE_RE=${FM_BACKEND_HERDR_IDLE_RE:-'^Type a message\.\.\.$'}
 # (claude) and › (codex) only. Generic shell-style glyphs > $ % # are still
 # recognized after a bordered composer row has already been structurally found.
 FM_BACKEND_HERDR_BARE_PROMPT_RE=${FM_BACKEND_HERDR_BARE_PROMPT_RE:-'^[❯›]'}
+# Queued-message footer a harness shows when it accepted Enter mid-turn and
+# parked the text until the current turn ends (verified claude 2.x). It is the
+# observable proof that a mid-turn Enter was ACCEPTED rather than swallowed;
+# fm_backend_herdr_queued_delivery is its only consumer. Harness-specific by
+# design: a signature that matched loosely could convert a genuine swallowed
+# Enter into a false "delivered", which is the strictly worse failure.
+FM_BACKEND_HERDR_QUEUED_FOOTER_RE=${FM_BACKEND_HERDR_QUEUED_FOOTER_RE:-'^Press up to edit queued messages?$'}
 # Pi allows a multi-line composer between its horizontal separators. Bound the
 # structural candidate so two unrelated transcript rules with an arbitrarily
 # large region between them can never be promoted into a composer.
@@ -1899,13 +1906,30 @@ fm_backend_herdr_agent_identity_raw() {  # <session> <pane> -> <agent>\t<status>
 }
 
 fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
-  local target=$1 session pane cap line trimmed found=0 shape="" raw_match="" bordered=0 stripped
-  local identity agent agent_status row=0 generic_line=0
+  local target=$1 cap
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
-  session=$FM_BACKEND_HERDR_SESSION
-  pane=$FM_BACKEND_HERDR_PANE
   cap=$(fm_backend_herdr_capture_ansi "$target" "$FM_BACKEND_HERDR_COMPOSER_LINES" 2>/dev/null \
     || fm_backend_herdr_capture "$target" "$FM_BACKEND_HERDR_COMPOSER_LINES") || { printf 'unknown'; return 0; }
+  fm_backend_herdr_composer_state_from_capture "$cap"
+}
+
+# fm_backend_herdr_composer_state_from_capture: the scan-and-classify half of
+# fm_backend_herdr_composer_state, split out so a caller that already holds one
+# capture can classify it without paying a second pane read. Requires
+# FM_BACKEND_HERDR_SESSION/PANE to be set by an earlier
+# fm_backend_herdr_parse_target (the caller had to parse the target to capture).
+#
+# <shape-filter> restricts which structural shapes may be promoted to composer:
+#   any      - the default, every shape (bordered, bare, Pi's separated pair).
+#   bordered - ONLY a boxed composer row. A bare `❯ ...` row is indistinguishable
+#              from a harness's own queued-message echo, so a caller that must
+#              read the real composer CONTAINER while queued rows are on screen
+#              (fm_backend_herdr_queued_delivery) asks for the box alone.
+fm_backend_herdr_composer_state_from_capture() {  # <ansi-capture> [shape-filter] -> empty|pending|unknown
+  local cap=$1 filter=${2:-any} session pane line trimmed found=0 shape="" raw_match="" bordered=0 stripped
+  local identity agent agent_status row=0 generic_line=0
+  session=$FM_BACKEND_HERDR_SESSION
+  pane=$FM_BACKEND_HERDR_PANE
   # Structural scan: locate the bottom-most composer row and remember its RAW
   # (styled) bytes. Shape detection runs on the plain row (fm_backend_herdr_strip_ansi
   # keeps ghost text so the border/prompt glyph is still visible); the raw row is
@@ -1924,6 +1948,9 @@ fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
         found=1
         ;;
       *)
+        # A bordered-only caller never promotes a bare row: see the
+        # shape-filter contract above.
+        [ "$filter" != bordered ] || continue
         if printf '%s' "$trimmed" | grep -qE "$FM_BACKEND_HERDR_BARE_PROMPT_RE"; then
           shape=bare
           raw_match=$line
@@ -1947,7 +1974,7 @@ $identity
 EOF
     case "$agent:$agent_status" in
       pi:idle|pi:done|pi:blocked)
-        if [ "$FM_BACKEND_HERDR_PI_PAIR_VALID" -eq 1 ]; then
+        if [ "$FM_BACKEND_HERDR_PI_PAIR_VALID" -eq 1 ] && [ "$filter" != bordered ]; then
           shape=separated
           raw_match=$FM_BACKEND_HERDR_PI_CONTENT
           found=1
@@ -1998,6 +2025,56 @@ EOF
   # is '^[❯›]'), so a bare shell prompt never reaches here - it stays 'unknown'
   # via the no-composer-row path above, exactly as before.
   fm_composer_classify_content "$bordered" "$stripped" "$FM_BACKEND_HERDR_IDLE_RE"
+}
+
+# fm_backend_herdr_queued_delivery: 0 when the pane's OBSERVABLE state proves a
+# mid-turn Enter was ACCEPTED and the message parked in the harness's own queue
+# (claude accepts Enter while it is generating and sends the text when the turn
+# ends), rather than swallowed. This is the herdr counterpart of the tmux
+# adapter's busy-pane fallback (fm_tmux_submit_enter_core, bin/fm-tmux-lib.sh),
+# for the claude+herdr pairing that fallback never covered, and it keeps the
+# same asymmetry: reporting an undelivered steer as delivered silently drops a
+# real instruction, so EVERY leg below must hold before converting.
+#
+#   1. The real composer CONTAINER (the box, never a bare row) reads empty, so
+#      none of the sent text is still sitting there unsubmitted.
+#   2. The pane shows the harness's queued-message footer
+#      (FM_BACKEND_HERDR_QUEUED_FOOTER_RE) - the harness itself reporting that
+#      it parked a message for the end of this turn.
+#   3. Native agent-state is still submit-active, so the mid-turn condition
+#      that queues instead of submitting genuinely holds.
+#
+# Why the container and not the bottom-most composer-shaped row: claude renders
+# each queued message as its own `❯ <text>` row, byte-identical in shape to a
+# bare composer holding unsubmitted text. The generic classifier promotes that
+# row and reads real text on it, which is exactly why a queued steer verdicts as
+# "pending" - the false negative this check exists to correct. Nothing here
+# depends on a sleep or a retry count; all three legs are state reads.
+#
+# Takes the capture the caller already read (the very screen that classified as
+# pending), so a refusal costs no extra pane read and all three legs judge one
+# consistent observation. Requires FM_BACKEND_HERDR_SESSION/PANE from the
+# caller's earlier fm_backend_herdr_parse_target.
+fm_backend_herdr_queued_delivery() {  # <ansi-capture>
+  local cap=$1 line trimmed footer=0 composer status
+  [ -n "$cap" ] || return 1
+  while IFS= read -r line; do
+    trimmed=$(fm_backend_herdr_strip_ansi "$line")
+    trimmed="${trimmed#"${trimmed%%[![:space:]]*}"}"
+    trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
+    [ -n "$trimmed" ] || continue
+    if printf '%s' "$trimmed" | grep -qE "$FM_BACKEND_HERDR_QUEUED_FOOTER_RE"; then
+      footer=1
+      break
+    fi
+  done < <(printf '%s\n' "$cap")
+  [ "$footer" -eq 1 ] || return 1
+  composer=$(fm_backend_herdr_composer_state_from_capture "$cap" bordered)
+  [ "$composer" = empty ] || return 1
+  status=$(fm_backend_herdr_classify_submit_agent_status \
+    "$(fm_backend_herdr_agent_status_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")")
+  [ "$status" = busy ] || return 1
+  return 0
 }
 
 # fm_backend_herdr_send_text_submit: type <text> into <target> once (raw,
@@ -2057,12 +2134,19 @@ EOF
 #     re-invokes this function from scratch with the same text after seeing
 #     an error, which is a human/escalation decision, not an automatic
 #     retry).
+# Mid-turn steer: when the pre-Enter baseline is not idle, confirmation falls
+# back to the composer read, and a harness that parks a mid-turn Enter in its
+# own queue leaves that read looking pending. Before refusing on an exhausted
+# retry budget, fm_backend_herdr_queued_delivery re-reads observable pane state
+# and converts only a proven queued delivery, so a queued steer is not reported
+# as undelivered (which invites a re-send that would deliver it twice).
+#
 # Echoes empty|pending|unknown|send-failed, a subset of the proof-carrying
 # submit vocabulary. Empty means confirmed submitted for every backend; how
 # each backend confirms it is an internal decision, and herdr's is no longer
 # literally "the composer read empty".
 fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle>
-  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 i=0 verdict baseline confirm_sleep
+  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 i=0 verdict baseline confirm_sleep cap=""
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
   fm_backend_herdr_send_literal "$target" "$text" || { printf 'send-failed'; return 0; }
   sleep "$settle"
@@ -2076,7 +2160,15 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
         "$confirm_sleep" "$FM_BACKEND_HERDR_SUBMIT_POLLS")
     else
       sleep "$sleep_s"
-      verdict=$(fm_backend_herdr_composer_state "$target")
+      # Keep the capture itself: fm_backend_herdr_queued_delivery re-judges this
+      # exact screen if the retry budget runs out, without a second pane read.
+      if cap=$(fm_backend_herdr_capture_ansi "$target" "$FM_BACKEND_HERDR_COMPOSER_LINES" 2>/dev/null \
+        || fm_backend_herdr_capture "$target" "$FM_BACKEND_HERDR_COMPOSER_LINES"); then
+        verdict=$(fm_backend_herdr_composer_state_from_capture "$cap")
+      else
+        cap=""
+        verdict=unknown
+      fi
     fi
     case "$verdict" in
       busy) printf 'empty'; return 0 ;;
@@ -2084,7 +2176,21 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
       unknown) printf 'unknown'; return 0 ;;
     esac
     i=$((i + 1))
-    [ "$i" -lt "$retries" ] || { printf 'pending'; return 0; }
+    if [ "$i" -lt "$retries" ]; then
+      continue
+    fi
+    # Retries exhausted with the composer still reading proven pending. On a
+    # mid-turn pane that reading can be a QUEUED message rather than a swallowed
+    # Enter, so consult the observable queued-delivery state before refusing
+    # (fm_backend_herdr_queued_delivery). Only the proven-pending composer
+    # verdict may convert: an 'idle' agent-state verdict means the pane was not
+    # mid-turn at all, so nothing could have been queued.
+    if [ "$verdict" = pending ] && fm_backend_herdr_queued_delivery "$cap"; then
+      printf 'empty'
+    else
+      printf 'pending'
+    fi
+    return 0
   done
 }
 

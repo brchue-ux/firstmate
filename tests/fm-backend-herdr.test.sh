@@ -2265,6 +2265,110 @@ test_send_text_submit_preexisting_working_does_not_false_confirm_swallowed_enter
   pass "fm_backend_herdr_send_text_submit: preexisting working is not accepted as submit proof when the composer still holds the message"
 }
 
+# --- mid-turn steer: a QUEUED message is delivered, not swallowed -----------
+# Regression for the false negative reported against claude+herdr: a steer sent
+# to a pane that is mid-turn is accepted by the harness and parked until the
+# turn ends, but the composer read after Enter classifies as "pending" - the
+# queued message is echoed on its own `❯ <text>` row, which is shape-identical
+# to a bare composer holding unsubmitted text - and fm-send reported delivery
+# unconfirmed. The obvious reaction to that error is to re-send, which delivers
+# the same steer twice. This is the claude+herdr counterpart of the busy-pane
+# conversion tests/fm-tmux-submit-busy.test.sh covers for the tmux adapter, and
+# the false-POSITIVE direction (below) matters more than the false negative:
+# converting a genuinely swallowed Enter would silently drop an instruction.
+
+# The verified claude 2.x mid-turn screen: an EMPTY composer box, the queued
+# message echoed under it, and the queued-message footer.
+herdr_queued_screen() {  # <queued-text...>
+  printf '╭──────────────────────────────╮\n'
+  printf '│ ❯                            │\n'
+  printf '╰──────────────────────────────╯\n'
+  printf '  ❯ %s\n' "$*"
+  printf '  Press up to edit queued messages\n'
+}
+
+test_send_text_submit_queued_mid_turn_message_is_delivered() {
+  local dir log resp fb out enter_count read_count
+  dir="$TMP_ROOT/submit-queued-mid-turn"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # 1: send-text  2: agent get -> working (mid-turn baseline, composer path)
+  # 3: send-keys enter  4: pane read -> queued screen
+  # 5: agent get -> working (queued-delivery leg 3; legs 1 and 2 re-judge the
+  #    capture from call 4, so a refusal costs no extra pane read)
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/2.out"
+  herdr_queued_screen "fix the failing test" > "$resp/4.out"
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/5.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "fix the failing test" 1 0.01 0.01' "$ROOT" )
+  [ "$out" = empty ] || fail "a mid-turn steer the harness queued must report delivered, got '$out'"
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+  [ "$enter_count" -eq 1 ] || fail "the queued-delivery check must not retype or re-Enter, sent $enter_count Enter(s)"
+  read_count=$(grep -c $'\x1f''pane'$'\x1f''read' "$log")
+  [ "$read_count" -eq 1 ] || fail "the queued-delivery check must re-judge the capture it already has, made $read_count read(s)"
+  pass "fm_backend_herdr_send_text_submit: a mid-turn steer parked in the harness's queue reports 'empty' (delivered), not a false unconfirmed delivery"
+}
+
+test_send_text_submit_swallowed_enter_without_queue_still_fails() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/submit-queued-no-footer"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # Mid-turn, but the text is still sitting IN the composer box and no
+  # queued-message footer is on screen: a genuine swallow, and the loud
+  # refusal must survive.
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/2.out"
+  printf '╭──────────────────────────────╮\n│ ❯ fix the failing test       │\n╰──────────────────────────────╯\n' > "$resp/4.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "fix the failing test" 1 0.01 0.01' "$ROOT" )
+  [ "$out" = pending ] || fail "a swallowed Enter with no queued-message footer must still refuse, got '$out'"
+  pass "fm_backend_herdr_send_text_submit: a mid-turn swallowed Enter with no queued-message footer still reports 'pending'"
+}
+
+test_send_text_submit_queued_footer_with_occupied_composer_still_fails() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/submit-queued-occupied-composer"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # The hardest false-positive case: an EARLIER steer is already queued (so the
+  # footer is on screen) while THIS Enter was swallowed and its text still sits
+  # in the composer box. The footer alone must never convert - only an empty
+  # composer container plus that footer may.
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/2.out"
+  printf '╭──────────────────────────────╮\n│ ❯ second steer               │\n╰──────────────────────────────╯\n  ❯ first steer\n  Press up to edit queued messages\n' > "$resp/4.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "second steer" 1 0.01 0.01' "$ROOT" )
+  [ "$out" = pending ] || fail "an occupied composer must refuse even while another message is queued, got '$out'"
+  pass "fm_backend_herdr_send_text_submit: a queued-message footer never converts a swallowed Enter whose text still sits in the composer"
+}
+
+test_send_text_submit_queued_screen_on_idle_agent_still_fails() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/submit-queued-idle-agent"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # The queued screen is on the pane, but native agent-state says the turn is
+  # over. Nothing is being parked for a turn that is not running, so a stale
+  # footer must not be accepted as proof this steer landed.
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/2.out"
+  herdr_queued_screen "fix the failing test" > "$resp/4.out"
+  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/5.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "fix the failing test" 1 0.01 0.01' "$ROOT" )
+  [ "$out" = pending ] || fail "a queued screen without a live turn must still refuse, got '$out'"
+  pass "fm_backend_herdr_send_text_submit: a queued-message footer on an idle agent does not convert to delivered"
+}
+
+test_composer_state_still_refuses_injection_into_a_queued_screen() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-queued-screen"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # The pre-injection empty-box guard is deliberately untouched: on a screen
+  # carrying queued messages it keeps reading 'pending' and keeps refusing to
+  # inject. Only submit confirmation gained the queued-delivery conversion.
+  herdr_queued_screen "fix the failing test" > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+  [ "$out" = pending ] || fail "the pre-injection guard must still refuse a screen carrying queued messages, got '$out'"
+  pass "fm_backend_herdr_composer_state: a queued-message screen still reads 'pending' for the pre-injection guard"
+}
+
 # Regression for the submit-confirmation side of the 2026-07-07 incident:
 # even if a Codex idle composer displays suggestion text, an idle-baseline
 # submit must confirm from native agent-state rather than composer scraping.
@@ -3079,6 +3183,11 @@ test_send_text_submit_detects_swallowed_enter
 test_send_text_submit_popup_autocomplete_requires_second_enter
 test_send_text_submit_confirms_blocked_after_enter
 test_send_text_submit_preexisting_working_does_not_false_confirm_swallowed_enter
+test_send_text_submit_queued_mid_turn_message_is_delivered
+test_send_text_submit_swallowed_enter_without_queue_still_fails
+test_send_text_submit_queued_footer_with_occupied_composer_still_fails
+test_send_text_submit_queued_screen_on_idle_agent_still_fails
+test_composer_state_still_refuses_injection_into_a_queued_screen
 test_send_text_submit_confirms_despite_codex_idle_tip_composer
 test_composer_state_codex_dynamic_idle_tip_reads_empty_when_faint
 test_composer_state_guard_still_refuses_real_pending_text_after_submit_confirmation_change

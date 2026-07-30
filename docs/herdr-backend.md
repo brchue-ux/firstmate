@@ -168,6 +168,9 @@ Text is typed once; only Enter is retried.
 
 On an idle or done native baseline, submit confirmation waits for `working` or `blocked` across a bounded polling window.
 On an already active or unreadable baseline, it falls back to conservative composer clearance.
+A harness that accepts Enter mid-turn parks the text in its own queue and echoes it on a row shaped exactly like a bare composer, so that clearance read alone reports pending for a steer that was in fact accepted.
+Before refusing on an exhausted retry budget, the adapter re-judges the same capture: only an empty composer container, the harness's queued-message footer, and a still-active native agent state together convert the verdict to delivered.
+Any missing leg keeps the refusal, because reporting an undelivered steer as delivered silently drops an instruction while a refusal only risks a re-send.
 A fully unreadable target stops retrying and reports unknown.
 The poll density bounds the residual possibility of an extremely fast complete turn; a missed transition can cause only a redundant Enter on an empty composer, never duplicate message text.
 
