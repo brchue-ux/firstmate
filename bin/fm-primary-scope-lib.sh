@@ -5,10 +5,10 @@
 
 # Return 0 when $1 carries a genuine secondmate-home marker.
 fm_root_is_secondmate_home() {
-  local marker="$1/.fm-secondmate-home" id LC_ALL=C
-  [ -L "$marker" ] && return 1
-  [ -f "$marker" ] || return 1
-  IFS= read -r id < "$marker" 2>/dev/null || return 1
+  local scope_marker="$1/.fm-secondmate-home" id LC_ALL=C
+  [ -L "$scope_marker" ] && return 1
+  [ -f "$scope_marker" ] || return 1
+  IFS= read -r id < "$scope_marker" 2>/dev/null || return 1
   id=${id//[[:space:]]/}
   [ -n "$id" ] || return 1
   case "$id" in

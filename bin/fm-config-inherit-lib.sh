@@ -806,7 +806,7 @@ fm_config_reread_send_failure() {
 
 # fm_config_reread_send_pointer <id> <instruction-path>
 fm_config_reread_send_pointer() {
-  local id=$1 instruction_path=$2 pending_path selector out rc send_bin message pending_pointer
+  local id=$1 instruction_path=$2 pending_path selector out rc send_bin message pending_pointer home
   pending_path="$instruction_path.pending"
   if [ ! -f "$instruction_path" ] || [ -L "$instruction_path" ]; then
     printf 'CONFIG_REREAD: secondmate %s: send failed: pending instruction file is missing\n' "$id"
@@ -828,7 +828,11 @@ fm_config_reread_send_pointer() {
     return 1
   fi
   message="CONFIG_REREAD: $instruction_path"
-  out=$(FM_HOME="$FM_HOME" \
+  # Read once so the binding cannot be read out of the assignment prefix that is
+  # setting FM_HOME in the same command.
+  home=$FM_HOME
+  out=$(FM_HOME="$home" \
+    FM_HOME_BINDING="$home" \
     FM_ROOT_OVERRIDE="${FM_ROOT_OVERRIDE:-}" \
     FM_STATE_OVERRIDE="${FM_STATE_OVERRIDE:-}" \
     FM_SEND_SETTLE="${FM_SEND_SETTLE:-0}" \

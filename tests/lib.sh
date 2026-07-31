@@ -216,3 +216,19 @@ assert_absent() {
 assert_present() {
   [ -e "$1" ] || fail "$2"
 }
+
+# --- partial bin/ fixtures --------------------------------------------------
+#
+# fm_copy_core_libs <dest-bin-dir> copies the libs that every bin/fm-*.sh needs
+# before it can do anything at all, so a suite that assembles a partial bin/ from
+# named scripts does not have to know that list. Suites that copy the whole bin/
+# tree already have them.
+FM_TEST_CORE_LIBS="fm-home-anchor-lib.sh fm-primary-scope-lib.sh"
+
+fm_copy_core_libs() {
+  local dest=$1 lib
+  mkdir -p "$dest"
+  for lib in $FM_TEST_CORE_LIBS; do
+    cp "$ROOT/bin/$lib" "$dest/$lib"
+  done
+}

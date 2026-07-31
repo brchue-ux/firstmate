@@ -151,6 +151,7 @@ build_old_bin() {  # <name> -> echoes root dir (root/bin/<script> is the entry p
   root="$TMP_ROOT/$name"
   bin="$root/bin"
   mkdir -p "$bin"
+  fm_copy_core_libs "$bin"
   for f in $OLD_BIN_UNCHANGED_SIBLINGS; do
     cp "$ROOT/bin/$f" "$bin/$f"
   done

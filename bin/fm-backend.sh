@@ -51,7 +51,11 @@ FM_BACKEND_LIB_DIR="$(cd "$(dirname "$FM_BACKEND_SCRIPT")" && pwd)"
 unset FM_BACKEND_SCRIPT
 FM_BACKEND_DEFAULT_ROOT="$(cd "$FM_BACKEND_LIB_DIR/.." && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-${FM_ROOT:-$FM_BACKEND_DEFAULT_ROOT}}"
-FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+# FM_HOME resolution, including the refusal on an ambiently inherited home,
+# has one owner: bin/fm-home-anchor-lib.sh.
+# shellcheck source=bin/fm-home-anchor-lib.sh
+. "$FM_BACKEND_LIB_DIR/fm-home-anchor-lib.sh"
+fm_home_anchor_resolve "$FM_ROOT" || exit 1
 FM_BACKEND_CONFIG_DIR="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
 # Verified backend adapters. Extend only after a backend gets its own

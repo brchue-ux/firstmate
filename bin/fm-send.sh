@@ -59,6 +59,15 @@ if [ -z "${FM_HOME+x}" ] || [ -z "${FM_HOME:-}" ]; then
   exit 1
 fi
 
+# The set-FM_HOME requirement above is fm-send's own, and stays. It proves only
+# that SOMETHING chose a home, never that this process was the one it was chosen
+# for, so the shared resolver still gets to refuse an ambiently inherited home
+# (bin/fm-home-anchor-lib.sh). Both checks are fail-closed and neither relaxes
+# the other.
+# shellcheck source=bin/fm-home-anchor-lib.sh
+. "$SCRIPT_DIR/fm-home-anchor-lib.sh"
+fm_home_anchor_resolve "$FM_ROOT" || exit 1
+
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 if [ ! -d "$FM_HOME" ]; then
   echo "error: FM_HOME '$FM_HOME' is not a directory; fm-send cannot resolve this home's state" >&2

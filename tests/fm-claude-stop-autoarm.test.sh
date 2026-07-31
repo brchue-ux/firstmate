@@ -26,6 +26,7 @@ export FAKE_CLAUDE
 install_autoarm_scripts() {
   local dir=$1
   mkdir -p "$dir/bin"
+  fm_copy_core_libs "$dir/bin"
   cp "$ROOT/bin/fm-claude-stop-autoarm.sh" "$dir/bin/fm-claude-stop-autoarm.sh"
   cp "$ROOT/bin/fm-primary-scope-lib.sh" "$dir/bin/fm-primary-scope-lib.sh"
   cp "$ROOT/bin/fm-supervision-lib.sh" "$dir/bin/fm-supervision-lib.sh"

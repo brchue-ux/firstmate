@@ -33,7 +33,11 @@ set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
-FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+# FM_HOME resolution, including the refusal on an ambiently inherited home,
+# has one owner: bin/fm-home-anchor-lib.sh.
+# shellcheck source=bin/fm-home-anchor-lib.sh
+. "$SCRIPT_DIR/fm-home-anchor-lib.sh"
+fm_home_anchor_resolve "$FM_ROOT" || exit 1
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 REG="$DATA/secondmates.md"
@@ -734,7 +738,7 @@ registry_line_for_project() {
 project_mode_in_home() {
   local home=$1 project=$2 mode
   read -r mode _ <<EOF
-$(FM_ROOT_OVERRIDE='' FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' FM_PROJECTS_OVERRIDE='' FM_CONFIG_OVERRIDE='' FM_HOME="$home" "$FM_ROOT/bin/fm-project-mode.sh" "$project")
+$(FM_ROOT_OVERRIDE='' FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' FM_PROJECTS_OVERRIDE='' FM_CONFIG_OVERRIDE='' FM_HOME="$home" FM_HOME_BINDING="$home" "$FM_ROOT/bin/fm-project-mode.sh" "$project")
 EOF
   printf '%s\n' "$mode"
 }

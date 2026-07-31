@@ -123,7 +123,11 @@ case "${1:-}" in
 esac
 
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
-FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+# FM_HOME resolution, including the refusal on an ambiently inherited home,
+# has one owner: bin/fm-home-anchor-lib.sh.
+# shellcheck source=bin/fm-home-anchor-lib.sh
+. "$SCRIPT_DIR/fm-home-anchor-lib.sh"
+fm_home_anchor_resolve "$FM_ROOT" || exit 1
 
 resolve_directory_input() {
   local name=$1 path=$2 resolved
@@ -1523,7 +1527,11 @@ if [ "$HARNESS" = claude ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
 fi
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
-  LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME=$sq_home $LAUNCH"
+  # FM_HOME_BINDING is blanked with the layout overrides so a binding issued for
+  # some other home can never ride an inherited environment into an agent
+  # session and bless an FM_HOME that session never chose
+  # (bin/fm-home-anchor-lib.sh).
+  LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME_BINDING= FM_HOME=$sq_home $LAUNCH"
 fi
 # Export GOTMPDIR into the crewmate's pane shell so the agent and every child
 # process (go build, go test, ...) inherit it. Sent before the launch command so
