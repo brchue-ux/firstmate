@@ -26,8 +26,14 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
+# This suite is the one place that must see the resolver's real behavior, so it
+# drops the process-tree declaration tests/lib.sh exports for every other suite.
+# Cases that need a declaration set one explicitly.
+unset FM_HOME_BINDING
+
 MODE="$ROOT/bin/fm-project-mode.sh"
 SEND="$ROOT/bin/fm-send.sh"
+LOCK="$ROOT/bin/fm-lock.sh"
 TMP_ROOT=$(fm_test_tmproot fm-home-anchor)
 fm_git_identity fmtest fmtest@example.invalid
 
@@ -144,17 +150,37 @@ assert_contains "${res#*|}" "no-mistakes" "the launching home must still win ins
 pass "a project clone never promotes a worker to the home containing it"
 
 # ---------------------------------------------------------------------------
-# (f) The layout overrides are explicit control and are accepted as given.
+# (f) Relocating every one of this home's directories leaves FM_HOME selecting
+# no material at all, so there is nothing left for it to misroute. This is the
+# shape firstmate's own cross-home calls use.
 # ---------------------------------------------------------------------------
-res=$(run_in "$PRIMARY" env FM_HOME="$MATE" FM_DATA_OVERRIDE="$MATE/data" "$MODE" alpha)
-expect_code 0 "${res%%|*}" "an explicit data override must be accepted"
-assert_contains "${res#*|}" "local-only" "an explicit override must select the named home"
-pass "FM_DATA_OVERRIDE keeps working across homes"
+res=$(run_in "$PRIMARY" env FM_HOME="$MATE" FM_STATE_OVERRIDE="$MATE/state" \
+  FM_DATA_OVERRIDE="$MATE/data" FM_PROJECTS_OVERRIDE="$MATE/projects" \
+  FM_CONFIG_OVERRIDE="$MATE/config" "$MODE" alpha)
+expect_code 0 "${res%%|*}" "a complete set of home-material overrides must be accepted"
+assert_contains "${res#*|}" "local-only" "a complete override set must select the named home"
+pass "a complete home-material override set keeps working across homes"
 
-res=$(run_in "$PRIMARY" env FM_HOME="$MATE" FM_ROOT_OVERRIDE="$ROOT" "$MODE" alpha)
-expect_code 0 "${res%%|*}" "an explicit root override must be accepted"
-assert_contains "${res#*|}" "local-only" "FM_ROOT_OVERRIDE must not re-anchor the home"
-pass "FM_ROOT_OVERRIDE keeps working across homes"
+# A partial set is not a declaration: whatever was not overridden still comes
+# from FM_HOME, so the ambiguity is real. This is the shape the Pi and OpenCode
+# watcher-arm paths use - they derive FM_CONFIG_OVERRIDE from the ambient
+# FM_HOME, which would otherwise launder that ambient value into a declaration.
+res=$(run_in "$PRIMARY" env FM_HOME="$MATE" FM_DATA_OVERRIDE="$MATE/data" "$MODE" alpha)
+expect_code 1 "${res%%|*}" "a partial override set must not declare an inherited home deliberate"
+pass "a partial home-material override set does not wave an inherited home through"
+
+res=$(run_in "$PRIMARY" env FM_HOME="$MATE" FM_ROOT_OVERRIDE="$ROOT" \
+  FM_CONFIG_OVERRIDE="$MATE/config" "$MODE" alpha)
+expect_code 1 "${res%%|*}" "the harness arm-path override shape must not bypass anchoring"
+assert_not_contains "${res#*|}" "local-only" "the arm-path shape must not reach the mate"
+pass "FM_ROOT_OVERRIDE plus a derived config override is not a declaration"
+
+# FM_ROOT_OVERRIDE relocates the code root, not the home, so it never declares a
+# home on its own - but it must still supply the home when FM_HOME is unset.
+res=$(run_in "$PRIMARY" env -u FM_HOME FM_ROOT_OVERRIDE="$MATE" "$MODE" alpha)
+expect_code 0 "${res%%|*}" "FM_ROOT_OVERRIDE must still stand in for an unset FM_HOME"
+assert_contains "${res#*|}" "local-only" "FM_ROOT_OVERRIDE must supply the home when FM_HOME is unset"
+pass "FM_ROOT_OVERRIDE still behaves as the whole-root override when FM_HOME is unset"
 
 # ---------------------------------------------------------------------------
 # (g)/(h) The binding declares a deliberate cross-home selection, and names the
@@ -169,6 +195,26 @@ res=$(run_in "$PRIMARY" env FM_HOME="$MATE" FM_HOME_BINDING="$PRIMARY" "$MODE" a
 expect_code 1 "${res%%|*}" "a binding for another home must not bless this FM_HOME"
 assert_not_contains "${res#*|}" "local-only" "a mismatched binding must not reach the mate"
 pass "a binding naming a different home does not bless an inherited FM_HOME"
+
+# The process-tree form covers a caller that builds every home it hands down, so
+# nothing it passes can be ambient. This suite's own runner is that caller.
+res=$(run_in "$PRIMARY" env FM_HOME="$MATE" FM_HOME_BINDING=test-harness "$MODE" alpha)
+expect_code 0 "${res%%|*}" "the process-tree declaration must be accepted"
+assert_contains "${res#*|}" "local-only" "the process-tree declaration must select the named home"
+pass "the process-tree declaration covers a caller that names every home it hands down"
+
+# It must survive the hand-off, or a nested call would lose it and refuse.
+# shellcheck disable=SC2016 # $1/$2 are the inner shell's positional args, not ours.
+res=$(run_in "$PRIMARY" env FM_HOME="$PRIMARY" FM_HOME_BINDING=test-harness bash -c \
+  'FM_HOME="$1" "$2" alpha' _ "$MATE" "$MODE")
+expect_code 0 "${res%%|*}" "the process-tree declaration must survive a nested hand-off"
+assert_contains "${res#*|}" "local-only" "a nested hand-off must still reach the named home"
+pass "the process-tree declaration is not overwritten by a resolved home"
+
+# A misspelling is not the declaration, and must not be read as a path either.
+res=$(run_in "$PRIMARY" env FM_HOME="$MATE" FM_HOME_BINDING=test_harness "$MODE" alpha)
+expect_code 1 "${res%%|*}" "only the exact process-tree literal may declare a tree"
+pass "a near-miss of the process-tree literal declares nothing"
 
 # ---------------------------------------------------------------------------
 # (i) With FM_HOME unset there is nothing ambient to second-guess: the code root
@@ -204,3 +250,51 @@ res=$(run_in "$PRIMARY" env FM_HOME="$MATE" "$SEND" fm-nope hello)
 expect_code 1 "${res%%|*}" "fm-send must refuse an ambiently inherited home"
 assert_contains "${res#*|}" "$MATE" "fm-send's refusal must name the inherited candidate"
 pass "fm-send refuses to steer a fleet reached through an inherited home"
+
+# ---------------------------------------------------------------------------
+# The consequence the incident actually had: the session lock. Taking the other
+# home's lock locks that home out of its own session, so this is the assertion
+# that matters most - the refusal must leave no lock behind.
+# ---------------------------------------------------------------------------
+res=$(run_in "$PRIMARY" env FM_HOME="$MATE" "$LOCK")
+expect_code 1 "${res%%|*}" "the session lock must not be taken through an inherited home"
+assert_absent "$MATE/state/.lock" "a refused session must not hold the other home's session lock"
+pass "an inherited home cannot take another home's session lock"
+
+res=$(run_in "$MATE" env FM_HOME="$MATE" "$LOCK")
+expect_code 0 "${res%%|*}" "a mate must still take its own session lock"
+assert_present "$MATE/state/.lock" "a mate standing in its own home must hold its own lock"
+rm -f "$MATE/state/.lock"
+pass "a home standing in itself still takes its own session lock"
+
+# ---------------------------------------------------------------------------
+# bin/fm-spawn.sh blanks the layout overrides on every launch line, so a blanked
+# override is an empty value, not explicit control. An empty spelling must not
+# read as a declaration and wave the inherited home through.
+# ---------------------------------------------------------------------------
+res=$(run_in "$PRIMARY" env FM_HOME="$MATE" FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= \
+  FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME_BINDING= "$MODE" alpha)
+expect_code 1 "${res%%|*}" "blanked overrides must not declare an inherited home deliberate"
+assert_not_contains "${res#*|}" "local-only" "blanked overrides must not reach the mate's registry"
+pass "blanked overrides and a blanked binding are not a deliberate declaration"
+
+# ---------------------------------------------------------------------------
+# A script that resolves its home declares it to the processes it launches, so a
+# child does not have to re-derive the parent's reasoning. The declaration must
+# reach descendants and must NOT leak back to the caller, or a single resolved
+# command would permanently bless the shell it ran in.
+# ---------------------------------------------------------------------------
+declared=$( (cd "$PRIMARY" && FM_HOME="$MATE" FM_HOME_BINDING="$MATE" \
+  "$ROOT/bin/fm-project-mode.sh" alpha >/dev/null 2>&1; printf '%s' "${FM_HOME_BINDING:-none}") )
+[ "$declared" = none ] || fail "a resolved home leaked a binding back into the calling shell: $declared"
+pass "a resolved home does not leak its declaration back to the caller"
+
+# The declaration lets a same-home hand-off through even when the child is given
+# only a partial override set, which is the shape firstmate's own nudge and
+# config-reread calls use.
+# shellcheck disable=SC2016 # $1/$2 are the inner shell's positional args, not ours.
+res=$(run_in "$MATE" env FM_HOME="$MATE" bash -c \
+  'FM_HOME="$1" FM_STATE_OVERRIDE="$1/state" "$2" alpha' _ "$MATE" "$MODE")
+expect_code 0 "${res%%|*}" "a declared same-home hand-off must reach the child"
+assert_contains "${res#*|}" "local-only" "a declared hand-off must keep reading the same home"
+pass "a resolved home is declared to the processes it launches"

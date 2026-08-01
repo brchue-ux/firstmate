@@ -67,6 +67,12 @@ set -eu
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT" || exit 1
 
+# Declare this process tree to the FM_HOME resolver (bin/fm-home-anchor-lib.sh)
+# for the scripts that do not source tests/lib.sh. The runner works from the code
+# root, which on a captain's machine is also a live firstmate home, while every
+# fixture home a test selects is one the test itself built.
+export FM_HOME_BINDING=test-harness
+
 MODE=
 LIST_ONLY=0
 LIST_FAMILIES=0

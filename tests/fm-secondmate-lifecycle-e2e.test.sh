@@ -126,6 +126,11 @@ phase_spawn() {
   assert_grep "FM_HOME='$SUB_ABS'" "$LOG" "secondmate launch did not set FM_HOME to the subhome"
   assert_grep 'FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE=' "$LOG" "launch did not clear operational overrides"
   assert_grep 'FM_CONFIG_OVERRIDE=' "$LOG" "launch did not clear the config override"
+  # A home declaration must never follow an agent out of the launching session,
+  # or the crewmate would treat any inherited FM_HOME as chosen for it
+  # (bin/fm-home-anchor-lib.sh).
+  assert_grep 'FM_HOME_BINDING=' "$LOG" "launch did not clear the home declaration"
+  assert_no_grep 'FM_HOME_BINDING=test-harness' "$LOG" "launch carried the test harness declaration into the agent"
   assert_grep "$SUB_ABS/data/charter.md" "$LOG" "launch did not use the persistent charter"
   assert_no_grep 'notify=' "$LOG" "secondmate codex launch included the parent turn-end notify hook"
   assert_no_grep 'turn-ended' "$LOG" "secondmate codex launch referenced a parent turn-ended signal"
