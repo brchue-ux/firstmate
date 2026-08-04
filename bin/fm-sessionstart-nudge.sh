@@ -11,7 +11,7 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 # has one owner: bin/fm-home-anchor-lib.sh.
 # shellcheck source=bin/fm-home-anchor-lib.sh
 . "$SCRIPT_DIR/fm-home-anchor-lib.sh"
-fm_home_anchor_resolve "$FM_ROOT" || exit 1
+fm_home_anchor_resolve "$FM_ROOT" quiet || exit 0
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 # shellcheck source=bin/fm-gate-refuse-lib.sh

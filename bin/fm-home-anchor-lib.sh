@@ -65,7 +65,7 @@ if [ -n "${FM_HOME_ANCHOR_LIB_SOURCED:-}" ]; then
 fi
 FM_HOME_ANCHOR_LIB_SOURCED=1
 
-FM_HOME_ANCHOR_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FM_HOME_ANCHOR_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 
 # The secondmate-home marker predicate has one owner; reuse it rather than
 # re-deriving what a valid marker looks like.
@@ -144,7 +144,12 @@ fm_home_anchor_declare() {
   if [ "${FM_HOME_BINDING:-}" = "$FM_HOME_ANCHOR_HARNESS_BINDING" ]; then
     return 0
   fi
-  FM_HOME_BINDING=$FM_HOME
+  # A descendant reads this binding from its own working directory, so declare
+  # the physical path: a relative FM_HOME would name a different home there.
+  local declared
+  declared=$(fm_home_anchor_physical "$FM_HOME")
+  [ -n "$declared" ] || declared=$FM_HOME
+  FM_HOME_BINDING=$declared
   export FM_HOME_BINDING
 }
 

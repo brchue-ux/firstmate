@@ -1525,13 +1525,14 @@ LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
 if [ "$HARNESS" = claude ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
   LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_CONFIG_DIR") $LAUNCH"
 fi
+# FM_HOME_BINDING is blanked on every launch line, whatever the kind, so a
+# binding issued for some other home can never ride an inherited environment
+# into an agent session and bless an FM_HOME that session never chose
+# (bin/fm-home-anchor-lib.sh).
+LAUNCH="FM_HOME_BINDING= $LAUNCH"
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
-  # FM_HOME_BINDING is blanked with the layout overrides so a binding issued for
-  # some other home can never ride an inherited environment into an agent
-  # session and bless an FM_HOME that session never chose
-  # (bin/fm-home-anchor-lib.sh).
-  LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME_BINDING= FM_HOME=$sq_home $LAUNCH"
+  LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME=$sq_home $LAUNCH"
 fi
 # Export GOTMPDIR into the crewmate's pane shell so the agent and every child
 # process (go build, go test, ...) inherit it. Sent before the launch command so
