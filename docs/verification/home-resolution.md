@@ -15,6 +15,9 @@ The harness-specific surfaces that carry a home of their own are these:
 
 - `bin/fm-turnend-guard.sh` is the shared Stop guard for every harness; `bin/fm-turnend-guard-grok.sh` delegates to it and reads no home itself, and `bin/fm-kimi-turnend-hook.sh` reads no `FM_*` variable at all.
 - `bin/fm-claude-stop-autoarm.sh`, `bin/fm-arm-pretool-check.sh`, `bin/fm-cd-pretool-check.sh`, and `bin/fm-subagent-pretool-check.sh` are the Claude-registered hooks. `fm-cd-pretool-check.sh` never reads `FM_HOME` and is not applicable.
+- `bin/fm-sessionstart-nudge.sh` is the one session-open command every adapter invokes, registered by `.claude/settings.json`, `.codex/hooks.json`, `.grok/hooks/fm-primary-sessionstart-nudge.json`, and `.opencode/plugins/fm-primary-sessionstart-nudge.js`, with Pi reaching it through `.pi/extensions/fm-primary-turnend-guard.ts`.
+  It reads `FM_HOME` for the state directory it checks, and declines silently under refusal because a Claude `SessionStart` non-zero exit blocks session initialization.
+  `docs/sessionstart-nudge.md` owns that transport and exit contract.
 - `.pi/extensions/fm-primary-pi-watch.ts` and `.opencode/plugins/fm-primary-watch-arm.js` compute their own `FM_HOME` candidate in TypeScript and JavaScript. They remain candidates, not resolutions: each hands the value to `bin/fm-watch-arm.sh`, which resolves through the shared owner. Both set `FM_ROOT_OVERRIDE` and derive `FM_CONFIG_OVERRIDE` from that candidate, which is why a partial override set does not declare a home - see the contract in the owner's header.
 
 ## Runtime backends
@@ -33,6 +36,7 @@ Every hook declined without writing into the other home, and the count of files 
 ```
 fm-turnend-guard.sh            exit=0   (silent decline)
 fm-claude-stop-autoarm.sh      exit=0   (silent decline)
+fm-sessionstart-nudge.sh       exit=0   (silent decline, no nudge printed)
 fm-subagent-pretool-check.sh   exit=0   (inert, never blocks a call it cannot confirm)
 fm-cd-pretool-check.sh         exit=0   (does not read FM_HOME)
 fm-arm-pretool-check.sh        exit=2   (a broad watcher kill is still denied)
