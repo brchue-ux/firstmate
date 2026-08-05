@@ -754,7 +754,10 @@ while :; do
       if [ "$(basename "$c")" = x-watch.check.sh ]; then
         if fmx_poll_shim_valid "$c" "$FM_HOME" "$FM_ROOT" \
           && [ -f "$FM_ROOT/bin/fm-x-poll.sh" ] && [ ! -L "$FM_ROOT/bin/fm-x-poll.sh" ]; then
-          FM_HOME="$FM_HOME" FM_HOME_BINDING="$FM_HOME" run_check_capture "$FM_ROOT/bin/fm-x-poll.sh" || exit 1
+          # Read once so the binding cannot be read out of the assignment prefix
+          # that is setting FM_HOME in the same command.
+          home=$FM_HOME
+          FM_HOME="$home" FM_HOME_BINDING="$home" run_check_capture "$FM_ROOT/bin/fm-x-poll.sh" || exit 1
           out=$FM_CHECK_RESULT
         else
           rejected_checks="$rejected_checks $c"

@@ -254,7 +254,7 @@ secondmate_sync() {
   }
 
   secondmate_send_nudge() {
-    local id=$1 home=$2 commit=$3 instr=$4 selector marker out
+    local id=$1 home=$2 commit=$3 instr=$4 selector marker out caller_home
     selector="fm-$id"
     marker=$(secondmate_nudge_marker_path "$id") || {
       echo "NUDGE_SECONDMATES: secondmate $id: send failed: unsafe id"
@@ -264,7 +264,10 @@ secondmate_sync() {
       echo "NUDGE_SECONDMATES: secondmate $id: send failed: cannot record retry marker"
       return 0
     fi
-    if out=$(FM_HOME="$FM_HOME" FM_HOME_BINDING="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-send.sh" "$selector" "$SECOND_MATE_NUDGE_MESSAGE" 2>&1); then
+    # Read once so the binding cannot be read out of the assignment prefix that
+    # is setting FM_HOME in the same command. This is our own home, not $home.
+    caller_home=$FM_HOME
+    if out=$(FM_HOME="$caller_home" FM_HOME_BINDING="$caller_home" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-send.sh" "$selector" "$SECOND_MATE_NUDGE_MESSAGE" 2>&1); then
       rm -f "$marker"
       echo "BOOTSTRAP_INFO: nudged $selector with '$SECOND_MATE_NUDGE_MESSAGE'"
     else
@@ -278,8 +281,11 @@ secondmate_sync() {
   }
 
   secondmate_retry_pending_nudges() {
-    local marker id selector home commit message expected_marker meta meta_home home_real head
+    local marker id selector home commit message expected_marker meta meta_home home_real head caller_home
     [ -d "$SECOND_MATE_NUDGE_PENDING_DIR" ] || return 0
+    # Read once so the binding cannot be read out of the assignment prefix that
+    # is setting FM_HOME in the same command. This is our own home, not $home.
+    caller_home=$FM_HOME
     for marker in "$SECOND_MATE_NUDGE_PENDING_DIR"/*.pending; do
       [ -f "$marker" ] || continue
       id=$(fm_meta_get "$marker" id)
@@ -324,7 +330,7 @@ secondmate_sync() {
         echo "NUDGE_SECONDMATES: secondmate $id: send failed: retry target is not at recorded instruction commit"
         continue
       }
-      if out=$(FM_HOME="$FM_HOME" FM_HOME_BINDING="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-send.sh" "$selector" "$SECOND_MATE_NUDGE_MESSAGE" 2>&1); then
+      if out=$(FM_HOME="$caller_home" FM_HOME_BINDING="$caller_home" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-send.sh" "$selector" "$SECOND_MATE_NUDGE_MESSAGE" 2>&1); then
         rm -f "$marker"
         echo "BOOTSTRAP_INFO: nudged $selector with '$SECOND_MATE_NUDGE_MESSAGE'"
       else

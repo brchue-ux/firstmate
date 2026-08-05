@@ -1089,7 +1089,10 @@ if [ "$KIND" = scout ] && [ "$FORCE" != "--force" ]; then
     echo "The report is the work product. Have the crewmate write it, or use --force after explicit discard approval." >&2
     exit 1
   fi
-  if ! FM_HOME="$FM_HOME" FM_HOME_BINDING="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+  # Read once so the binding cannot be read out of the assignment prefix that is
+  # setting FM_HOME in the same command.
+  caller_home=$FM_HOME
+  if ! FM_HOME="$caller_home" FM_HOME_BINDING="$caller_home" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
       FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-decision-hold.sh" verify "$ID" >/dev/null; then
     echo "REFUSED: scout task $ID has not passed the unresolved-decision completion gate." >&2
     echo "Inventory its report and any visual review through bin/fm-decision-hold.sh before teardown." >&2
