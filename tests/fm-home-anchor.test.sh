@@ -264,7 +264,23 @@ expect_code 1 "${res%%|*}" "the session lock must not be taken through an inheri
 assert_absent "$MATE/state/.lock" "a refused session must not hold the other home's session lock"
 pass "an inherited home cannot take another home's session lock"
 
-res=$(run_in "$MATE" env FM_HOME="$MATE" "$LOCK")
+# fm-lock.sh's real acquire path requires fm_harness_ancestry_pid() to find an
+# actual harness process by walking `ps`. CI has no such process in the runner's
+# ancestry, so this needs the same fake-ps stub every other lock-touching suite
+# uses (see make_fake_ps_claude in tests/fm-session-start.test.sh) - without it
+# this assertion only passes by accident, when run from inside a real harness.
+FAKE_PS_BIN=$(mktemp -d)
+printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  'set -u' \
+  'case "$*" in' \
+  '  *"comm="*) printf "/usr/local/bin/claude\n"; exit 0 ;;' \
+  '  *"args="*) printf "claude\n"; exit 0 ;;' \
+  'esac' \
+  'exit 1' > "$FAKE_PS_BIN/ps"
+chmod +x "$FAKE_PS_BIN/ps"
+res=$(run_in "$MATE" env FM_HOME="$MATE" PATH="$FAKE_PS_BIN:$PATH" "$LOCK")
+rm -rf "$FAKE_PS_BIN"
 expect_code 0 "${res%%|*}" "a mate must still take its own session lock"
 assert_present "$MATE/state/.lock" "a mate standing in its own home must hold its own lock"
 rm -f "$MATE/state/.lock"
