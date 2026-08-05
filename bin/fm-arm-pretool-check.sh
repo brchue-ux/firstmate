@@ -144,7 +144,18 @@ esac
 
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P) || exit 0
 ROOT=$(CDPATH='' cd -- "$SCRIPT_DIR/.." 2>/dev/null && pwd -P) || exit 0
-ACTIVE_HOME=${FM_HOME:-$ROOT}
+# FM_HOME resolution, including the refusal on an ambiently inherited home, has
+# one owner: bin/fm-home-anchor-lib.sh. When it cannot say which home this
+# session belongs to, anchor on this checkout instead of trusting the inherited
+# value: the policy then declines to recognize another home's watcher as this
+# session's own, which can only widen the deny, never narrow it.
+# shellcheck source=bin/fm-home-anchor-lib.sh
+. "$SCRIPT_DIR/fm-home-anchor-lib.sh"
+if fm_home_anchor_resolve "$ROOT" quiet; then
+  ACTIVE_HOME=$FM_HOME
+else
+  ACTIVE_HOME=$ROOT
+fi
 POLICY="$ROOT/bin/fm-arm-command-policy.mjs"
 
 command -v node >/dev/null 2>&1 || exit 0

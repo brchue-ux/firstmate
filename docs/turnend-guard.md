@@ -33,6 +33,7 @@ A stale beacon blocks even when a watcher pid is live.
 A fresh leftover beacon blocks when the lock is missing, dead, or identity-mismatched.
 
 `FM_STATE_OVERRIDE` wins over `FM_HOME/state`, and `FM_HOME` wins over repository-root `state/`.
+`FM_HOME` itself resolves through `bin/fm-home-anchor-lib.sh` ([configuration.md](configuration.md#fm_home)); when that resolution refuses because it cannot say which home this session belongs to, the guard exits 0 rather than guarding a turn against another home's state.
 `FM_GUARD_GRACE` controls beacon freshness and defaults to 300 seconds.
 If `jq` is missing or hook stdin is empty, the guard exits 0 because it cannot safely read loop-guard fields.
 

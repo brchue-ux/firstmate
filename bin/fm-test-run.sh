@@ -67,6 +67,12 @@ set -eu
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT" || exit 1
 
+# Declare this process tree to the FM_HOME resolver (bin/fm-home-anchor-lib.sh)
+# for the scripts that do not source tests/lib.sh. The runner works from the code
+# root, which on a captain's machine is also a live firstmate home, while every
+# fixture home a test selects is one the test itself built.
+export FM_HOME_BINDING=test-harness
+
 MODE=
 LIST_ONLY=0
 LIST_FAMILIES=0
@@ -122,6 +128,7 @@ family_for_basename() {
     fm-composer-ghost.test.sh|fm-composer-lib.test.sh|\
     fm-crew-state.test.sh|fm-decision-hold-lifecycle.test.sh|\
     fm-documentation-audiences.test.sh|fm-ensure-agents-md.test.sh|fm-grok-harness.test.sh|\
+    fm-home-anchor.test.sh|\
     fm-kimi-harness.test.sh|fm-herdr-lab.test.sh|fm-lint.test.sh|\
     fm-operational-input.test.sh|fm-pi-primary-types.test.sh|\
     fm-send-popup-settle.test.sh|fm-send-settle.test.sh|\
@@ -652,6 +659,16 @@ families_for_changed_path() {
     bin/fm-secondmate*|bin/fm-home-seed.sh|bin/fm-backlog-handoff.sh|\
     bin/fm-config-inherit-lib.sh|bin/fm-config-push.sh|bin/fm-shared*)
       printf '%s\n' secondmate
+      ;;
+    bin/fm-home-anchor-lib.sh)
+      # Every script defers its FM_HOME resolution to this lib, so a change here
+      # can reroute any home-scoped command. Select every family that resolves a
+      # home rather than only the unit that owns the rule.
+      printf '%s\n' pure-contract-unit
+      printf '%s\n' session-bootstrap
+      printf '%s\n' secondmate
+      printf '%s\n' backend-dispatch
+      printf '%s\n' watcher-wake-lock
       ;;
     bin/fm-session-start.sh|bin/fm-bootstrap.sh|bin/fm-fleet-sync.sh|\
     bin/fm-sessionstart-nudge.sh|bin/fm-tangle*|bin/fm-update.sh|\

@@ -1,0 +1,74 @@
+# Home resolution verification
+
+Audience: maintainer verification.
+
+This record supports the current guarantee that an ambiently inherited `FM_HOME` cannot route a command into a home it was not chosen for.
+The rule itself is owned by `bin/fm-home-anchor-lib.sh`, and the operator-facing description lives in [`docs/configuration.md`](../configuration.md) under "FM_HOME".
+Executable coverage of the rule is `tests/fm-home-anchor.test.sh`; this record holds only the axes a test cannot assert - which integration surfaces were inspected, and what the hooks do when resolution refuses.
+
+## Primary harnesses
+
+Checked on 2026-07-31 against every verified adapter.
+
+Resolution is a shell-level concern, so `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `grok`, and `kimi` share one path through `bin/fm-home-anchor-lib.sh` whenever they invoke a `bin/fm-*.sh`.
+The harness-specific surfaces that carry a home of their own are these:
+
+- `bin/fm-turnend-guard.sh` is the shared Stop guard for every harness; `bin/fm-turnend-guard-grok.sh` delegates to it and reads no home itself, and `bin/fm-kimi-turnend-hook.sh` reads no `FM_*` variable at all.
+- `bin/fm-claude-stop-autoarm.sh`, `bin/fm-arm-pretool-check.sh`, `bin/fm-cd-pretool-check.sh`, and `bin/fm-subagent-pretool-check.sh` are the Claude-registered hooks. `fm-cd-pretool-check.sh` never reads `FM_HOME` and is not applicable.
+- `bin/fm-sessionstart-nudge.sh` is the one session-open command every adapter invokes, registered by `.claude/settings.json`, `.codex/hooks.json`, `.grok/hooks/fm-primary-sessionstart-nudge.json`, and `.opencode/plugins/fm-primary-sessionstart-nudge.js`, with Pi reaching it through `.pi/extensions/fm-primary-turnend-guard.ts`.
+  It reads `FM_HOME` for the state directory it checks, and declines silently under refusal because a Claude `SessionStart` non-zero exit blocks session initialization.
+  `docs/sessionstart-nudge.md` owns that transport and exit contract.
+- `.pi/extensions/fm-primary-pi-watch.ts` and `.opencode/plugins/fm-primary-watch-arm.js` compute their own `FM_HOME` candidate in TypeScript and JavaScript. They remain candidates, not resolutions: each hands the value to `bin/fm-watch-arm.sh`, which resolves through the shared owner. Both set `FM_ROOT_OVERRIDE` and derive `FM_CONFIG_OVERRIDE` from that candidate, which is why a partial override set does not declare a home - see the contract in the owner's header.
+
+## Runtime backends
+
+Checked on 2026-07-31 against every spawn backend.
+
+`bin/backends/herdr.sh`, `bin/backends/zellij.sh`, and `bin/backends/cmux.sh` each carried their own copy of the resolution line for direct unit sourcing and now defer to the shared owner.
+`bin/backends/tmux.sh` and `bin/backends/orca.sh` read no `FM_HOME` and are not applicable.
+`codex-app` is not a selectable spawn backend and is not applicable.
+
+## Hook behavior when resolution refuses
+
+Reproduced with two synthetic home roots, the second carrying a `.fm-secondmate-home` marker, running each hook from the first with `FM_HOME` naming the second.
+Every hook declined without writing into the other home, and the count of files under the other home's `state/` was 0 before and 0 after:
+
+```
+fm-turnend-guard.sh            exit=0   (silent decline)
+fm-claude-stop-autoarm.sh      exit=0   (silent decline)
+fm-sessionstart-nudge.sh       exit=0   (silent decline, no nudge printed)
+fm-subagent-pretool-check.sh   exit=0   (inert, never blocks a call it cannot confirm)
+fm-cd-pretool-check.sh         exit=0   (does not read FM_HOME)
+fm-arm-pretool-check.sh        exit=2   (a broad watcher kill is still denied)
+fm-watch.sh --status           exit=1   error: FM_HOME names a different firstmate home ...
+```
+
+The same sweep with `FM_HOME` naming the home it stands in is the control: `fm-watch.sh` proceeds and writes that home's own watcher state, so the refusal above is the anchoring decision rather than an inert environment.
+
+`bin/fm-arm-pretool-check.sh` is the one hook that must stay protective under refusal, because declining to act would allow the dangerous command it exists to deny.
+It anchors on its own checkout when resolution cannot say which home the session belongs to, which can only widen the deny.
+
+## How far a declaration reaches
+
+Resolution reads `FM_HOME_BINDING` and never sets or exports one, so a declaration reaches only the command tree whose caller passed it.
+That boundary is load-bearing for the long-lived process trees firstmate creates.
+`bin/backends/tmux.sh` and `bin/backends/zellij.sh` ensure a multiplexer server by running a create command from whatever environment the spawning command had, and when no server is running yet that call starts one, whose captured environment every later pane inherits.
+A declaration minted by resolution and exported to descendants would have been captured there, and would then have blessed an inherited `FM_HOME` for a human session opened in one of those panes from a different home root - the exact misroute this rule exists to refuse.
+The per-invocation form firstmate's own cross-home calls use is unaffected, because each of those callers names the home it is declaring on the same command line.
+
+## Idempotence within one process
+
+Because resolution mints no declaration, a process has nothing in its environment saying it already chose a home.
+Scripts source libraries that resolve again at source time - `bin/fm-wake-lib.sh`, `bin/fm-backend.sh`, and the `bin/backends/*.sh` adapters - so a command standing in one home root whose code root is a different home root would re-judge the home its own first resolve assigned and refuse itself.
+Resolution therefore records that decision in a non-exported shell variable inside the owner, bound to the resolving process and honored only while `FM_HOME` still names the same home.
+The boundary above is unchanged by it: the record never leaves the process, so `tests/fm-home-anchor.test.sh` still pins that a resolved home blesses nothing in a command the process launches, and that a same-named value arriving in the environment - even one carrying the reading process's own PID, which `exec` makes reachable - declares nothing.
+
+The cross-process half of the same problem is the hand-off, where a parent passes a child the `FM_HOME` its own rule-1 resolve assigned.
+A record cannot reach a child, so those call sites pass the per-invocation binding alongside the home, as every cross-home caller already did: `bin/fm-home-seed.sh` for both project-mode reads, `bin/fm-teardown.sh` for the unresolved-decision gate, `bin/fm-bootstrap.sh` for both secondmate nudges, and `bin/fm-watch.sh` for the X-mode poll dispatch.
+`bin/fm-fleet-snapshot.sh` needs none, because both of its cross-home calls already relocate every one of the home's directories.
+
+## Suite behavior from a home root
+
+The captain's primary home is both the code root and a live firstmate home, so the suite runs from a directory that is itself a home root while each test selects a fixture home.
+`bin/fm-test-run.sh` and `tests/lib.sh` therefore export the process-tree form of the declaration described in the owner's header.
+Without it, roughly a third of the suite refuses in that configuration; `tests/fm-secondmate-lifecycle-e2e.test.sh` pins that `bin/fm-spawn.sh` blanks the declaration on every launch line, so it cannot follow an agent out of the suite.

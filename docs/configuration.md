@@ -183,6 +183,19 @@ When it is unset, most scripts use the repo root as the home; when it is set, sc
 When `FM_HOME` is unset, it also behaves as the old whole-root override.
 `bin/fm-send.sh` is intentionally stricter than that general fallback: it requires `FM_HOME` to be set before resolving a target, so operator steers cannot silently resolve against the wrong home.
 `FM_STATE_OVERRIDE`, `FM_DATA_OVERRIDE`, `FM_PROJECTS_OVERRIDE`, and `FM_CONFIG_OVERRIDE` override individual operational directories for tests and specialized harness setup.
+
+`FM_HOME` is inherited by every process launched from a session, so a session opened from another home's pane carries that home's `FM_HOME` even though the selection was never made for it.
+`bin/fm-home-anchor-lib.sh` is the single owner of the resulting resolution rule, and its header states that rule in full; every other script defers to it rather than resolving `FM_HOME` itself.
+The rule in short: a set `FM_HOME` stands, except that when the working directory and `FM_HOME` are both firstmate home roots and name different homes, resolution refuses with a diagnostic naming both candidates instead of guessing which one the command was meant for.
+Setting `FM_HOME_BINDING` to the same home as `FM_HOME` declares the selection deliberate and is accepted as given; every genuine cross-home call in `bin/` sets it per invocation, alongside the `FM_HOME` it is declaring.
+Resolution reads that declaration and never issues one of its own, so a binding reaches only the command tree its caller handed it to and can never be picked up by an unrelated descendant of a process that merely resolved a home.
+`FM_HOME_BINDING=test-harness` is the process-tree form of that declaration, for a caller that constructs and names every home it hands down; firstmate's own test runner is the only such caller, because each fixture home is built by the test that then selects it.
+`bin/fm-spawn.sh` blanks `FM_HOME_BINDING` on every launch line, so neither form can be inherited into an agent session.
+Relocating every one of this home's directories at once - `FM_STATE_OVERRIDE`, `FM_DATA_OVERRIDE`, `FM_PROJECTS_OVERRIDE`, and `FM_CONFIG_OVERRIDE` together - is also accepted, because `FM_HOME` then selects no material left to misroute.
+A partial set is deliberately not enough, since whatever was not overridden still comes from `FM_HOME`, and `FM_ROOT_OVERRIDE` never declares a home on its own because it relocates the code root rather than the home.
+A pooled task worktree and a home's own `projects/<name>` clone are never home roots, so a crewmate working in either keeps the home that launched it.
+Within one process the rule is idempotent: resolution records the home it settled on and reads that record back when a script's sourced libraries resolve again, so a command whose code root is a different home root from the one it is standing in never refuses the home it assigned itself.
+That record is a non-exported shell variable bound to the resolving process, it is honored only while `FM_HOME` still names the same home, and a same-named value arriving in the environment is never read as a decision the process made - so it is a within-process detail and never a way to declare a home.
 Before `fm-brief.sh`, `fm-spawn.sh`, or `fm-afk-launch.sh` persists a path or passes it to another process, it resolves each applicable relative `FM_HOME`, `FM_STATE_OVERRIDE`, or `FM_DATA_OVERRIDE` directory against the caller's working directory, preserves absolute spellings unchanged, and rejects an unresolvable relative directory with the offending variable named.
 Bootstrap applies the same relative `FM_HOME` resolution only when embedding that home in the generated X-mode poll shim; other transient consumers retain their existing shell-relative behavior.
 For the herdr backend, `FM_HOME` also determines the workspace label used by the adapter.
@@ -385,6 +398,7 @@ Runtime tuning via environment variables (defaults shown):
 
 ```sh
 FM_HOME=                 # optional operational home for most scripts, unset means this repo root; fm-send requires it explicitly
+FM_HOME_BINDING=         # declares a deliberate FM_HOME: the same home's path, or test-harness for a whole process tree; see the FM_HOME section
 FM_ROOT_OVERRIDE=        # override firstmate repo root, tangle-guard target, and zellij/cmux home-title hash; also legacy whole-root override when FM_HOME is unset
 FM_STATE_OVERRIDE=       # alternate state dir, mainly for tests
 FM_DATA_OVERRIDE=        # alternate data dir, mainly for tests

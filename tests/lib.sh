@@ -34,6 +34,15 @@ FM_TEST_LIB_SOURCED=1
 # strips this to verify real refusal.
 export FM_GATE_REFUSE_BYPASS=1
 
+# Declare this process tree to the FM_HOME resolver (bin/fm-home-anchor-lib.sh).
+# Every fixture home in this suite is built by the test that then selects it, so
+# an FM_HOME handed to a script here was always chosen, never inherited. Without
+# this the suite would refuse whenever the checkout it runs from is itself a live
+# firstmate home - which is exactly what the captain's primary home is. The
+# declaration reaches only this tree, and bin/fm-spawn.sh blanks it on every
+# launch line so it cannot follow a crewmate out of the suite.
+export FM_HOME_BINDING=test-harness
+
 # Resolve the repo root from this library's own location. Consumed by sourcing
 # test files, not by this library, so it reads as "unused" here.
 # shellcheck disable=SC2034
@@ -215,4 +224,20 @@ assert_absent() {
 # assert_present <path> <msg>: path must exist.
 assert_present() {
   [ -e "$1" ] || fail "$2"
+}
+
+# --- partial bin/ fixtures --------------------------------------------------
+#
+# fm_copy_core_libs <dest-bin-dir> copies the libs that every bin/fm-*.sh needs
+# before it can do anything at all, so a suite that assembles a partial bin/ from
+# named scripts does not have to know that list. Suites that copy the whole bin/
+# tree already have them.
+FM_TEST_CORE_LIBS="fm-home-anchor-lib.sh fm-primary-scope-lib.sh"
+
+fm_copy_core_libs() {
+  local dest=$1 lib
+  mkdir -p "$dest"
+  for lib in $FM_TEST_CORE_LIBS; do
+    cp "$ROOT/bin/$lib" "$dest/$lib"
+  done
 }

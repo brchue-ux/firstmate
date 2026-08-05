@@ -443,7 +443,14 @@ test_allow_is_silent_both_modes() {
 
 test_shellcheck_clean() {
   command -v shellcheck >/dev/null 2>&1 || { pass "shellcheck not installed, skipping"; return; }
-  shellcheck "$CHECK" >/dev/null 2>&1 || fail "bin/fm-arm-pretool-check.sh is not shellcheck-clean"
+  # bin/fm-lint.sh owns the lint definition and resolves `# shellcheck source=`
+  # directives, so this check must ask the same question it does. Bare shellcheck
+  # asks a different one: it reports every sourced lib as unfollowed, which turns
+  # any script that grows a `.` line into a false failure here while the owner,
+  # CI, and the pre-push gate all still pass. --source-path keeps that resolution
+  # working from whatever directory this suite happens to run in.
+  shellcheck --norc --external-sources --source-path="$ROOT" "$CHECK" >/dev/null 2>&1 \
+    || fail "bin/fm-arm-pretool-check.sh is not shellcheck-clean"
   pass "bin/fm-arm-pretool-check.sh is shellcheck-clean"
 }
 

@@ -172,7 +172,13 @@ done
 
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P) || exit 0
 FM_ROOT=${FM_ROOT_OVERRIDE:-$(CDPATH='' cd -- "$SCRIPT_DIR/.." 2>/dev/null && pwd -P)} || exit 0
-FM_HOME=${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}
+# FM_HOME resolution, including the refusal on an ambiently inherited home, has
+# one owner: bin/fm-home-anchor-lib.sh. An unresolvable home is inert here for
+# the same reason every other failure below is: this check never blocks a call it
+# cannot confirm.
+# shellcheck source=bin/fm-home-anchor-lib.sh
+. "$SCRIPT_DIR/fm-home-anchor-lib.sh"
+fm_home_anchor_resolve "$FM_ROOT" quiet || exit 0
 STATE=${FM_STATE_OVERRIDE:-$FM_HOME/state}
 
 # Scope to a genuine primary home, exactly as the session-start nudge and the

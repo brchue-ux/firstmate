@@ -109,7 +109,11 @@
 # bin/backends/zellij.sh's identical fallback.
 FM_BACKEND_CMUX_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-${FM_ROOT:-$FM_BACKEND_CMUX_ROOT}}"
-FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+# FM_HOME resolution, including the refusal on an ambiently inherited home,
+# has one owner: bin/fm-home-anchor-lib.sh.
+# shellcheck source=bin/fm-home-anchor-lib.sh
+. "$FM_BACKEND_CMUX_ROOT/bin/fm-home-anchor-lib.sh"
+fm_home_anchor_resolve "$FM_ROOT" || exit 1
 
 # shellcheck source=bin/fm-backend-hometag-lib.sh
 . "$FM_BACKEND_CMUX_ROOT/bin/fm-backend-hometag-lib.sh"

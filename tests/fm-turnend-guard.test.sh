@@ -99,6 +99,7 @@ test_predicate_x_mode_needs_supervision() {
 install_guard_scripts() {
   local dir=$1
   mkdir -p "$dir/bin"
+  fm_copy_core_libs "$dir/bin"
   cp "$ROOT/bin/fm-turnend-guard.sh" "$dir/bin/fm-turnend-guard.sh"
   cp "$ROOT/bin/fm-turnend-guard-grok.sh" "$dir/bin/fm-turnend-guard-grok.sh"
   cp "$ROOT/bin/fm-operational-input.sh" "$dir/bin/fm-operational-input.sh"

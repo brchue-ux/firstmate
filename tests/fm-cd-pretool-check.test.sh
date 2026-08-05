@@ -374,7 +374,10 @@ test_policy_cli_direct() {
 
 test_scripts_are_shellcheck_clean() {
   command -v shellcheck >/dev/null 2>&1 || { pass "shellcheck not installed, skipping"; return; }
-  shellcheck "$ROOT/bin/fm-cd-pretool-check.sh" >/dev/null 2>&1 \
+  # Same question bin/fm-lint.sh asks; see the note in tests/fm-arm-pretool-check.test.sh.
+  # This script sources nothing today, so it is the sibling check that would have
+  # inherited the identical false failure the day it does.
+  shellcheck --norc --external-sources --source-path="$ROOT" "$ROOT/bin/fm-cd-pretool-check.sh" >/dev/null 2>&1 \
     || fail "bin/fm-cd-pretool-check.sh is not shellcheck-clean"
   pass "bin/fm-cd-pretool-check.sh is shellcheck-clean"
 }
