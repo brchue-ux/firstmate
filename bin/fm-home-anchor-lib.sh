@@ -50,6 +50,20 @@
 #      roots and are not the same home -> refuse, naming both candidates.
 #   5. Otherwise FM_HOME stands.
 #
+# Resolution is idempotent within one process. Rule 1 turns an unset FM_HOME
+# into a set one, and no environment variable can record that THIS process made
+# that choice, so a later resolve - the libraries a script sources re-resolve at
+# source time - would re-judge the value the first resolve assigned as if it had
+# been inherited, and a process standing in a home root whose code root is a
+# different home root would refuse itself. Resolution therefore records the home
+# it settled on, as a physical path, in a plain non-exported shell variable, and
+# reads that record back instead of re-judging. The record is bound to this
+# process by PID, because bash presents an environment variable of the same name
+# as an ordinary shell variable and a value arriving from outside must never be
+# read as a decision this process made. It is honored only while FM_HOME still
+# names that same home: it records a decision about one specific home, never a
+# blanket blessing of whatever FM_HOME holds later.
+#
 # Rule 4 is deliberately narrow in both directions. The working directory must
 # BE a home root, never merely be contained in one: crewmates legitimately run
 # inside a home's projects/<name> clone and inside pooled task worktrees, and
@@ -135,10 +149,44 @@ fm_home_anchor_refuse() {  # <cwd-home> <given> <given-physical>
 # literal firstmate's test runner exports has exactly one spelling.
 FM_HOME_ANCHOR_HARNESS_BINDING=test-harness
 
+# This process's own resolution, never exported. Cleared here on the first source
+# so a same-named value inherited from the environment starts out as no record at
+# all, and PID-bound below so it could not be honored even if it arrived already
+# exported.
+FM_HOME_ANCHOR_RESOLVED_PID=
+FM_HOME_ANCHOR_RESOLVED_HOME=
+
+# Remember that this process resolved to $1, so a later resolve reads the
+# decision back rather than re-judging it.
+fm_home_anchor_record() {  # <resolved>
+  local phys
+  phys=$(fm_home_anchor_physical "${1:-}")
+  [ -n "$phys" ] || phys=${1:-}
+  FM_HOME_ANCHOR_RESOLVED_HOME=$phys
+  FM_HOME_ANCHOR_RESOLVED_PID=$$
+}
+
+# Return 0 when THIS process already resolved to the home $1 names.
+fm_home_anchor_recorded() {  # <given>
+  local given=${1:-} phys
+  [ "${FM_HOME_ANCHOR_RESOLVED_PID:-}" = "$$" ] || return 1
+  [ -n "${FM_HOME_ANCHOR_RESOLVED_HOME:-}" ] || return 1
+  [ "$given" != "$FM_HOME_ANCHOR_RESOLVED_HOME" ] || return 0
+  phys=$(fm_home_anchor_physical "$given")
+  [ -n "$phys" ] && [ "$phys" = "$FM_HOME_ANCHOR_RESOLVED_HOME" ]
+}
+
 # Resolve FM_HOME for this process. Sets FM_HOME; returns non-zero only when
 # resolution is genuinely ambiguous, after printing the diagnostic above unless
-# the caller asked for `quiet`.
+# the caller asked for `quiet`. A resolution that stands is recorded, so every
+# later resolve in the same process settles the same way.
 fm_home_anchor_resolve() {  # <default-root> [quiet]
+  fm_home_anchor_judge "${1:-}" "${2:-}" || return 1
+  fm_home_anchor_record "$FM_HOME"
+}
+
+# The judgement itself, with no record of its own: contract rules 1 to 5.
+fm_home_anchor_judge() {  # <default-root> [quiet]
   local default_root=${1:-} quiet=${2:-} given cwd home_phys bound
 
   if [ -z "${FM_HOME:-}" ]; then
@@ -146,6 +194,10 @@ fm_home_anchor_resolve() {  # <default-root> [quiet]
     return 0
   fi
   given=$FM_HOME
+
+  if fm_home_anchor_recorded "$given"; then
+    return 0
+  fi
 
   if [ -n "${FM_STATE_OVERRIDE:-}" ] && [ -n "${FM_DATA_OVERRIDE:-}" ] &&
     [ -n "${FM_PROJECTS_OVERRIDE:-}" ] && [ -n "${FM_CONFIG_OVERRIDE:-}" ]; then

@@ -179,6 +179,7 @@ run_native_ahoy_regressions() {
   cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$AHOY_PROJECT/.pi/extensions/lib/"
   cp \
     "$ROOT/bin/fm-sessionstart-nudge.sh" \
+    "$ROOT/bin/fm-home-anchor-lib.sh" \
     "$ROOT/bin/fm-primary-scope-lib.sh" \
     "$ROOT/bin/fm-gate-refuse-lib.sh" \
     "$ROOT/bin/fm-operational-input.sh" \
@@ -259,6 +260,8 @@ cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$PROJECT/.pi/extensions/f
 cp "$ROOT/bin/fm-watch-arm.sh" "$PROJECT/bin/fm-watch-arm.sh"
 cp "$ROOT/bin/fm-operational-input.sh" "$PROJECT/bin/fm-operational-input.sh"
 cp "$ROOT/bin/fm-supervision-instructions.sh" "$PROJECT/bin/fm-supervision-instructions.sh"
+cp "$ROOT/bin/fm-home-anchor-lib.sh" "$PROJECT/bin/fm-home-anchor-lib.sh"
+cp "$ROOT/bin/fm-primary-scope-lib.sh" "$PROJECT/bin/fm-primary-scope-lib.sh"
 chmod +x "$PROJECT/bin/fm-operational-input.sh"
 mkdir -p "$HOME_DIR/state" "$HOME_DIR/config"
 

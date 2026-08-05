@@ -22,6 +22,8 @@
 #   (j) FM_HOME that is not a home root              -> no rival claim, stands
 #   (k) fm-send keeps its own fail-closed contract and gains the refusal
 #   (l) resolving a home issues no declaration of its own to descendants
+#   (m) a second resolve in the same process settles the same way
+#   (n) a resolution record from outside the process declares nothing
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -343,3 +345,64 @@ res=$(run_in "$MATE" env FM_HOME="$MATE" bash -c \
 expect_code 0 "${res%%|*}" "a same-home hand-off must reach the child"
 assert_contains "${res#*|}" "local-only" "a same-home hand-off must keep reading the same home"
 pass "a same-home hand-off with a partial override set still reaches the child"
+
+# The same hand-off from a home root OTHER than the one the parent resolved. The
+# parent's FM_HOME is the one it assigned itself, so without a binding the child
+# would judge it ambient and refuse - which for fm-home-seed.sh's project-mode
+# read would empty the captured mode and clone a local-only project anyway.
+# shellcheck disable=SC2016 # $1/$2 are the inner shell's positional args, not ours.
+res=$(run_in "$PRIMARY" env -u FM_HOME bash -c \
+  'FM_HOME="$1" FM_HOME_BINDING="$1" FM_DATA_OVERRIDE="$1/data" "$2" alpha' _ "$MATE" "$MODE")
+expect_code 0 "${res%%|*}" "a bound cross-home hand-off must reach the child"
+assert_contains "${res#*|}" "local-only" "a bound hand-off must read the home it names"
+pass "a hand-off that binds the home it passes reaches the child from any home root"
+
+# ---------------------------------------------------------------------------
+# Resolution is idempotent within one process. Rule 1 assigns FM_HOME from the
+# code root, and the libraries a script sources resolve again at source time, so
+# without a record of this process's own decision the second resolve would judge
+# the value the first one assigned as inherited - and a command standing in one
+# home root whose code root is a different home root would refuse itself.
+# ---------------------------------------------------------------------------
+TWICE="$TMP_ROOT/resolve-twice.sh"
+cat > "$TWICE" <<'EOF'
+#!/usr/bin/env bash
+# usage: resolve-twice.sh <lib> <default-root> <switch-to>
+# The shape of a bin/fm-*.sh that resolves its home, then sources a library that
+# resolves again at source time. <switch-to> is `-` to keep the resolved home, or
+# a path to re-point FM_HOME the way a caller that changes home mid-run would.
+# Prints the home the second resolve settled on.
+set -u
+lib=$1 default_root=$2 switch=$3
+# shellcheck source=/dev/null
+. "$lib"
+fm_home_anchor_resolve "$default_root" || exit 1
+[ "$switch" = - ] || FM_HOME=$switch
+fm_home_anchor_resolve "$default_root" || exit 1
+printf '%s\n' "$FM_HOME"
+EOF
+chmod +x "$TWICE"
+
+res=$(run_in "$MATE" env -u FM_HOME "$TWICE" "$LIB" "$PRIMARY" -)
+expect_code 0 "${res%%|*}" "a second resolve must not refuse the home the first one assigned"
+[ "${res#*|}" = "$PRIMARY" ] || fail "the second resolve did not settle on the first one's home: ${res#*|}"
+pass "a process standing in another home root does not refuse its own resolved home"
+
+# The record covers the one home it was made for, so re-pointing FM_HOME at a
+# different home puts the command back under the full rule.
+res=$(run_in "$PRIMARY" env -u FM_HOME "$TWICE" "$LIB" "$PRIMARY" "$MATE")
+expect_code 1 "${res%%|*}" "a recorded resolution must not bless a later, different FM_HOME"
+assert_contains "${res#*|}" "$MATE" "the refusal must name the re-pointed candidate"
+pass "a resolved home is a decision about that home, not a blanket blessing"
+
+# The record is a shell variable, so bash presents a same-named environment value
+# as an ordinary one. `exec` keeps the PID, so the value below arrives carrying
+# the resolving process's OWN PID - the strongest form of the forgery - and must
+# still count for nothing.
+# shellcheck disable=SC2016 # $$ and the arguments expand in the launched shell.
+res=$(run_in "$PRIMARY" env FM_HOME="$MATE" bash -c \
+  'export FM_HOME_ANCHOR_RESOLVED_HOME="$1" FM_HOME_ANCHOR_RESOLVED_PID=$$; exec "$2" alpha' \
+  _ "$MATE" "$MODE")
+expect_code 1 "${res%%|*}" "a resolution record from outside must not bless an inherited home"
+assert_not_contains "${res#*|}" "local-only" "an environment-supplied record must not reach the mate"
+pass "a resolution record arriving in the environment is not a decision this process made"

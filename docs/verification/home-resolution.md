@@ -56,6 +56,17 @@ That boundary is load-bearing for the long-lived process trees firstmate creates
 A declaration minted by resolution and exported to descendants would have been captured there, and would then have blessed an inherited `FM_HOME` for a human session opened in one of those panes from a different home root - the exact misroute this rule exists to refuse.
 The per-invocation form firstmate's own cross-home calls use is unaffected, because each of those callers names the home it is declaring on the same command line.
 
+## Idempotence within one process
+
+Because resolution mints no declaration, a process has nothing in its environment saying it already chose a home.
+Scripts source libraries that resolve again at source time - `bin/fm-wake-lib.sh`, `bin/fm-backend.sh`, and the `bin/backends/*.sh` adapters - so a command standing in one home root whose code root is a different home root would re-judge the home its own first resolve assigned and refuse itself.
+Resolution therefore records that decision in a non-exported shell variable inside the owner, bound to the resolving process and honored only while `FM_HOME` still names the same home.
+The boundary above is unchanged by it: the record never leaves the process, so `tests/fm-home-anchor.test.sh` still pins that a resolved home blesses nothing in a command the process launches, and that a same-named value arriving in the environment - even one carrying the reading process's own PID, which `exec` makes reachable - declares nothing.
+
+The cross-process half of the same problem is the hand-off, where a parent passes a child the `FM_HOME` its own rule-1 resolve assigned.
+A record cannot reach a child, so those call sites pass the per-invocation binding alongside the home, as every cross-home caller already did: `bin/fm-home-seed.sh` for both project-mode reads, `bin/fm-teardown.sh` for the unresolved-decision gate, `bin/fm-bootstrap.sh` for both secondmate nudges, and `bin/fm-watch.sh` for the X-mode poll dispatch.
+`bin/fm-fleet-snapshot.sh` needs none, because both of its cross-home calls already relocate every one of the home's directories.
+
 ## Suite behavior from a home root
 
 The captain's primary home is both the code root and a live firstmate home, so the suite runs from a directory that is itself a home root while each test selects a fixture home.
