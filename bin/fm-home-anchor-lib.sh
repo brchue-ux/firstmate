@@ -40,6 +40,12 @@
 #      test that then selects it. bin/fm-spawn.sh blanks FM_HOME_BINDING on
 #      every launch line, so neither form can reach an agent session by
 #      inheritance.
+#      Resolution READS a binding and never issues one. Nothing here is
+#      exported, so a declaration covers the command tree its caller chose to
+#      hand it to and no other: a long-lived process started from a home - the
+#      multiplexer server bin/backends/tmux.sh and bin/backends/zellij.sh create,
+#      whose every later pane inherits its environment - can only capture a
+#      declaration that was deliberately handed to it.
 #   4. Otherwise, when the working directory and FM_HOME are BOTH firstmate home
 #      roots and are not the same home -> refuse, naming both candidates.
 #   5. Otherwise FM_HOME stands.
@@ -125,33 +131,9 @@ fm_home_anchor_refuse() {  # <cwd-home> <given> <given-physical>
   } >&2
 }
 
-# Declare the home this process settled on to everything it launches, so a child
-# script does not have to re-derive the parent's reasoning from a partial set of
-# overrides. Exports never travel upward or sideways, so this reaches only this
-# process's own descendants - never the harness session that invoked it, and
-# never a sibling command.
-#
-# A child handed a DIFFERENT FM_HOME still sees this binding as a mismatch and
-# must declare its own, which is why firstmate's genuine cross-home calls set
-# FM_HOME_BINDING at the call site.
 # The process-tree declaration (contract rule 3). Kept as a constant so the one
 # literal firstmate's test runner exports has exactly one spelling.
 FM_HOME_ANCHOR_HARNESS_BINDING=test-harness
-
-fm_home_anchor_declare() {
-  # A process-tree declaration outranks a per-process one and must keep reaching
-  # the whole tree its owner drives, so never overwrite it with this home.
-  if [ "${FM_HOME_BINDING:-}" = "$FM_HOME_ANCHOR_HARNESS_BINDING" ]; then
-    return 0
-  fi
-  # A descendant reads this binding from its own working directory, so declare
-  # the physical path: a relative FM_HOME would name a different home there.
-  local declared
-  declared=$(fm_home_anchor_physical "$FM_HOME")
-  [ -n "$declared" ] || declared=$FM_HOME
-  FM_HOME_BINDING=$declared
-  export FM_HOME_BINDING
-}
 
 # Resolve FM_HOME for this process. Sets FM_HOME; returns non-zero only when
 # resolution is genuinely ambiguous, after printing the diagnostic above unless
@@ -161,31 +143,26 @@ fm_home_anchor_resolve() {  # <default-root> [quiet]
 
   if [ -z "${FM_HOME:-}" ]; then
     FM_HOME="${FM_ROOT_OVERRIDE:-$default_root}"
-    fm_home_anchor_declare
     return 0
   fi
   given=$FM_HOME
 
   if [ -n "${FM_STATE_OVERRIDE:-}" ] && [ -n "${FM_DATA_OVERRIDE:-}" ] &&
     [ -n "${FM_PROJECTS_OVERRIDE:-}" ] && [ -n "${FM_CONFIG_OVERRIDE:-}" ]; then
-    fm_home_anchor_declare
     return 0
   fi
 
   # Fork-free rejections before any path normalization.
   if [ "${PWD:-}" = "$given" ]; then
-    fm_home_anchor_declare
     return 0
   fi
   if ! fm_home_anchor_is_home_root "${PWD:-}" || ! fm_home_anchor_is_home_root "$given"; then
-    fm_home_anchor_declare
     return 0
   fi
 
   cwd=$(fm_home_anchor_physical "${PWD:-}")
   home_phys=$(fm_home_anchor_physical "$given")
   if [ -z "$cwd" ] || [ -z "$home_phys" ] || [ "$cwd" = "$home_phys" ]; then
-    fm_home_anchor_declare
     return 0
   fi
 
@@ -196,7 +173,6 @@ fm_home_anchor_resolve() {  # <default-root> [quiet]
     bound=$(fm_home_anchor_physical "$FM_HOME_BINDING")
     [ -n "$bound" ] || bound=$FM_HOME_BINDING
     if [ "$bound" = "$home_phys" ]; then
-      fm_home_anchor_declare
       return 0
     fi
   fi

@@ -48,6 +48,14 @@ The same sweep with `FM_HOME` naming the home it stands in is the control: `fm-w
 `bin/fm-arm-pretool-check.sh` is the one hook that must stay protective under refusal, because declining to act would allow the dangerous command it exists to deny.
 It anchors on its own checkout when resolution cannot say which home the session belongs to, which can only widen the deny.
 
+## How far a declaration reaches
+
+Resolution reads `FM_HOME_BINDING` and never sets or exports one, so a declaration reaches only the command tree whose caller passed it.
+That boundary is load-bearing for the long-lived process trees firstmate creates.
+`bin/backends/tmux.sh` and `bin/backends/zellij.sh` ensure a multiplexer server by running a create command from whatever environment the spawning command had, and when no server is running yet that call starts one, whose captured environment every later pane inherits.
+A declaration minted by resolution and exported to descendants would have been captured there, and would then have blessed an inherited `FM_HOME` for a human session opened in one of those panes from a different home root - the exact misroute this rule exists to refuse.
+The per-invocation form firstmate's own cross-home calls use is unaffected, because each of those callers names the home it is declaring on the same command line.
+
 ## Suite behavior from a home root
 
 The captain's primary home is both the code root and a live firstmate home, so the suite runs from a directory that is itself a home root while each test selects a fixture home.

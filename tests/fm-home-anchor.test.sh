@@ -21,6 +21,7 @@
 #   (i) FM_HOME unset                                -> the code root's own home
 #   (j) FM_HOME that is not a home root              -> no rival claim, stands
 #   (k) fm-send keeps its own fail-closed contract and gains the refusal
+#   (l) resolving a home issues no declaration of its own to descendants
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -279,22 +280,66 @@ assert_not_contains "${res#*|}" "local-only" "blanked overrides must not reach t
 pass "blanked overrides and a blanked binding are not a deliberate declaration"
 
 # ---------------------------------------------------------------------------
-# A script that resolves its home declares it to the processes it launches, so a
-# child does not have to re-derive the parent's reasoning. The declaration must
-# reach descendants and must NOT leak back to the caller, or a single resolved
-# command would permanently bless the shell it ran in.
+# How far a declaration reaches. Resolving a home must not mint a binding of its
+# own, or a process that resolved once would hand that declaration to every
+# descendant - including the multiplexer server a spawn starts, whose captured
+# environment every later pane inherits - and bless an inherited FM_HOME for a
+# session that stands in a different home entirely.
+#
+# This stand-in is the shape of the ~50 bin/fm-*.sh that source the resolver: it
+# resolves a home, carries FM_HOME onward the way a launched session carries it,
+# then runs a command from another directory.
 # ---------------------------------------------------------------------------
-declared=$( (cd "$PRIMARY" && FM_HOME="$MATE" FM_HOME_BINDING="$MATE" \
-  "$ROOT/bin/fm-project-mode.sh" alpha >/dev/null 2>&1; printf '%s' "${FM_HOME_BINDING:-none}") )
-[ "$declared" = none ] || fail "a resolved home leaked a binding back into the calling shell: $declared"
-pass "a resolved home does not leak its declaration back to the caller"
+CALLER="$TMP_ROOT/resolve-then-run.sh"
+cat > "$CALLER" <<'EOF'
+#!/usr/bin/env bash
+# usage: resolve-then-run.sh <lib> <default-root> <cd-to> <cmd...>
+set -u
+lib=$1 default_root=$2 dir=$3
+shift 3
+# shellcheck source=/dev/null
+. "$lib"
+fm_home_anchor_resolve "$default_root" || exit 1
+export FM_HOME
+cd "$dir" || exit 1
+exec "$@"
+EOF
+chmod +x "$CALLER"
+LIB="$ROOT/bin/fm-home-anchor-lib.sh"
+# shellcheck disable=SC2016 # the binding is read in the launched process, not here.
+SHOW_BINDING=('bash' '-c' 'printf %s "${FM_HOME_BINDING-none}"')
 
-# The declaration lets a same-home hand-off through even when the child is given
-# only a partial override set, which is the shape firstmate's own nudge and
-# config-reread calls use.
+res=$(run_in "$MATE" env FM_HOME="$MATE" "$CALLER" "$LIB" "$ROOT" "$PRIMARY" "$MODE" alpha)
+expect_code 1 "${res%%|*}" "a resolved home must not bless a descendant standing in another home"
+assert_not_contains "${res#*|}" "local-only" "a leaked declaration must not reach the mate's registry"
+pass "resolving a home does not bless a later command standing in a different home"
+
+res=$(run_in "$MATE" env FM_HOME="$MATE" "$CALLER" "$LIB" "$ROOT" "$MATE" "${SHOW_BINDING[@]}")
+expect_code 0 "${res%%|*}" "the stand-in must resolve its own home"
+[ "${res#*|}" = none ] || fail "resolution handed a declaration to the process it launched: ${res#*|}"
+pass "resolution hands no declaration to the processes it launches"
+
+# The per-invocation form every cross-home caller in bin/ uses still reaches the
+# command tree its caller chose, because that caller passes it explicitly.
+res=$(run_in "$PRIMARY" env FM_HOME="$MATE" FM_HOME_BINDING="$MATE" \
+  "$CALLER" "$LIB" "$ROOT" "$PRIMARY" "${SHOW_BINDING[@]}")
+expect_code 0 "${res%%|*}" "an explicit cross-home binding must still resolve"
+[ "${res#*|}" = "$MATE" ] || fail "an explicitly passed binding did not reach the command it was issued for: ${res#*|}"
+pass "a binding passed per invocation still reaches the command tree it was issued for"
+
+# The process-tree form belongs to the harness that exported it, so it must keep
+# reaching the whole tree and must not be replaced by a resolved home.
+res=$(run_in "$PRIMARY" env FM_HOME="$MATE" FM_HOME_BINDING=test-harness \
+  "$CALLER" "$LIB" "$ROOT" "$PRIMARY" "${SHOW_BINDING[@]}")
+expect_code 0 "${res%%|*}" "the process-tree declaration must still resolve"
+[ "${res#*|}" = test-harness ] || fail "the process-tree declaration did not survive resolution: ${res#*|}"
+pass "the process-tree declaration keeps reaching the tree its owner drives"
+
+# A same-home hand-off carrying only a partial override set still reaches the
+# child, which is the shape firstmate's own nudge and config-reread calls use.
 # shellcheck disable=SC2016 # $1/$2 are the inner shell's positional args, not ours.
 res=$(run_in "$MATE" env FM_HOME="$MATE" bash -c \
   'FM_HOME="$1" FM_STATE_OVERRIDE="$1/state" "$2" alpha' _ "$MATE" "$MODE")
-expect_code 0 "${res%%|*}" "a declared same-home hand-off must reach the child"
-assert_contains "${res#*|}" "local-only" "a declared hand-off must keep reading the same home"
-pass "a resolved home is declared to the processes it launches"
+expect_code 0 "${res%%|*}" "a same-home hand-off must reach the child"
+assert_contains "${res#*|}" "local-only" "a same-home hand-off must keep reading the same home"
+pass "a same-home hand-off with a partial override set still reaches the child"
