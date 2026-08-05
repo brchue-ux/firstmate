@@ -29,7 +29,7 @@ It tokenizes the bytes and classifies lexical execution positions only.
 - `--claude` to preserve Claude's stderr-only deny requirement.
 
 The wrapper discovers the code root from its own location.
-The active firstmate home is `${FM_HOME:-<code-root>}`.
+The active firstmate home comes from `bin/fm-home-anchor-lib.sh`, the single owner of `FM_HOME` resolution described in [configuration.md](configuration.md#fm_home); when that resolution refuses because it cannot say which home this session belongs to, the wrapper anchors on its own code root instead, which can only widen the deny.
 It passes both roots and the exact command string to the Node policy owner.
 
 The wrapper fast-allows a command without invoking the Node policy owner only when the command cannot contain the `fm-watch` byte sequence even after the classifier's decoders run.
