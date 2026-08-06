@@ -567,6 +567,327 @@ assert len(doc["scripts"])==3
   pass "aggregate-json merges lane timing artifacts"
 }
 
+# --- fixture containment and orphan reap ------------------------------------
+#
+# /tmp is a tmpfs on some hosts, so a fixture the suite leaves behind is leaked
+# RAM. These exercise the runner's containment and reap through real runs: a
+# probe script builds a fixture exactly the way the suite does, and the
+# assertions are about what survives on disk afterwards.
+
+# Write a test script that builds one fixture under TMPDIR, records its path to
+# <record>, and then runs <trailer> (empty for a script that just exits).
+write_fixture_probe() {
+  local path=$1 record=$2 trailer=${3:-}
+  cat >"$path" <<SH
+#!/usr/bin/env bash
+set -eu
+probe=\$(mktemp -d "\${TMPDIR:-/tmp}/fm-probe.XXXXXX")
+mkdir -p "\$probe/payload"
+head -c 4096 /dev/zero >"\$probe/payload/blob"
+printf '%s\n' "\$probe" >'$record'
+echo "ok - probe built \$probe"
+$trailer
+SH
+  chmod +x "$path"
+}
+
+# Runner invocation with the nested-run suppression cleared, so a reap actually
+# runs even when this file is itself executing under the runner.
+run_runner_unnested() {
+  env -u FM_TEST_RUN_ACTIVE "$RUNNER" "$@"
+}
+
+test_completed_run_leaves_no_fixture() {
+  local tmp probe record fixture root
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-contain.XXXXXX")
+  probe="$tmp/probe.test.sh"
+  record="$tmp/fixture-path"
+  write_fixture_probe "$probe" "$record"
+  run_runner_unnested "$probe" >"$tmp/out" 2>"$tmp/err" \
+    || fail "probe run should pass: $(cat "$tmp/err")"
+  [ -s "$record" ] || fail "probe did not record its fixture path"
+  fixture=$(cat "$record")
+  case "$fixture" in
+    /tmp/fm-probe.*) fail "fixture was built directly in /tmp, not inside the run: $fixture" ;;
+  esac
+  assert_absent "$fixture" "a completed run must leave no fixture behind: $fixture"
+  # The run root that contained it is gone too, not just the fixture.
+  root=$(dirname "$(dirname "$fixture")")
+  assert_absent "$root" "a completed run must remove its own temp root: $root"
+  rm -rf "$tmp"
+  pass "a run that completes normally leaves no fixture behind"
+}
+
+test_fixture_removed_when_run_is_interrupted() {
+  local tmp probe record fixture root pid waited
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-interrupt.XXXXXX")
+  probe="$tmp/probe.test.sh"
+  record="$tmp/fixture-path"
+  write_fixture_probe "$probe" "$record" 'sleep 120'
+  # Monitor mode puts the background runner in its own process group, so the
+  # signal reaches the runner and the test it is running together - the same
+  # shape as a terminal interrupt, which is how the leak accumulated.
+  set -m
+  run_runner_unnested "$probe" >"$tmp/out" 2>"$tmp/err" &
+  pid=$!
+  set +m
+  waited=0
+  while [ ! -s "$record" ]; do
+    waited=$((waited + 1))
+    [ "$waited" -lt 600 ] || { kill -KILL -- "-$pid" 2>/dev/null; fail "probe never built its fixture"; }
+    sleep 0.1
+  done
+  fixture=$(cat "$record")
+  assert_present "$fixture" "probe fixture should exist while the run is live"
+  kill -INT -- "-$pid" 2>/dev/null || fail "could not interrupt the run"
+  wait "$pid" 2>/dev/null || true
+  waited=0
+  while [ -e "$fixture" ]; do
+    waited=$((waited + 1))
+    [ "$waited" -lt 100 ] || fail "an interrupted run left its fixture behind: $fixture"
+    sleep 0.1
+  done
+  root=$(dirname "$(dirname "$fixture")")
+  assert_absent "$root" "an interrupted run must remove its own temp root: $root"
+  rm -rf "$tmp"
+  pass "a run interrupted mid-way leaves no fixture behind"
+}
+
+test_spawned_task_scratch_is_contained() {
+  local tmp probe record scratch
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-taskscratch.XXXXXX")
+  probe="$tmp/probe.test.sh"
+  record="$tmp/scratch-path"
+  # Mirrors what bin/fm-spawn.sh does for a task: a per-task root with gotmp/
+  # nested inside it, rooted at FM_TASK_TMP_ROOT. A test that drives a real spawn
+  # would otherwise strand this under /tmp with no task and no teardown.
+  cat >"$probe" <<SH
+#!/usr/bin/env bash
+set -eu
+[ -n "\${FM_TASK_TMP_ROOT:-}" ] || { echo "not ok - runner did not set FM_TASK_TMP_ROOT"; exit 1; }
+scratch="\$FM_TASK_TMP_ROOT/fm-probe-task"
+mkdir -p "\$scratch/gotmp"
+printf '%s\n' "\$scratch" >'$record'
+echo "ok - task scratch at \$scratch"
+SH
+  chmod +x "$probe"
+  run_runner_unnested "$probe" >"$tmp/out" 2>"$tmp/err" \
+    || fail "probe run should pass: $(cat "$tmp/err")"
+  [ -s "$record" ] || fail "probe did not record its task scratch root"
+  scratch=$(cat "$record")
+  assert_absent "/tmp/fm-probe-task" "task scratch must never be stranded in /tmp"
+  assert_absent "$scratch" "a completed run must remove the task scratch it created: $scratch"
+  rm -rf "$tmp"
+  pass "a task scratch root created during a run is contained and removed"
+}
+
+test_killed_run_is_healed_by_the_next_run() {
+  local tmp scratch probe record fixture root out pid waited
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-killed.XXXXXX")
+  scratch="$tmp/scratch"
+  mkdir -p "$scratch"
+  probe="$tmp/probe.test.sh"
+  record="$tmp/fixture-path"
+  write_fixture_probe "$probe" "$record" 'sleep 120'
+  # SIGKILL runs no trap at all. This is exactly how the leak accumulated, so
+  # the run root must survive the kill and then be reaped by the next run.
+  set -m
+  TMPDIR="$scratch" run_runner_unnested "$probe" >"$tmp/out" 2>"$tmp/err" &
+  pid=$!
+  set +m
+  waited=0
+  while [ ! -s "$record" ]; do
+    waited=$((waited + 1))
+    [ "$waited" -lt 600 ] || { kill -KILL -- "-$pid" 2>/dev/null; fail "probe never built its fixture"; }
+    sleep 0.1
+  done
+  fixture=$(cat "$record")
+  kill -KILL -- "-$pid" 2>/dev/null || fail "could not kill the run"
+  wait "$pid" 2>/dev/null || true
+  assert_present "$fixture" "a killed run cannot clean up after itself"
+  root=$(dirname "$(dirname "$fixture")")
+  printf '#!/usr/bin/env bash\necho "ok - probe"\n' >"$tmp/plain.test.sh"
+  chmod +x "$tmp/plain.test.sh"
+  out=$(FM_TEST_REAP_ROOT="$scratch" FM_TEST_REAP_MIN_AGE_SECONDS=0 \
+    run_runner_unnested "$tmp/plain.test.sh" 2>"$tmp/err2") \
+    || fail "healing run should pass: $(cat "$tmp/err2")"
+  assert_contains "$out" "removed=1" "the next run should reap the killed run's root: $out"
+  assert_absent "$root" "a killed run's root must be reaped by the next run: $root"
+  assert_absent "$fixture" "the killed run's fixture must be gone with its root: $fixture"
+  rm -rf "$tmp"
+  pass "a killed run's fixtures are reaped by the next run"
+}
+
+# Build an isolated reap root plus a Firstmate home whose recorded task scratch
+# lives inside it. Echoes "<reap root>|<home>".
+init_reap_fixture() {
+  local tmp=$1 reap home
+  reap="$tmp/reap"
+  home="$tmp/home"
+  mkdir -p "$reap" "$home/state"
+  printf '%s|%s\n' "$reap" "$home"
+}
+
+# One aged, fixture-shaped directory inside the reap root.
+make_orphan() {
+  local reap=$1 name=$2
+  mkdir -p "$reap/$name/payload"
+  head -c 2048 /dev/zero >"$reap/$name/payload/blob"
+  touch -t 200001010000 "$reap/$name"
+  printf '%s\n' "$reap/$name"
+}
+
+test_reap_clears_pre_existing_orphans() {
+  local tmp reap home orphan fresh probe out
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-reap.XXXXXX")
+  IFS='|' read -r reap home <<<"$(init_reap_fixture "$tmp")"
+  orphan=$(make_orphan "$reap" "fm-secondmate-safety.Ab12Cd")
+  fresh="$reap/fm-recent-run.Zz99Yy"
+  mkdir -p "$fresh"
+  probe="$tmp/probe.test.sh"
+  printf '#!/usr/bin/env bash\necho "ok - probe"\n' >"$probe"
+  chmod +x "$probe"
+  out=$(FM_TEST_REAP_ROOT="$reap" FM_TEST_REAP_HOMES="$home" \
+    run_runner_unnested "$probe" 2>"$tmp/err") \
+    || fail "reap run should pass: $(cat "$tmp/err")"
+  assert_contains "$out" "FM_TEST_REAP root=$reap" "reap marker missing"
+  assert_contains "$out" "removed=1" "reap should report the one removed orphan: $out"
+  assert_absent "$orphan" "a pre-existing orphan must be reaped: $orphan"
+  assert_present "$fresh" "a fixture younger than the minimum age must be kept: $fresh"
+  rm -rf "$tmp"
+  pass "a later run reaps pre-existing orphans and spares recent ones"
+}
+
+test_reap_never_touches_a_live_task_scratch() {
+  local tmp reap home tasktmp gotmp probe out
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-reap-task.XXXXXX")
+  IFS='|' read -r reap home <<<"$(init_reap_fixture "$tmp")"
+  # Fixture-shaped on purpose: only the recorded tasktmp= can save it.
+  tasktmp=$(make_orphan "$reap" "fm-livetask.Qq77Rr")
+  fm_write_meta "$home/state/livetask.meta" \
+    "window=firstmate:fm-livetask" \
+    "worktree=$home/wt" \
+    "project=alpha" \
+    "tasktmp=$tasktmp"
+  # A per-task scratch root is also recognisable by its gotmp/ child.
+  gotmp=$(make_orphan "$reap" "fm-othertask.Ss88Tt")
+  mkdir -p "$gotmp/gotmp"
+  touch -t 200001010000 "$gotmp"
+  probe="$tmp/probe.test.sh"
+  printf '#!/usr/bin/env bash\necho "ok - probe"\n' >"$probe"
+  chmod +x "$probe"
+  out=$(FM_TEST_REAP_ROOT="$reap" FM_TEST_REAP_HOMES="$home" \
+    run_runner_unnested "$probe" 2>"$tmp/err") \
+    || fail "reap run should pass: $(cat "$tmp/err")"
+  assert_contains "$out" "removed=0" "no directory should have been removed: $out"
+  assert_present "$tasktmp" "a live task's recorded scratch must never be removed: $tasktmp"
+  assert_present "$tasktmp/payload/blob" "a live task's scratch contents must be intact"
+  assert_present "$gotmp" "a per-task scratch root must never be removed: $gotmp"
+  rm -rf "$tmp"
+  pass "the reap never touches a live task's scratch directory"
+}
+
+test_reap_never_removes_a_held_open_fixture() {
+  local tmp reap home held probe out holder waited
+  if [ ! -r /proc/self/fd ] && ! command -v lsof >/dev/null 2>&1; then
+    pass "held-open fixtures: no in-use inventory on this host, nothing to assert"
+    return 0
+  fi
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-reap-open.XXXXXX")
+  IFS='|' read -r reap home <<<"$(init_reap_fixture "$tmp")"
+  held=$(make_orphan "$reap" "fm-watcher-lock-tests.Uu66Vv")
+  : >"$held/payload/handle"
+  bash -c 'exec 7<"$1"; printf ready >"$2"; sleep 120' _ "$held/payload/handle" "$tmp/holder-ready" &
+  holder=$!
+  waited=0
+  while [ ! -s "$tmp/holder-ready" ]; do
+    waited=$((waited + 1))
+    [ "$waited" -lt 600 ] || { kill "$holder" 2>/dev/null; fail "holder never opened the fixture"; }
+    sleep 0.1
+  done
+  probe="$tmp/probe.test.sh"
+  printf '#!/usr/bin/env bash\necho "ok - probe"\n' >"$probe"
+  chmod +x "$probe"
+  out=$(FM_TEST_REAP_ROOT="$reap" FM_TEST_REAP_HOMES="$home" \
+    run_runner_unnested "$probe" 2>"$tmp/err") \
+    || { kill "$holder" 2>/dev/null; fail "reap run should pass: $(cat "$tmp/err")"; }
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  assert_contains "$out" "removed=0" "a held-open fixture must not be removed: $out"
+  assert_present "$held" "a directory another process holds open must be kept: $held"
+  rm -rf "$tmp"
+  pass "the reap never removes a fixture another process still holds open"
+}
+
+test_reap_stays_within_fm_fixture_names() {
+  local tmp reap home probe out plain file nosuffix link target
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-reap-scope.XXXXXX")
+  IFS='|' read -r reap home <<<"$(init_reap_fixture "$tmp")"
+  plain="$reap/unrelated.Ab12Cd"
+  nosuffix="$reap/fm-plainname"
+  file="$reap/fm-a-file.Ab12Cd"
+  target="$tmp/link-target"
+  link="$reap/fm-symlink.Ab12Cd"
+  mkdir -p "$plain" "$nosuffix" "$target"
+  : >"$file"
+  ln -s "$target" "$link"
+  touch -t 200001010000 "$plain" "$nosuffix" "$file" "$target"
+  probe="$tmp/probe.test.sh"
+  printf '#!/usr/bin/env bash\necho "ok - probe"\n' >"$probe"
+  chmod +x "$probe"
+  out=$(FM_TEST_REAP_ROOT="$reap" FM_TEST_REAP_HOMES="$home" \
+    run_runner_unnested "$probe" 2>"$tmp/err") \
+    || fail "reap run should pass: $(cat "$tmp/err")"
+  assert_contains "$out" "removed=0" "nothing outside the fixture shape may be removed: $out"
+  assert_present "$plain" "a non-fm- name must never be considered: $plain"
+  assert_present "$nosuffix" "an fm- name without an mktemp suffix must be kept: $nosuffix"
+  assert_present "$file" "a plain file must be kept: $file"
+  assert_present "$link" "a symlink must be kept: $link"
+  assert_present "$target" "a symlink's target must never be followed: $target"
+  rm -rf "$tmp"
+  pass "the reap only considers mktemp-shaped fm- directories in its own root"
+}
+
+test_reap_is_suppressed_inside_a_nested_run() {
+  local tmp reap home orphan probe out
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-reap-nested.XXXXXX")
+  IFS='|' read -r reap home <<<"$(init_reap_fixture "$tmp")"
+  orphan=$(make_orphan "$reap" "fm-nested.Ww55Xx")
+  probe="$tmp/probe.test.sh"
+  printf '#!/usr/bin/env bash\necho "ok - probe"\n' >"$probe"
+  chmod +x "$probe"
+  out=$(FM_TEST_RUN_ACTIVE=1 FM_TEST_REAP_ROOT="$reap" FM_TEST_REAP_HOMES="$home" \
+    "$RUNNER" "$probe" 2>"$tmp/err") \
+    || fail "nested run should pass: $(cat "$tmp/err")"
+  assert_not_contains "$out" "FM_TEST_REAP" "a nested run must not reap"
+  assert_present "$orphan" "a nested run must leave orphans to its parent: $orphan"
+  rm -rf "$tmp"
+  pass "the reap is suppressed inside a nested run"
+}
+
+test_reap_refuses_when_task_records_cannot_be_read() {
+  local tmp reap home orphan probe out
+  if [ "$(id -u)" = 0 ]; then
+    pass "unreadable task records: root bypasses directory permissions, nothing to assert"
+    return 0
+  fi
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-reap-unreadable.XXXXXX")
+  IFS='|' read -r reap home <<<"$(init_reap_fixture "$tmp")"
+  orphan=$(make_orphan "$reap" "fm-unreadable.Yy44Zz")
+  chmod 000 "$home/state"
+  probe="$tmp/probe.test.sh"
+  printf '#!/usr/bin/env bash\necho "ok - probe"\n' >"$probe"
+  chmod +x "$probe"
+  out=$(FM_TEST_REAP_ROOT="$reap" FM_TEST_REAP_HOMES="$home" \
+    run_runner_unnested "$probe" 2>"$tmp/err") \
+    || { chmod 755 "$home/state"; fail "run should still pass: $(cat "$tmp/err")"; }
+  chmod 755 "$home/state"
+  assert_not_contains "$out" "FM_TEST_REAP" "an unreadable task record must stop the reap entirely"
+  assert_present "$orphan" "nothing may be removed when task records cannot be read: $orphan"
+  rm -rf "$tmp"
+  pass "the reap refuses entirely when a home's task records cannot be read"
+}
+
 test_list_all_exact_suite_coverage
 test_family_selection
 test_single_script_selection
@@ -582,3 +903,13 @@ test_portable_shard_union_and_coverage_guard
 test_jobs_requires_proven_isolated
 test_jobs_parallel_scheduler_and_failure_propagation
 test_aggregate_json
+test_completed_run_leaves_no_fixture
+test_fixture_removed_when_run_is_interrupted
+test_spawned_task_scratch_is_contained
+test_killed_run_is_healed_by_the_next_run
+test_reap_clears_pre_existing_orphans
+test_reap_never_touches_a_live_task_scratch
+test_reap_never_removes_a_held_open_fixture
+test_reap_stays_within_fm_fixture_names
+test_reap_is_suppressed_inside_a_nested_run
+test_reap_refuses_when_task_records_cannot_be_read
