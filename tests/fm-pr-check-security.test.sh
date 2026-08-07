@@ -802,6 +802,20 @@ test_concurrent_watcher_sees_only_complete_publication() {
 sleep 0.3
 SH
     chmod +x "$dir/fakebin/cp"
+    # write_task_meta records a window for task-a, so the watcher's Layer-1
+    # pane-staleness scan visits it every poll. Without a live pane behind it,
+    # capture fails and (since bin/fm-watch.sh) surfaces a wake immediately -
+    # unrelated to and racing ahead of the PR-poll signal this test actually
+    # exercises. Back the window with a busy-looking capture so Layer 1 stays
+    # quiet and only the check/poll layer can produce this test's wake.
+    cat > "$dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *' capture-pane '*) printf 'Working... (esc to interrupt)\n' ;;
+esac
+exit 0
+SH
+    chmod +x "$dir/fakebin/tmux"
 
     FM_TEST_GH_HEAD=0123456789abcdef0123456789abcdef01234567 \
       run_check_entry "$dir" task-a https://github.com/o/r/pull/1 > "$dir/direct.out" 2> "$dir/direct.err" &
