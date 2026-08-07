@@ -449,6 +449,55 @@ test_terminal_stale_surfaced() {
   pass "a stale pane sitting on a terminal status is surfaced (queue + exit)"
 }
 
+# --- capture failure: the window is gone, not merely idle -------------------
+# 2026-08-07 diagnosis: fm_backend_capture failing (a dead/missing pane) used
+# to `continue` unconditionally, silently dropping the window from every
+# future poll forever - no wake, no log line, no state change - regardless of
+# whether the window's last reported status was working, blocked, or paused.
+# This is backend-agnostic: every fm_backend_capture implementation returns
+# non-zero on a gone pane, and the dispatch itself (bin/fm-backend.sh) does
+# not vary by backend, so exercising it through the tmux fake stands in for
+# every backend. The fix surfaces a capture failure as a stale wake the same
+# poll it happens, then absorbs repeats of the same failure so a persistently
+# gone window does not flood a wake every poll.
+test_capture_failure_surfaces_missing_window() {
+  local dir state fakebin out drain_out window key pid sig
+  dir=$(make_case capture-failure); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"
+  window="test:fm-vanished"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/vanished.meta"
+  # A working (not paused) status: capture failure must surface regardless of
+  # the last reported status, not only for a paused/declared-wait crew.
+  printf 'working: mid-run\n' > "$state/vanished.status"
+  sig=$(seen_sig "$state/vanished.status"); printf '%s' "$sig" > "$state/.seen-vanished_status"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE_FAIL=1 \
+    FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher did not exit on a capture failure the same poll it happened"
+  grep -F "stale: $window" "$out" >/dev/null || fail "capture failure did not print a stale wake"
+  grep -F "pane capture failed" "$out" >/dev/null || fail "capture failure wake did not explain the window appears gone"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the capture failure wake failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "capture failure was not queued"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  [ -e "$state/.missing-$key" ] || fail "capture failure did not record its once-surfaced marker"
+
+  # A second poll while capture keeps failing must be absorbed, not
+  # re-surfaced (else a persistently gone window would flood a wake forever -
+  # the opposite failure mode from the silent-drop bug this fixes).
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE_FAIL=1 \
+    FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "a second consecutive capture failure re-surfaced instead of being absorbed: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "a second consecutive capture failure printed a wake reason during absorb"
+  reap "$pid"
+
+  pass "a capture failure surfaces the window as gone the same poll, regardless of its last reported status, then absorbs repeats"
+}
+
 # --- stale pane, STALE terminal status overridden by an active run: absorbed ---
 # Regression for the 2026-07 herdr false-surface incidents: a crew's own status
 # log gets no new entry once firstmate hands it to a no-mistakes validation
@@ -673,7 +722,8 @@ test_nonterminal_stale_paused_absorbed_then_resurfaced() {
 # A captain-held crew can leave a stable backend endpoint after its agent exits.
 # fm-crew-state then authoritatively reports stopped rather than paused, but the
 # confirmed-dead agent plus the declared wait or captain-held transfer must retain
-# bounded pause handling.
+# bounded pause handling - now framed as confirmed dead, never plain "awaiting
+# external", so a stopped crew is never undersaid as an ordinary continuing wait.
 # A still-live agent at an external-decision gate is the disconfirming case: it
 # must surface once, while the unchanged hash must not append the same wake on
 # every watcher re-arm.
@@ -708,8 +758,10 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
   bare=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w && $5 == "stale: " w { n++ } END { print n + 0 }' "$state/.wake-queue")
   [ "$wakes" -le 1 ] || fail "dead-agent declared pause flooded $wakes stale wakes across six unchanged polls"
   [ "$bare" -eq 0 ] || fail "dead-agent declared pause surfaced as $bare bare stopped-crew wakes"
+  grep -F "confirmed dead" "$state/.wake-queue" >/dev/null \
+    || fail "dead-agent declared pause did not surface as confirmed dead"
   grep -F "awaiting external" "$state/.wake-queue" >/dev/null \
-    || fail "dead-agent declared pause did not use the bounded paused recheck"
+    && fail "dead-agent declared pause was framed as an ordinary awaiting-external wait"
 
   dir=$(make_case exited-captain-held); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/held.status"
@@ -731,8 +783,8 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   wait_for_exit "$pid" 40 || fail "captain-held dead-agent pane did not re-surface on the bounded cadence"
-  grep -F "awaiting external" "$state/.wake-queue" >/dev/null \
-    || fail "captain-held dead-agent pane surfaced as a stopped crew"
+  grep -F "confirmed dead" "$state/.wake-queue" >/dev/null \
+    || fail "captain-held dead-agent pane did not surface as confirmed dead"
 
   dir=$(make_case alive-decision-gate); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/gate.status"
@@ -1553,6 +1605,7 @@ test_turn_ended_not_working_surfaced
 test_working_note_not_working_surfaced
 test_actionable_signal_surfaced
 test_terminal_stale_surfaced
+test_capture_failure_surfaces_missing_window
 test_stale_terminal_status_overridden_by_active_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold

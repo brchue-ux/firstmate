@@ -370,8 +370,10 @@ clear_pause_tracking() {  # <window>
 }
 
 # Reconcile a declared pause or captain-held status with authoritative crew state.
-# Only a confidently dead ordinary crew may recover paused classification after
-# fm-crew-state has fallen back to stopped or unknown.
+# Prints one of: working, paused, dead, or none. A confidently dead ordinary
+# crew recovers a classification after fm-crew-state has fallen back to
+# stopped or unknown - but as dead, never plain paused, so a confirmed-stopped
+# crew is never reported as an ordinary continuing external wait.
 pause_state_class() {  # <window> <task>
   local win=$1 task=$2 key last recheck_file class agent_alive
   key=${win//:/_}
@@ -410,9 +412,9 @@ pause_state_class() {  # <window> <task>
       return
     fi
   fi
-  [ "$class" = none ] && [ "${agent_alive:-unknown}" = dead ] && class=paused
+  [ "$class" = none ] && [ "${agent_alive:-unknown}" = dead ] && class=dead
   case "$class" in
-    paused) date +%s > "$recheck_file" ;;
+    paused|dead) date +%s > "$recheck_file" ;;
     *) rm -f "$recheck_file" ;;
   esac
   printf '%s' "$class"
@@ -434,6 +436,61 @@ surface_nonterminal_stale() {  # <window> <hash>
     rm -f "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key" "$STATE/.paused-resurfaced-$key"
   fi
   wake "stale: $win"
+}
+
+# A capture failure means the window's pane cannot be read at all right now -
+# backend down, pane closed, session gone - which is itself a stronger
+# staleness signal than a repeated identical hash. Every fm_backend_capture
+# implementation (tmux, herdr, zellij, orca, cmux) returns non-zero on a
+# dead/missing pane, so this fires the same way regardless of backend, and
+# regardless of the window's last reported status: working, blocked, and
+# paused all hit it identically. Without this, the window silently dropped out
+# of every future poll forever - no wake, no log line, no state change (the
+# 2026-08-07 diagnosis). Comparable to how fm_backend_herdr_agent_state maps
+# pane_not_found to missing, this maps a capture failure straight to a
+# surfaced wake the same poll it happens. Surfaces once per distinct failure
+# spell: a `.missing-<key>` marker suppresses repeat wakes for an
+# already-surfaced disappearance and is cleared by the caller the moment
+# capture next succeeds.
+handle_capture_failure() {  # <window> <key>
+  local win=$1 key=$2 mf reason
+  mf="$STATE/.missing-$key"
+  if [ -e "$mf" ]; then
+    triage_log "absorbed capture failure (already surfaced missing): $win"
+    return
+  fi
+  : > "$mf"
+  reason="stale: $win (pane capture failed - the window appears gone, not merely idle)"
+  fm_wake_append stale "$win" "$reason" || exit 1
+  wake "$reason"
+}
+
+# Mirrors handle_paused_stale's bounded resurface cadence, but for a declared
+# pause whose live fm_backend_agent_alive recheck (via pause_state_class)
+# came back dead: the crew has not merely stepped out on an external wait, it
+# has actually stopped. Framing this distinctly - rather than collapsing it
+# into the same "declared pause, confirm the wait still holds" message -
+# keeps the eventual resurface from undersaying a stopped crew as an ordinary
+# continuing wait.
+handle_dead_stale() {  # <window> <task> <hash>
+  local win=$1 task=$2 h=$3 key statusf mtime age rf rf_age reason
+  key=$(printf '%s' "$win" | tr ':/.' '___')
+  printf '%s' "$h" > "$STATE/.stale-$key"
+  : > "$STATE/.paused-$key"
+  rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
+  statusf="$STATE/$task.status"
+  mtime=$(stat_mtime "$statusf")
+  case "$mtime" in ''|*[!0-9]*) mtime=$(date +%s) ;; esac
+  age=$(( $(date +%s) - mtime ))
+  rf="$STATE/.paused-resurfaced-$key"
+  rf_age=$(age_of "$rf")   # 999999 when no prior re-surface
+  if [ "$age" -ge "$PAUSE_RESURFACE_SECS" ] && [ "$rf_age" -ge "$PAUSE_RESURFACE_SECS" ]; then
+    reason="stale: $win (paused ${age}s but confirmed dead on recheck - a stopped crew, not an ordinary continuing wait)"
+    fm_wake_append stale "$win" "$reason" || exit 1
+    date +%s > "$rf"
+    wake "$reason"
+  fi
+  triage_log "absorbed stale (confirmed dead, awaiting resurface cadence): $win"
 }
 
 # Check and heartbeat cadence must survive actionable exits and restarts: the
@@ -884,7 +941,11 @@ EOF
     if [ "$kind" = secondmate ] && ! status_is_paused "$last"; then
       continue
     fi
-    tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
+    tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || {
+      handle_capture_failure "$w" "$key"
+      continue
+    }
+    rm -f "$STATE/.missing-$key"
     h=$(printf '%s' "$tail40" | hash_pane)
     key=$(printf '%s' "$w" | tr ':/.' '___')
     hf="$STATE/.hash-$key"
@@ -962,9 +1023,13 @@ EOF
           #   - working: an actively-running pipeline legitimately sits on a static
           #     pane (e.g. waiting on CI), so absorb and start the wedge timer so a
           #     genuinely frozen run still escalates past STALE_ESCALATE_SECS;
-          #   - paused: the crew declared an external wait, or a declared pause or
-          #     captain hold is paired with a confidently dead agent, so absorb on
-          #     the long PAUSE_RESURFACE_SECS cadence instead of wedge-escalating;
+          #   - paused: the crew declared an external wait, so absorb on the long
+          #     PAUSE_RESURFACE_SECS cadence instead of wedge-escalating;
+          #   - dead: a declared pause or captain hold is paired with a
+          #     confidently dead agent - the crew has actually stopped, not
+          #     merely stepped out - so absorb on the same bounded cadence but
+          #     frame the eventual resurface as confirmed dead, never plain
+          #     paused;
           #   - none: no running pipeline, idle pane, no busy signature, no declared
           #     pause - the crew has STOPPED. Surface immediately so firstmate peeks
           #     (it may be done via an interactive menu that wrote no done: status,
@@ -982,6 +1047,9 @@ EOF
               paused)
                 handle_paused_stale "$w" "$task" "$h"
                 ;;
+              dead)
+                handle_dead_stale "$w" "$task" "$h"
+                ;;
               *)
                 surface_nonterminal_stale "$w" "$h"
                 ;;
@@ -991,6 +1059,7 @@ EOF
             if [ -e "$pf" ] || status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")"; then
               case "$(pause_state_class "$w" "$task")" in
                 paused)  handle_paused_stale "$w" "$task" "$h" ;;
+                dead)    handle_dead_stale "$w" "$task" "$h" ;;
                 working) clear_pause_state "$w"
                          printf '%s' "$h" > "$sf"
                          wedge_timer_check "$w" "$ssf" "non-terminal stale (provably working after a declared pause)" "$ewf"
@@ -1027,6 +1096,7 @@ EOF
       if ! afk_present && status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")" && [ "$busy_now" -ne 0 ]; then
         case "$(pause_state_class "$w" "$task")" in
           paused) handle_paused_stale "$w" "$task" "$h" ;;
+          dead)   handle_dead_stale "$w" "$task" "$h" ;;
           *)      clear_pause_tracking "$w" ;;
         esac
       else
