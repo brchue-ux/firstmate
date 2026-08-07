@@ -610,6 +610,14 @@ test_nudge_retry_uses_fresh_herdr_endpoint_after_respawn() {
   add_sm_worktree "$w" sm-instr "$c1"
   bump_primary "$w" instr
 
+  # The fleet-startup launch policy only relaunches a dead/missing secondmate
+  # with pending work of its own; give this one a queued backlog item so the
+  # liveness sweep's respawn (the mechanic this test actually exercises) still
+  # fires for the stale herdr endpoint below.
+  mkdir -p "$w/sm-instr/data"
+  printf '## In flight\n\n## Queued\n- [ ] backlog-item - a queued item for sm-instr\n\n## Done\n' \
+    > "$w/sm-instr/data/backlog.md"
+
   meta="$w/home/state/sm-instr.meta"
   {
     printf 'window=%s\n' "$stale"

@@ -149,7 +149,17 @@ Do not hand off `local-only` items.
 
 ## Recovery
 
-For `kind=secondmate` meta with no window, treat the secondmate as a dead persistent direct report and respawn it with:
+For `kind=secondmate` meta with no window, treat the secondmate as a dead persistent direct report.
+Reconciling its durable records - confirming its home, backlog, and any in-flight child task metadata - is always correct and never optional.
+Actually respawning it is conditional: **fleet startup launches the first mate and nothing else** (captain decision 2026-08-03, superseding the 2026-07-31 open-at-the-stop rule that this section previously documented).
+The stated reason is startup token cost, so the bar is "would this mate actually do something this session", not "was it open or registered before".
+
+**Pending work is the test.**
+Relaunch a dead or missing secondmate only when its own durable records show pending work: a non-empty `## Queued` or `## In flight` section in that home's `data/backlog.md`, or any `*.meta` file left under that home's `state/` by a task it dispatched and never tore down (work paused mid-flight by a crash, quota limit, or killed session).
+A secondmate with neither - an empty backlog and no in-flight child task metadata - is left down even though it is registered, or was open when the fleet last stopped; the captain reopens an idle secondmate manually.
+`bin/fm-bootstrap.sh`'s `secondmate_home_has_pending_work` and `secondmate_liveness_sweep` are the exact-mechanics owner of this test for the session-start liveness sweep; apply the identical test by hand for an ad hoc mid-session recovery.
+
+When the test passes, respawn with:
 
 ```sh
 bin/fm-spawn.sh <id> --secondmate
