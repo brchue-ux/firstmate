@@ -5,7 +5,11 @@
 # mechanical (a pane appeared, a process exited); only firstmate talks to
 # GitHub with identity and intent, so only firstmate knows a PR merged or CI
 # went red. See data/herdr-event-channel-research/report.md sections C and D
-# for the design this follows; nothing here re-derives that reasoning.
+# for the design this follows; nothing here re-derives that reasoning. That
+# path is this captain's own private fleet record under data/ (gitignored
+# per AGENTS.md section 2, never committed to this repo's tracked tree), so
+# it will not appear in `git log` or a checkout of this repo - the citations
+# below summarize its conclusions rather than pointing at trackable history.
 #
 # Two herdr CLI calls, matching report.md section D's "two calls, not one
 # fused method" recommendation so the momentary and durable channels keep
