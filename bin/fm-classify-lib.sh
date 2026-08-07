@@ -412,3 +412,40 @@ scan_captain_relevant_statuses() {  # <state>
   done
   return 0
 }
+
+# The character budget a published "doing"/status-detail string must fit
+# without needing a renderer to elide it. Sourced from
+# data/herdr-card-iteration-2/report.md's measured fit ladder: at 11.5px
+# Medium 500 (the report's recommended card type), all ten real `doing`
+# strings sampled from a live fleet fit their card column with zero elision,
+# and the longest of those ten is 59 characters (the binding case: a 59-char
+# title uses 299px of a 315px depth-2 column). Below 11.5px, or at a lighter
+# weight, some of those same strings elide. Overridable for tests or a
+# different rendering surface; any override should stay grounded in a
+# measured fit, not a guess.
+FM_DOING_CHAR_CAP=${FM_DOING_CHAR_CAP:-59}
+
+# fm_doing_truncate <text> [cap]: collapse whitespace and, only if <text>
+# exceeds the char cap, shorten it to fit - preferring a cut at the last word
+# boundary within the cap over a mid-word hard cut, but falling back to a hard
+# cut when the word-boundary cut would throw away more than 40% of the
+# budget (e.g. one long token with no early space). Mirrors the jq
+# `doing_trunc($n)` helper duplicated in bin/fm-fleet-snapshot.sh and
+# bin/fm-bearings-snapshot.sh for the same fields in JSON output; keep the
+# three in sync.
+fm_doing_truncate() {  # <text> [cap]
+  local text=$1 cap=${2:-$FM_DOING_CHAR_CAP} collapsed cut boundary floor
+  collapsed=$(printf '%s' "$text" | tr -s '[:space:]' ' ')
+  [ "${#collapsed}" -gt "$cap" ] || { printf '%s' "$collapsed"; return 0; }
+  cut=${collapsed:0:cap}
+  case "$cut" in
+    *' '*) boundary=${cut% *} ;;
+    *) boundary=$cut ;;
+  esac
+  floor=$((cap * 3 / 5))
+  if [ "${#boundary}" -ge "$floor" ] && [ "${#boundary}" -gt 0 ]; then
+    printf '%s…' "$boundary"
+  else
+    printf '%s…' "$cut"
+  fi
+}

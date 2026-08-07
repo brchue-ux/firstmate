@@ -225,6 +225,7 @@ crew_state_json() {  # <id>
       esac
       ;;
   esac
+  detail=$(fm_doing_truncate "$detail")
   jq -n --arg raw "$raw" --arg state "$state" --arg source "$source" --arg detail "$detail" \
     '{state:$state,source:$source,detail:$detail,raw:$raw}'
 }
@@ -604,10 +605,25 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
     --argjson decisions_n "$FM_SNAPSHOT_SECONDMATE_DECISIONS" \
     --argjson landed_n "$FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME" \
     --argjson backlog "$1" \
-    --argjson tasks "$2" '
+    --argjson tasks "$2" \
+    --argjson doing_cap "$FM_DOING_CHAR_CAP" '
     def trunc($n):
       tostring | gsub("\\s+"; " ")
       | if length > $n then .[:$n] + "…" else . end;
+    # Word-boundary-aware cousin of trunc(), for the "doing" field only: a
+    # published status text should already fit a rendering surface without a
+    # mid-word cut. See FM_DOING_CHAR_CAP in
+    # bin/fm-classify-lib.sh for the sourced cap and the bash twin
+    # (fm_doing_truncate) this mirrors.
+    def doing_trunc($n):
+      tostring | gsub("\\s+"; " ") as $s
+      | if ($s | length) <= $n then $s
+        else ($s[0:$n]) as $cut
+        | ($cut | split(" ")) as $words
+        | (if ($words | length) > 1 then ($words[0:-1] | join(" ")) else "" end) as $boundary
+        | (if ($boundary | length) >= (($n * 3) / 5 | floor) and ($boundary | length) > 0
+           then $boundary else $cut end) + "…"
+        end;
     ([ $backlog.records[]?
        | select((.state == "in_flight" or .state == "queued") and (.structured | not)) ]) as $unstructured_current
     | ([ $backlog.records[]? | select(.state == "in_flight" and .structured) ]) as $owned_in_flight
@@ -663,7 +679,7 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
          | $tasks[]
          | select(.id == $work.id and .current_state.state == "working")
          | {id,kind,state:.current_state.state,source:.current_state.source,
-            doing:((.current_state.detail // "") | trunc(120))} ]) as $active_all
+            doing:((.current_state.detail // "") | doing_trunc($doing_cap))} ]) as $active_all
     | ($captain_holds_all
        + ([ $tasks[] as $t | ($t.hints.open_decisions // [])[]
             | {id:$t.id,key,verb,summary:(.summary | trunc(160)),reason:null,source:"status"} ])) as $decisions_all
