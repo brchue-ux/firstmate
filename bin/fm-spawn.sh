@@ -450,7 +450,15 @@ launch_template() {
     # does NOT suppress the interactive ghost text (verified empirically), so the env
     # var is the correct control. The dim-aware composer reader in fm-tmux-lib.sh is
     # the defense-in-depth backstop for any pane this flag cannot reach.
-    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    # env -u ANTHROPIC_API_KEY scopes out any ambient key (e.g. one set on the
+    # herdr server process this pane inherits from) so claude's own auth-source
+    # check always prefers the claude.ai OAuth login over API-key billing.
+    # Verified empirically (claude doctor) that an assignment to empty
+    # (ANTHROPIC_API_KEY=) is also treated as absent by claude's own check, but
+    # env -u is used here as the unambiguous true-unset idiom. Scoped to this
+    # one launch command; never touches the captain's own environment or
+    # dotfiles.
+    claude) printf '%s' 'env -u ANTHROPIC_API_KEY CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     codex)
       if [ "$kind" = secondmate ]; then
         printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
