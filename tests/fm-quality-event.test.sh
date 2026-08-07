@@ -330,6 +330,26 @@ test_invalid_inputs_are_usage_errors() {
   set -e
   expect_code 2 "$rc" "invalid-mate-id: an unsafe mate id should be refused"
 
+  case_dir=$(make_case invalid-unstated-size)
+  ledger=$(ledger_path "$case_dir" matex)
+  set +e
+  run_event "$case_dir" matex task_completed - - note > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 2 "$rc" "invalid-unstated-size: a size-scored event with size - should be refused"
+  assert_grep 'usage:' "$case_dir/stderr" "invalid-unstated-size: refusal did not explain usage"
+  [ ! -f "$ledger" ] || fail "invalid-unstated-size: ledger should not be written on a usage error"
+
+  case_dir=$(make_case invalid-na-severity)
+  ledger=$(ledger_path "$case_dir" matex)
+  set +e
+  run_event "$case_dir" matex merged_broken - N/A note > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 2 "$rc" "invalid-na-severity: a defect event with severity N/A should be refused"
+  assert_grep 'usage:' "$case_dir/stderr" "invalid-na-severity: refusal did not explain usage"
+  [ ! -f "$ledger" ] || fail "invalid-na-severity: ledger should not be written on a usage error"
+
   pass "fm-quality-event refuses an unknown event, size, severity, or unsafe mate id as a usage error"
 }
 

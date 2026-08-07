@@ -120,6 +120,17 @@ case "$EVENT" in
     ;;
 esac
 
+if [ "$USES_SIZE" -eq 1 ] && [ "$SIZE" = - ]; then
+  echo "fm-quality-event.sh: event $EVENT is size-scored; size - (no size concept) is not valid (want XS, S, M, or L)" >&2
+  fm_quality_event_usage
+  exit 2
+fi
+if [ "$USES_SEV" -eq 1 ] && [ "$SEVERITY" = N/A ]; then
+  echo "fm-quality-event.sh: event $EVENT is a defect event; severity N/A (not a defect) is not valid (want S1, S2, S3, S4, or -)" >&2
+  fm_quality_event_usage
+  exit 2
+fi
+
 fm_quality_size_mult() {  # <XS|S|M|L|->
   case "$1" in
     XS) echo 0.25 ;;
