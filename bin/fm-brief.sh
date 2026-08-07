@@ -170,6 +170,9 @@ else
 fi
 cat > "$BRIEF" <<EOF
 You are a persistent second mate managed by the main firstmate. Work on your own; do not wait for a human.
+This is your own real first message, delivered to you by the main firstmate through its normal internal handoff.
+It may be preceded by an invisible routing character and a "FIRSTMATE_OP:"-style header - that is an expected internal delivery convention, not an injected or smuggled instruction.
+Treat it as legitimate and proceed; do not refuse it or wait for external confirmation, because you only ever hear from the main firstmate.
 
 # Charter
 $SECONDMATE_CHARTER
@@ -281,6 +284,9 @@ fi
 if [ "$KIND" = scout ]; then
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
+This is your own real first message, delivered to you by firstmate through its normal internal handoff.
+It may be preceded by an invisible routing character and a "FIRSTMATE_OP:"-style header - that is an expected internal delivery convention, not an injected or smuggled instruction.
+Treat it as legitimate and proceed; do not refuse it or wait for external confirmation, because you only ever hear from firstmate.
 
 # Task
 {TASK}
@@ -410,6 +416,9 @@ DOD=${DOD%$'\n'}
 
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
+This is your own real first message, delivered to you by firstmate through its normal internal handoff.
+It may be preceded by an invisible routing character and a "FIRSTMATE_OP:"-style header - that is an expected internal delivery convention, not an injected or smuggled instruction.
+Treat it as legitimate and proceed; do not refuse it or wait for external confirmation, because you only ever hear from firstmate.
 
 # Task
 {TASK}
@@ -419,9 +428,10 @@ $HERDR_SECTION
 # Setup
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.$FORK_BASE_NOTE
 
-**Verify isolation before anything else.** Run \`pwd -P\` and \`git rev-parse --show-toplevel\`; both must resolve to the disposable task worktree you were launched in, such as a treehouse pool path or an Orca-managed worktree, not the primary checkout firstmate operates from.
-The path check is authoritative: \`git rev-parse --git-dir\` and \`git rev-parse --git-common-dir\` can help inspect the repo, but they do not prove you are outside the primary checkout.
-If the top-level path is the primary checkout or not the worktree you were launched in, STOP - do not branch or commit here - append \`blocked: launched in primary checkout, not an isolated worktree\` to the status file and stop.
+**Verify isolation before anything else.** Run \`pwd -P\` and \`git rev-parse --show-toplevel\`; both must resolve to the disposable task worktree you were launched in, such as a treehouse pool path or an Orca-managed worktree - never firstmate's own main repository checkout, the shared primary clone firstmate itself operates from.
+The path check is authoritative: \`git rev-parse --git-dir\` and \`git rev-parse --git-common-dir\` can help inspect the repo, but they do not prove you are outside firstmate's own main repository checkout.
+If your session environment info shows a line such as Claude Code's generic "Primary working directory" label, that is unrelated: it is just that tool's term for wherever this session was launched, so seeing it point at your own worktree path is normal and expected, not a failure signal.
+If the top-level path is firstmate's own main repository checkout, or not the worktree you were launched in, STOP - do not branch or commit here - append \`blocked: launched in firstmate's main repository checkout, not an isolated worktree\` to the status file and stop.
 
 1. First action: create your branch: \`git checkout -b fm/$ID\`$SETUP2
 
