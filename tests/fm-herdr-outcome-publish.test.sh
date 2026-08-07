@@ -89,7 +89,7 @@ test_herdr_task_publishes_signal_and_metadata() {
   expect_code 0 "$rc" "herdr-task: publish should succeed"
   assert_grep 'HERDR_SESSION=fmtest ARGS=workspace report-signal --source firstmate --kind completed --from w1 --session fmtest' \
     "$case_dir/herdr.log" "herdr-task: report-signal was not called as expected"
-  assert_grep 'HERDR_SESSION=fmtest ARGS=workspace report-metadata --source firstmate --token outcome=pr_merged --token summary=PR #9 merged w1 --session fmtest' \
+  assert_grep 'HERDR_SESSION=fmtest ARGS=workspace report-metadata w1 --source firstmate --token outcome=pr_merged --token summary=PR #9 merged --session fmtest' \
     "$case_dir/herdr.log" "herdr-task: report-metadata was not called as expected"
   pass "fm-herdr-outcome-publish publishes both a signal and durable metadata for a herdr task"
 }
@@ -106,7 +106,7 @@ test_no_summary_omits_summary_token() {
   set -e
 
   expect_code 0 "$rc" "no-summary: publish should succeed"
-  assert_grep 'HERDR_SESSION=fmtest ARGS=workspace report-metadata --source firstmate --token outcome=validation_failed w1 --session fmtest' \
+  assert_grep 'HERDR_SESSION=fmtest ARGS=workspace report-metadata w1 --source firstmate --token outcome=validation_failed --session fmtest' \
     "$case_dir/herdr.log" "no-summary: report-metadata should carry only the outcome token"
   assert_no_grep 'summary=' "$case_dir/herdr.log" \
     "no-summary: report-metadata should not carry a summary token when none was given"

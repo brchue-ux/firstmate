@@ -546,7 +546,7 @@ SH
   expect_code 0 "$rc" "herdr-landed-outcome: teardown should succeed"
   assert_grep 'workspace report-signal --source firstmate --kind completed --from w1 --session fmtest' \
     "$case_dir/herdr.log" "herdr-landed-outcome: landed teardown did not publish a herdr signal"
-  assert_grep 'workspace report-metadata --source firstmate --token outcome=landed --token summary=task task-x1 landed w1 --session fmtest' \
+  assert_grep 'workspace report-metadata w1 --source firstmate --token outcome=landed --token summary=task task-x1 landed --session fmtest' \
     "$case_dir/herdr.log" "herdr-landed-outcome: landed teardown did not publish durable herdr metadata"
   pass "fm-teardown publishes the landed outcome into herdr for a herdr-backed task"
 }

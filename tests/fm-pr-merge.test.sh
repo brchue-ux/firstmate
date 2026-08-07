@@ -157,7 +157,7 @@ test_publishes_herdr_outcome_on_merge() {
   expect_code 0 "$rc" "herdr-outcome: fm-pr-merge should succeed"
   assert_grep 'workspace report-signal --source firstmate --kind completed --from w1 --session fmtest' \
     "$case_dir/herdr.log" "herdr-outcome: the merge did not publish a herdr signal"
-  assert_grep 'workspace report-metadata --source firstmate --token outcome=pr_merged --token summary=PR #42 merged w1 --session fmtest' \
+  assert_grep 'workspace report-metadata w1 --source firstmate --token outcome=pr_merged --token summary=PR #42 merged --session fmtest' \
     "$case_dir/herdr.log" "herdr-outcome: the merge did not publish durable herdr metadata"
   pass "fm-pr-merge publishes the merge outcome into herdr for a herdr-backed task"
 }

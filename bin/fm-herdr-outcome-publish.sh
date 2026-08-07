@@ -104,8 +104,11 @@ fm_backend_herdr_cli "$SESSION" workspace report-signal \
 
 TOKENS=(--token "outcome=$OUTCOME")
 [ -z "$SUMMARY" ] || TOKENS+=(--token "summary=$SUMMARY")
+# The WORKSPACE_ID positional must come first: the installed herdr CLI
+# (0.8.0) does not accept it after --source/--token options - verified
+# empirically (`unknown option: firstmate` when the positional trails).
 fm_backend_herdr_cli "$SESSION" workspace report-metadata \
-  --source firstmate "${TOKENS[@]}" "$WORKSPACE" \
+  "$WORKSPACE" --source firstmate "${TOKENS[@]}" \
   >/dev/null 2>&1 || true
 
 exit 0
