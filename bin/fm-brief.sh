@@ -7,9 +7,18 @@
 # when the task genuinely deviates (e.g. working an existing external PR instead
 # of shipping a new one).
 # Usage: fm-brief.sh <task-id> <repo-name> [--scout] [--herdr-lab]
+#                     [--pr-repo <owner>/<repo> --pr-base <branch>]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
+#   --pr-repo/--pr-base name the explicit PR target for a ship brief whose
+#   delivery mode opens a pull request (no-mistakes or direct-PR). Required for
+#   those modes, exactly as caller-supplied as the repo-name argument itself,
+#   so the scaffolded brief always names a concrete `--repo <owner>/<repo>
+#   --base <branch>` target and a bare `gh pr create` (which can silently
+#   default to GitHub's own fork-parent repo instead of this fleet's
+#   origin/fork convention) never appears. Not required for --scout or
+#   local-only, neither of which opens a PR.
 #   --secondmate writes a persistent secondmate charter. The project list
 #   is cloned into the secondmate home, while the natural-language scope
 #   tells the main firstmate when to route work there; routine churn stays in its own home;
@@ -99,15 +108,20 @@ fi
 KIND=ship
 HERDR_LAB=0
 NO_PROJECTS=0
+PR_REPO=""
+PR_BASE=""
 POS=()
-for a in "$@"; do
-  case "$a" in
+while [ $# -gt 0 ]; do
+  case "$1" in
     --scout) KIND=scout ;;
     --secondmate) KIND=secondmate ;;
     --herdr-lab) HERDR_LAB=1 ;;
     --no-projects) NO_PROJECTS=1 ;;
-    *) POS+=("$a") ;;
+    --pr-repo) shift; PR_REPO=${1:?"error: --pr-repo requires a value"} ;;
+    --pr-base) shift; PR_BASE=${1:?"error: --pr-base requires a value"} ;;
+    *) POS+=("$1") ;;
   esac
+  shift
 done
 ID=${POS[0]}
 
@@ -220,6 +234,18 @@ fi
 
 REPO=${POS[1]}
 
+# herdr's clone lands a worker at a detached HEAD on the default branch, which
+# tracks the third-party upstream `origin`, not the captain's own `fork` -
+# the actual working base with all landed work. This has stalled dispatched
+# herdr tasks twice by omission (data/learnings.md, "Fork base"), so bake the
+# check into every herdr brief instead of relying on it being hand-added.
+if [ "$REPO" = herdr ]; then
+# shellcheck disable=SC2016  # single quotes are deliberate: the backtick-wrapped commands are literal brief text, not shell expansion.
+FORK_BASE_NOTE=$'\n\n''**FIRST: verify or rebase onto `fork/master` before doing anything else.** The clone lands you at a detached HEAD on its default branch, which tracks `origin` - the third-party upstream `ogulcancelik/herdr` - not `fork` (`brchue-ux/herdr`), the actual working base with all landed captain work; the two have diverged and neither is an ancestor of the other. Run `git fetch fork`, then `git merge-base --is-ancestor fork/master HEAD`; if that fails, rebase onto `fork/master` before creating your branch.'
+else
+FORK_BASE_NOTE=""
+fi
+
 if [ "$HERDR_LAB" -eq 1 ]; then
 HERDR_LAB_HELPER=$(shell_quote "$FM_ROOT/bin/fm-herdr-lab.sh")
 # shellcheck disable=SC2016  # single quotes are deliberate: these lines are literal brief text whose backtick-wrapped $(...) and "$HERDR_LAB_SESSION" snippets must reach the reading agent verbatim, not expand at scaffold time; only the '"$VAR"' break-outs interpolate.
@@ -262,7 +288,7 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 $HERDR_SECTION
 
 # Setup
-You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
+You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.$FORK_BASE_NOTE
 This is a SCOUT task: the deliverable is a written report, not a PR.
 The worktree is your laboratory - install, run, edit, and make scratch commits freely; all of it is discarded at teardown.
 The report is the only thing that survives, so anything worth keeping must be in it.
@@ -307,6 +333,23 @@ read -r MODE _ <<EOF
 $("$FM_ROOT/bin/fm-project-mode.sh" "$REPO")
 EOF
 
+# A bare `gh pr create` targets GitHub's own fork-parent metadata, not this
+# fleet's origin/fork convention (confirmed twice: brchue-ux/herdr ->
+# herdrdev/herdr, brchue-ux/firstmate -> kunchenguid/firstmate; see
+# data/learnings.md, "`gh pr create` with no `--repo`..."). Every mode that
+# opens a PR must name its explicit target, supplied the same way the repo
+# argument itself is: as a caller-supplied argument, not inferred here.
+case "$MODE" in
+  local-only) ;;  # never opens a PR
+  *)
+    case "$PR_REPO" in
+      */*) ;;
+      *) echo "error: --pr-repo <owner>/<repo> is required for a $MODE ship brief (repo: $REPO)" >&2; exit 1 ;;
+    esac
+    [ -n "$PR_BASE" ] || { echo "error: --pr-base <branch> is required for a $MODE ship brief (repo: $REPO)" >&2; exit 1; }
+    ;;
+esac
+
 case "$MODE" in
   direct-PR)
     SETUP2=""
@@ -315,7 +358,7 @@ case "$MODE" in
 # Definition of done
 This project ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
-When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
+When it is implemented and committed, push your branch and open a PR with \`gh-axi pr create --repo $PR_REPO --base $PR_BASE\` - never a bare \`gh pr create\`, which can silently target the wrong repository - then append \`done: PR {url}\` to the status file and stop.
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 EOF
     ;;
@@ -340,6 +383,10 @@ EOF
 The task is complete only when committed on your branch.
 When you believe it is complete, append \`done: {summary}\` to the status file and stop.
 Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
+This project's PR target is \`$PR_REPO\` on \`$PR_BASE\`. The pipeline owns the actual push and PR
+creation, but if you ever need to run \`gh-axi pr create\` yourself, always pass
+\`--repo $PR_REPO --base $PR_BASE\` explicitly - never a bare \`gh pr create\`, which can silently
+target the wrong repository.
 
 You drive no-mistakes by responding to its gates, not by implementing fixes.
 Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
@@ -370,7 +417,7 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 $HERDR_SECTION
 
 # Setup
-You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
+You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.$FORK_BASE_NOTE
 
 **Verify isolation before anything else.** Run \`pwd -P\` and \`git rev-parse --show-toplevel\`; both must resolve to the disposable task worktree you were launched in, such as a treehouse pool path or an Orca-managed worktree, not the primary checkout firstmate operates from.
 The path check is authoritative: \`git rev-parse --git-dir\` and \`git rev-parse --git-common-dir\` can help inspect the repo, but they do not prove you are outside the primary checkout.
