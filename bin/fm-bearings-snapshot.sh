@@ -60,6 +60,11 @@ set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FLEET="$SCRIPT_DIR/fm-fleet-snapshot.sh"
+# Only needed for the shared FM_DOING_CHAR_CAP constant (see that file); this
+# wrapper does JSON projection in jq, not the classifier logic the lib mostly
+# holds.
+# shellcheck source=bin/fm-classify-lib.sh
+. "$SCRIPT_DIR/fm-classify-lib.sh"
 
 # Bounds (overridable for tests / large fleets).
 FM_BEARINGS_LANDED=${FM_BEARINGS_LANDED:-6}
@@ -301,9 +306,23 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   --argjson pr_repos_shown "$PR_REPOS_SHOWN" \
   --argjson pr_rows_capped "$PR_ROWS_CAPPED" \
   --argjson pr_rows_min_total "$PR_ROWS_MIN_TOTAL" \
-  --argjson candidate_prs "$CANDIDATE_PRS" '
+  --argjson candidate_prs "$CANDIDATE_PRS" \
+  --argjson doing_cap "$FM_DOING_CHAR_CAP" '
   def trunc($n): if . == null then null else
     (tostring | gsub("\\s+"; " ") | if (length > $n) then (.[:$n] + "…") else . end) end;
+  # Word-boundary-aware cousin of trunc(), for "doing" fields only: a
+  # published status text should already fit a rendering surface without a
+  # mid-word cut. See FM_DOING_CHAR_CAP in bin/fm-classify-lib.sh
+  # for the sourced cap and the bash twin (fm_doing_truncate) this mirrors.
+  def doing_trunc($n):
+    tostring | gsub("\\s+"; " ") as $s
+    | if ($s | length) <= $n then $s
+      else ($s[0:$n]) as $cut
+      | ($cut | split(" ")) as $words
+      | (if ($words | length) > 1 then ($words[0:-1] | join(" ")) else "" end) as $boundary
+      | (if ($boundary | length) >= (($n * 3) / 5 | floor) and ($boundary | length) > 0
+         then $boundary else $cut end) + "…"
+      end;
   def round_robin_landed($n):
     . as $groups
     | [range(0; (($groups | map(length) | max) // 0)) as $i
@@ -365,7 +384,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
                   elif .bearings_state == "externally_held" then
                     ([.bearings_holds[] | .id + ": " + (.reason // "held")] | join("; "))
                   elif .bearings_state == "no_active_work" then "No active child work"
-                  else (.current.reason // "Current home state unavailable") end) | trunc(120)),
+                  else (.current.reason // "Current home state unavailable") end) | doing_trunc($doing_cap)),
           provenance:.provenance.selected,freshness:.freshness.status,
           age_seconds:.freshness.age_seconds,contradiction:(.contradiction // false),
           reason:(.current.reason // "-")} ]) as $secondmates_all
@@ -376,12 +395,12 @@ MODEL=$(printf '%s' "$SNAP" | jq \
        | {id, kind,
         state: .current_state.state,
         doing: ((.current_state.detail // "") as $d
-                | (if $d != "" then $d else (.hints.last_event_text // "") end) | trunc(90))
+                | (if $d != "" then $d else (.hints.last_event_text // "") end) | doing_trunc($doing_cap))
       } ]
      + [ $secondmate_views[]
          | select(.bearings_state == "active_child_work")
          | {id,kind:"secondmate",state:.bearings_state,
-            doing:([.active_children[] | .id + ": " + (.doing // .state)] | join("; ") | trunc(90))} ]) as $in_flight_all
+            doing:([.active_children[] | .id + ": " + (.doing // .state)] | join("; ") | doing_trunc($doing_cap))} ]) as $in_flight_all
   | ([ .backlog.records[]
          | select(.structured and .captain_actionable == true)
          | {id,key:.id,verb:"captain-hold",
