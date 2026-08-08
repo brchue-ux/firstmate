@@ -435,6 +435,7 @@ FM_DOING_CHAR_CAP=${FM_DOING_CHAR_CAP:-59}
 # three in sync.
 fm_doing_truncate() {  # <text> [cap]
   local text=$1 cap=${2:-$FM_DOING_CHAR_CAP} collapsed cut boundary floor
+  local LC_ALL=C.UTF-8
   collapsed=$(printf '%s' "$text" | tr -s '[:space:]' ' ')
   [ "${#collapsed}" -gt "$cap" ] || { printf '%s' "$collapsed"; return 0; }
   cut=${collapsed:0:cap}
