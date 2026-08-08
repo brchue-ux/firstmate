@@ -201,7 +201,7 @@ test_ship_modes_generate_clean_briefs() {
   for id_proj in "brief-nomistakes-a1:no-registry-proj" "brief-directpr-a2:direct-proj" "brief-localonly-a3:local-proj"; do
     id=${id_proj%%:*}
     proj=${id_proj##*:}
-    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" "$proj" >/dev/null 2>&1; status=$?
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" "$proj" --pr-repo owner/"$proj" --pr-base main >/dev/null 2>&1; status=$?
     expect_code 0 "$status" "fm-brief.sh $id $proj should exit 0"
     brief="$home/data/$id/brief.md"
     assert_present "$brief" "$id: brief was not scaffolded"
@@ -219,7 +219,7 @@ test_faster_paths_use_configured_authority_without_stacked_review() {
   home="$TMP_ROOT/configured-authority-home"
   write_registry "$home"
   id="brief-direct-authority-a4"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" direct-proj >/dev/null 2>&1
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" direct-proj --pr-repo owner/direct-proj --pr-base main >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
   assert_grep "The configured merge authority decides whether to merge the PR; firstmate relays the outcome." "$brief" \
     "direct-PR brief lost configured merge authority"
@@ -244,7 +244,7 @@ test_no_mistakes_dod_wording() {
   home="$TMP_ROOT/wording-home"
   mkdir -p "$home/data"
   id="brief-wording-b1"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj >/dev/null 2>&1
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --pr-repo owner/some-proj --pr-base main >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
   assert_present "$brief" "brief was not scaffolded"
   assert_grep "no-mistakes itself provides for the mechanics" "$brief" \
@@ -269,7 +269,7 @@ test_ship_project_memory_wording() {
   home="$TMP_ROOT/project-memory-home"
   mkdir -p "$home/data"
   id="brief-memory-c1"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj >/dev/null 2>&1
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --pr-repo owner/some-proj --pr-base main >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
   assert_present "$brief" "brief was not scaffolded"
   assert_grep "Record only project knowledge useful to almost every future session." "$brief" \
@@ -286,7 +286,7 @@ test_herdr_lab_contract_is_explicit_and_complete() {
   home="$TMP_ROOT/herdr-lab-home"
   mkdir -p "$home/data"
   id="brief-herdr-lab-d1"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --herdr-lab >/dev/null 2>&1
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --herdr-lab --pr-repo owner/firstmate --pr-base main >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
   assert_present "$brief" "Herdr lab brief was not scaffolded"
   assert_grep "# Herdr isolation - HARD SAFETY CONTRACT" "$brief" \
@@ -338,7 +338,7 @@ test_herdr_lab_omission_is_loud_for_ship_and_scout() {
     if [ "$kind" = scout ]; then
       FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout >/dev/null 2>&1
     else
-      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate >/dev/null 2>&1
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --pr-repo owner/firstmate --pr-base main >/dev/null 2>&1
     fi
     brief="$home/data/$id/brief.md"
     assert_grep "# Herdr lifecycle declaration - NOT ENABLED" "$brief" \
@@ -553,7 +553,7 @@ test_pause_verb_override_renders_all_brief_scaffolds() {
     case "$kind" in
       ship)
         FM_HOME="$home" FM_CLASSIFY_PAUSED_VERB=awaiting \
-          "$ROOT/bin/fm-brief.sh" "$id" firstmate >/dev/null 2>&1
+          "$ROOT/bin/fm-brief.sh" "$id" firstmate --pr-repo owner/firstmate --pr-base main >/dev/null 2>&1
         ;;
       scout)
         FM_HOME="$home" FM_CLASSIFY_PAUSED_VERB=awaiting \
@@ -618,6 +618,96 @@ test_scout_and_secondmate_scaffold() {
   pass "fm-brief: scout and secondmate code paths still scaffold well-formed briefs"
 }
 
+# herdr's clone lands a worker at a detached HEAD on the default branch, which
+# tracks the third-party upstream `origin`, not the captain's working `fork`.
+# This has stalled dispatched herdr tasks twice by omission (data/learnings.md,
+# "Fork base"), so the scaffold must bake the check in automatically for both
+# ship and scout herdr briefs, with no manual edit required.
+test_herdr_repo_bakes_in_fork_base_check() {
+  local home brief
+  home="$TMP_ROOT/herdr-fork-base-home"
+  mkdir -p "$home/data"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" herdr-ship herdr \
+    --pr-repo brchue-ux/herdr --pr-base master >/dev/null 2>&1 \
+    || fail "fm-brief.sh herdr ship scaffold exited non-zero"
+  brief="$home/data/herdr-ship/brief.md"
+  [ "$(grep -c 'fork/master' "$brief")" -gt 0 ] \
+    || fail "herdr ship brief missing the fork/master base check"
+  assert_grep "verify or rebase onto \`fork/master\`" "$brief" \
+    "herdr ship brief missing the fork-base instruction"
+  assert_grep "the third-party upstream \`ogulcancelik/herdr\`" "$brief" \
+    "herdr ship brief did not name the upstream remote it must not build on"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" herdr-scout herdr --scout >/dev/null 2>&1 \
+    || fail "fm-brief.sh herdr scout scaffold exited non-zero"
+  brief="$home/data/herdr-scout/brief.md"
+  [ "$(grep -c 'fork/master' "$brief")" -gt 0 ] \
+    || fail "herdr scout brief missing the fork/master base check"
+
+  # A non-herdr repo must not pick up herdr-specific base instructions.
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" other-ship some-proj \
+    --pr-repo owner/some-proj --pr-base main >/dev/null 2>&1 \
+    || fail "fm-brief.sh non-herdr ship scaffold exited non-zero"
+  brief="$home/data/other-ship/brief.md"
+  assert_no_grep "fork/master" "$brief" \
+    "non-herdr brief picked up the herdr-only fork-base check"
+  pass "fm-brief.sh: herdr briefs bake in the fork/master base check automatically"
+}
+
+# A bare `gh pr create` targets GitHub's own fork-parent metadata instead of
+# this fleet's origin/fork convention (data/learnings.md, "`gh pr create` with
+# no `--repo`..."), confirmed live for both brchue-ux/herdr -> herdrdev/herdr
+# and brchue-ux/firstmate -> kunchenguid/firstmate. Every ship brief whose mode
+# opens a PR must name an explicit target, supplied the same way the repo
+# argument itself is: as a caller-supplied --pr-repo/--pr-base pair.
+test_ship_pr_target_is_explicit() {
+  local home brief status
+  home="$TMP_ROOT/pr-target-home"
+  write_registry "$home"
+
+  # direct-PR mode: the worker runs gh-axi itself, so the command must be
+  # fully explicit (this is the exact incident shape: "push your branch and
+  # open a PR with `gh-axi`" with no target, which defaulted to herdrdev/herdr).
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" herdr-pr-target direct-proj \
+    --pr-repo brchue-ux/herdr --pr-base master >/dev/null 2>&1 \
+    || fail "fm-brief.sh direct-PR scaffold with --pr-repo exited non-zero"
+  brief="$home/data/herdr-pr-target/brief.md"
+  # shellcheck disable=SC2016 # Literal backticks must remain unexpanded.
+  assert_grep '`gh-axi pr create --repo brchue-ux/herdr --base master`' "$brief" \
+    "direct-PR brief did not render the explicit PR-creation command"
+  # shellcheck disable=SC2016 # Literal backticks must remain unexpanded.
+  assert_no_grep 'open a PR with `gh-axi`, then append' "$brief" \
+    "direct-PR brief kept the generic no-target gh-axi instruction"
+
+  # no-mistakes mode: the pipeline owns the actual push and PR, but the brief
+  # must still name the explicit target for any manual gh-axi fallback
+  # (this is the exact incident shape: brchue-ux/firstmate -> kunchenguid/firstmate).
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" firstmate-pr-target firstmate \
+    --pr-repo brchue-ux/firstmate --pr-base main >/dev/null 2>&1 \
+    || fail "fm-brief.sh firstmate scaffold with --pr-repo exited non-zero"
+  brief="$home/data/firstmate-pr-target/brief.md"
+  # shellcheck disable=SC2016 # Literal backticks must remain unexpanded.
+  assert_grep 'PR target is `brchue-ux/firstmate` on `main`' "$brief" \
+    "firstmate no-mistakes brief did not name its explicit PR target"
+  # shellcheck disable=SC2016 # Literal backticks must remain unexpanded.
+  assert_grep '`--repo brchue-ux/firstmate --base main`' "$brief" \
+    "firstmate no-mistakes brief did not instruct the explicit flag for a manual gh-axi fallback"
+
+  # Omitting --pr-repo/--pr-base must fail loudly rather than scaffold a brief
+  # with a bare, mis-targetable `gh pr create`.
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" herdr-no-target herdr >/dev/null 2>&1; status=$?
+  expect_code 1 "$status" "a ship brief that opens a PR without --pr-repo/--pr-base must fail"
+  assert_absent "$home/data/herdr-no-target/brief.md" \
+    "loud-failure ship brief still wrote a file"
+
+  # local-only never opens a PR, so it needs no explicit target.
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" local-no-target local-proj >/dev/null 2>&1; status=$?
+  expect_code 0 "$status" "local-only brief must not require --pr-repo/--pr-base"
+
+  pass "fm-brief.sh: ship briefs that open a PR always name an explicit target repo and base branch"
+}
+
 test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
@@ -635,3 +725,5 @@ test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
+test_herdr_repo_bakes_in_fork_base_check
+test_ship_pr_target_is_explicit
