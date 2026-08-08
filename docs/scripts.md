@@ -88,6 +88,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-teardown.sh`         | Fail-closed teardown: return landed ship worktrees, require completed scout deliverables, retire secondmate homes |
 | `fm-herdr-outcome-publish.sh` | Decoration-only: publish a real learned work outcome (PR merged, task landed) into herdr as a signal plus durable metadata, when the task's own meta names a herdr workspace target |
 | `fm-quota-publish.sh`    | Decoration-only: publish this FM_HOME's own 5-hour and 7-day quota windows (percentage + reset time) into herdr as durable metadata, resolved against the home's own durable workspace |
+| `fm-quality-event.sh`    | Append a quality-streak ledger event for a mate and decoration-only publish its decayed streak/severity readout to herdr |
 | `fm-harness.sh`          | Detect the running harness and resolve crew or secondmate harness, model, and effort |
 | `fm-lock.sh`             | Per-home firstmate session lock                                                      |
 | `fm-x-lib.sh`            | Shared X-mode config, relay, and reply-threading helpers                             |
