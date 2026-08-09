@@ -55,7 +55,8 @@
 #                                   really an operational home) or failed to
 #                                   remove
 #   "<root>: skipped: <reason>"   - a whole-sweep limit (open handles could not
-#                                   be checked, time budget exhausted)
+#                                   be checked, time budget exhausted, the
+#                                   --max candidate cap reached)
 # Healthy skips - young, in use, not ours, not matching - stay silent unless
 # --verbose is passed.
 #
@@ -71,11 +72,14 @@
 # tests and one-off manual runs, not as a configuration surface):
 #   FM_TMP_SWEEP_AGE_HOURS   age window in hours (default 12)
 #   FM_TMP_SWEEP_AGE_MINUTES age window in minutes; wins over the hours form.
-#                            The test runner sweeps on a much shorter horizon
-#                            than session start, because a fixture orphaned
-#                            minutes ago is already dead weight
+#                            Exists for a caller that cannot express its window
+#                            in whole hours; no caller shortens the default
 #   FM_TMP_SWEEP_MAX         stop after examining this many candidates
-#                            (default 500); 0 means no bound
+#                            (default 0, meaning unbounded). A caller that
+#                            wants a bound passes --max: session start must
+#                            reclaim everything it can, so bounding it by
+#                            default would strand orphans on the very host that
+#                            leaked the most
 #   FM_TMP_SWEEP_HOMES       extra firstmate homes to read task records from,
 #                            colon-separated. FM_HOME and the secondmate homes
 #                            each discoverable home registers are always read
@@ -107,7 +111,7 @@ AGE_HOURS=${FM_TMP_SWEEP_AGE_HOURS:-12}
 AGE_MINUTES_OPT=${FM_TMP_SWEEP_AGE_MINUTES:-}
 ROOT_DIR=${FM_TMP_SWEEP_ROOT:-${TMPDIR:-/tmp}}
 BUDGET=${FM_TMP_SWEEP_TIMEOUT:-20}
-MAX=${FM_TMP_SWEEP_MAX:-500}
+MAX=${FM_TMP_SWEEP_MAX:-0}
 PROTECT_HOMES=${FM_TMP_SWEEP_HOMES:-}
 PROC_ROOT=${FM_TMP_SWEEP_PROC_ROOT:-/proc}
 DRY_RUN=0
@@ -145,8 +149,10 @@ if [ -n "$AGE_MINUTES_OPT" ]; then
     ''|*[!0-9]*) die "age minutes must be a non-negative integer, got '$AGE_MINUTES_OPT'" ;;
   esac
   AGE_MINUTES=$AGE_MINUTES_OPT
+  AGE_WINDOW="${AGE_MINUTES}m"
 else
   AGE_MINUTES=$((AGE_HOURS * 60))
+  AGE_WINDOW="${AGE_HOURS}h"
 fi
 
 [ -d "$ROOT_DIR" ] || exit 0
@@ -218,11 +224,17 @@ looks_like_home() {
 # cheap next to the probes that follow, and it is the only check that can tell a
 # live task's scratch from an abandoned fixture.
 
+# Emitted by candidate_homes in place of a home it could not enumerate. The
+# discovery walk runs inside a pipeline, so an exit status cannot reach the
+# caller; the failure has to travel as a line. No real home path can collide
+# with it.
+HOME_SCAN_FAILED='!fm-tmp-sweep: a home registry could not be read'
+
 # candidate_homes: the homes whose task records may name a live scratch root -
 # this session's FM_HOME, every home named by --protect-homes, and every
 # secondmate each of those registers.
 candidate_homes() {
-  local seeded home
+  local seeded home registry
   {
     [ -z "${FM_HOME:-}" ] || printf '%s\n' "$FM_HOME"
     if [ -n "$PROTECT_HOMES" ]; then
@@ -231,21 +243,55 @@ candidate_homes() {
   } | LC_ALL=C sort -u | while IFS= read -r seeded; do
     [ -n "$seeded" ] || continue
     printf '%s\n' "$seeded"
-    [ -r "$seeded/data/secondmates.md" ] || continue
+    registry="$seeded/data/secondmates.md"
+    # An unreadable registry hides a whole class of homes, so every live task
+    # those homes record goes unseen - the same ambiguity as an unreadable task
+    # record, and it must stop the sweep the same way. A registry that simply
+    # is not there says the home has no secondmates, which is not ambiguous.
+    # An unsearchable data/ is indistinguishable from a missing registry by
+    # test alone, so it is checked first.
+    if [ -d "$seeded/data" ] && [ ! -x "$seeded/data" ]; then
+      printf '%s\n' "$HOME_SCAN_FAILED"
+      continue
+    fi
+    if [ ! -r "$registry" ]; then
+      if [ -e "$registry" ] || [ -L "$registry" ]; then
+        printf '%s\n' "$HOME_SCAN_FAILED"
+      fi
+      continue
+    fi
     while IFS= read -r home; do
       [ -n "$home" ] && printf '%s\n' "$home"
-    done < <(sed -n 's/.*(home: *\([^;)]*\).*/\1/p' "$seeded/data/secondmates.md")
+    done < <(sed -n 's/.*(home: *\([^;)]*\).*/\1/p' "$registry")
   done
+}
+
+# emit_protected_path <recorded>: a recorded tasktmp= value in every form a
+# candidate could be compared against. Candidates are always ROOT_PHYS-prefixed,
+# so a recorded path written through a symlinked temp root - /tmp on macOS -
+# never matches verbatim and the protection would be inert. The recorded value
+# is kept alongside the resolved one: a scratch root that has already gone means
+# resolution fails, and dropping it there would silently unprotect it.
+emit_protected_path() {
+  local recorded=$1 phys
+  [ -n "$recorded" ] || return 0
+  printf '%s\n' "$recorded"
+  phys=$(resolve_phys "$recorded") || return 0
+  [ "$phys" = "$recorded" ] || printf '%s\n' "$phys"
 }
 
 # protected_tasktmp: every tasktmp= path those homes record. Fails when a home's
 # task records exist but cannot be read: an unreadable record is exactly the
 # ambiguity that must stop the sweep rather than let it delete on a guess.
 protected_tasktmp() {
-  local home meta rc=0
+  local home meta recorded rc=0
   local -a metas
   while IFS= read -r home; do
     [ -n "$home" ] || continue
+    if [ "$home" = "$HOME_SCAN_FAILED" ]; then
+      rc=1
+      continue
+    fi
     [ -d "$home/state" ] || continue
     if [ ! -r "$home/state" ] || [ ! -x "$home/state" ]; then
       rc=1
@@ -260,7 +306,10 @@ protected_tasktmp() {
       fi
       metas+=("$meta")
     done
-    [ "${#metas[@]}" -eq 0 ] || sed -n 's/^tasktmp=//p' "${metas[@]}"
+    [ "${#metas[@]}" -eq 0 ] && continue
+    while IFS= read -r recorded; do
+      emit_protected_path "$recorded"
+    done < <(sed -n 's/^tasktmp=//p' "${metas[@]}")
   done < <(candidate_homes | LC_ALL=C sort -u)
   return "$rc"
 }
@@ -414,6 +463,10 @@ dir_in_use() {
 removed=0
 unverified=0
 deferred=0
+# Which of the two bounds stopped the examination. An operator reading the
+# deferral line diagnoses a slow host and a capped run differently, so the two
+# must never share a reason.
+deferred_reason=
 
 # Pass one is the cheap pass: name, type, ownership and live-containment filters
 # only, no syscall heavier than a stat. It exists so that when the time budget
@@ -450,10 +503,12 @@ for entry in ${candidates[@]+"${candidates[@]}"}; do
   # honour.
   if [ "$MAX" -gt 0 ] && [ "$index" -gt "$MAX" ]; then
     deferred=$((total - index + 1))
+    deferred_reason="the --max $MAX candidate cap was reached"
     break
   fi
   if [ "$SECONDS" -ge "$BUDGET" ]; then
     deferred=$((total - index + 1))
+    deferred_reason="${BUDGET}s sweep budget exhausted"
     break
   fi
 
@@ -461,7 +516,7 @@ for entry in ${candidates[@]+"${candidates[@]}"}; do
   # top-level mtime alone is not enough: a long test writes deep in its tree
   # without ever restamping the root it was handed.
   if [ -n "$(find "$entry" -mmin "-$AGE_MINUTES" -print 2>/dev/null | head -n 1)" ]; then
-    note "$name: skipped: modified within ${AGE_HOURS}h"
+    note "$name: skipped: modified within $AGE_WINDOW"
     continue
   fi
 
@@ -513,6 +568,6 @@ if [ "$unverified" -gt 0 ]; then
   report "$ROOT_PHYS: skipped: $unverified stale scratch dir(s) left in place: cannot verify open handles (needs lsof or a readable procfs)"
 fi
 if [ "$deferred" -gt 0 ]; then
-  report "$ROOT_PHYS: skipped: ${BUDGET}s sweep budget exhausted after removing $removed, $deferred candidate(s) deferred to the next session"
+  report "$ROOT_PHYS: skipped: $deferred_reason after removing $removed, $deferred candidate(s) deferred to the next session"
 fi
 exit 0

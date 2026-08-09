@@ -593,7 +593,15 @@ SH
 
 # Runner invocation with the nested-run suppression cleared, so a reap actually
 # runs even when this file is itself executing under the runner.
+#
+# Clearing that suppression means the reap runs for real, so every call site has
+# to aim it at a fixture root. The host's /tmp holds scratch belonging to other
+# live firstmate sessions, and reaping it as a side effect of running the suite
+# would delete their work. Refusing here rather than defaulting keeps the next
+# test that reaches for this helper from silently inheriting the real /tmp.
 run_runner_unnested() {
+  [ -n "${FM_TEST_REAP_ROOT:-}" ] \
+    || fail "run_runner_unnested needs FM_TEST_REAP_ROOT aimed at a fixture root"
   env -u FM_TEST_RUN_ACTIVE "$RUNNER" "$@"
 }
 
@@ -602,8 +610,10 @@ test_completed_run_leaves_no_fixture() {
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-contain.XXXXXX")
   probe="$tmp/probe.test.sh"
   record="$tmp/fixture-path"
+  mkdir -p "$tmp/reap"
   write_fixture_probe "$probe" "$record"
-  run_runner_unnested "$probe" >"$tmp/out" 2>"$tmp/err" \
+  FM_TEST_REAP_ROOT="$tmp/reap" \
+    run_runner_unnested "$probe" >"$tmp/out" 2>"$tmp/err" \
     || fail "probe run should pass: $(cat "$tmp/err")"
   [ -s "$record" ] || fail "probe did not record its fixture path"
   fixture=$(cat "$record")
@@ -623,12 +633,14 @@ test_fixture_removed_when_run_is_interrupted() {
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-interrupt.XXXXXX")
   probe="$tmp/probe.test.sh"
   record="$tmp/fixture-path"
+  mkdir -p "$tmp/reap"
   write_fixture_probe "$probe" "$record" 'sleep 120'
   # Monitor mode puts the background runner in its own process group, so the
   # signal reaches the runner and the test it is running together - the same
   # shape as a terminal interrupt, which is how the leak accumulated.
   set -m
-  run_runner_unnested "$probe" >"$tmp/out" 2>"$tmp/err" &
+  FM_TEST_REAP_ROOT="$tmp/reap" \
+    run_runner_unnested "$probe" >"$tmp/out" 2>"$tmp/err" &
   pid=$!
   set +m
   waited=0
@@ -671,7 +683,9 @@ printf '%s\n' "\$scratch" >'$record'
 echo "ok - task scratch at \$scratch"
 SH
   chmod +x "$probe"
-  run_runner_unnested "$probe" >"$tmp/out" 2>"$tmp/err" \
+  mkdir -p "$tmp/reap"
+  FM_TEST_REAP_ROOT="$tmp/reap" \
+    run_runner_unnested "$probe" >"$tmp/out" 2>"$tmp/err" \
     || fail "probe run should pass: $(cat "$tmp/err")"
   [ -s "$record" ] || fail "probe did not record its task scratch root"
   scratch=$(cat "$record")
@@ -685,14 +699,15 @@ test_killed_run_is_healed_by_the_next_run() {
   local tmp scratch probe record fixture root out pid waited
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-killed.XXXXXX")
   scratch="$tmp/scratch"
-  mkdir -p "$scratch"
+  mkdir -p "$scratch" "$tmp/reap"
   probe="$tmp/probe.test.sh"
   record="$tmp/fixture-path"
   write_fixture_probe "$probe" "$record" 'sleep 120'
   # SIGKILL runs no trap at all. This is exactly how the leak accumulated, so
   # the run root must survive the kill and then be reaped by the next run.
   set -m
-  TMPDIR="$scratch" run_runner_unnested "$probe" >"$tmp/out" 2>"$tmp/err" &
+  TMPDIR="$scratch" FM_TEST_REAP_ROOT="$tmp/reap" \
+    run_runner_unnested "$probe" >"$tmp/out" 2>"$tmp/err" &
   pid=$!
   set +m
   waited=0
@@ -792,6 +807,77 @@ test_signalled_jobs_run_stops_its_workers() {
   pass "a signalled --jobs run stops its workers before removing the run root"
 }
 
+test_aborted_jobs_run_stops_its_workers() {
+  local tmp repo runner reap runtmp fakebin started real_chmod a b c f pid rc leftover
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-jobs-abort.XXXXXX")
+  repo="$tmp/repo"
+  runner="$repo/bin/fm-test-run.sh"
+  reap="$tmp/reap"
+  runtmp="$tmp/runtmp"
+  fakebin="$tmp/fakebin"
+  started="$tmp/started"
+  a=tests/fm-brief.test.sh
+  b=tests/fm-composer-lib.test.sh
+  c=tests/fm-crew-state.test.sh
+  mkdir -p "$repo/bin" "$repo/tests" "$reap" "$runtmp" "$fakebin" "$started"
+  cp "$RUNNER" "$runner"
+  chmod +x "$runner"
+  # Same worker shape as the signalled case: each keeps rebuilding a directory
+  # under its own TMPDIR, so a child still running when the run root is removed
+  # recreates that root. Each also announces itself outside the run root, so a
+  # run that aborted before any worker started cannot pass this vacuously.
+  for f in "$a" "$b" "$c"; do
+    cat >"$repo/$f" <<SH
+#!/usr/bin/env bash
+: >"$started/\$(basename "\$0")"
+while :; do mkdir -p "\$TMPDIR/live"; sleep 0.05; done
+SH
+    chmod +x "$repo/$f"
+  done
+  # An abort that is not a signal: the third worker root's chmod fails, which is
+  # a plain \`|| die\` while the first two workers are already in flight. A full
+  # tmpfs - the failure mode this whole change exists for - produces exactly
+  # this. The delay gives the running workers time to announce themselves first.
+  real_chmod=$(command -v chmod)
+  cat >"$fakebin/chmod" <<SH
+#!/usr/bin/env bash
+last=
+for arg in "\$@"; do last=\$arg; done
+case "\$last" in
+  */w3/tmp) sleep 1; exit 1 ;;
+esac
+exec "$real_chmod" "\$@"
+SH
+  chmod +x "$fakebin/chmod"
+  # Monitor mode only so this test can clean up the run's process group by PID.
+  set -m
+  PATH="$fakebin:$PATH" TMPDIR="$runtmp" FM_TEST_REAP_ROOT="$reap" \
+    env -u FM_TEST_RUN_ACTIVE "$runner" --jobs 3 "$a" "$b" "$c" \
+    >"$tmp/out" 2>"$tmp/err" &
+  pid=$!
+  set +m
+  wait "$pid" && rc=0 || rc=$?
+  # Long enough for any child that outlived the runner to rebuild what the
+  # removal took away.
+  sleep 1
+  leftover=$(ls -A "$runtmp" 2>/dev/null || true)
+  reap_stray_workers "$pid"
+  if [ "$rc" -eq 0 ]; then
+    rm -rf "$tmp"
+    fail "a failed worker root setup must abort the run"
+  fi
+  if [ -z "$(ls -A "$started" 2>/dev/null || true)" ]; then
+    rm -rf "$tmp"
+    fail "no worker ever started, so the abort proved nothing"
+  fi
+  if [ -n "$leftover" ]; then
+    rm -rf "$tmp"
+    fail "an aborted --jobs run left its run root behind: $leftover"
+  fi
+  rm -rf "$tmp"
+  pass "a --jobs run aborting without a signal stops its workers before removing the run root"
+}
+
 # Build an isolated reap root plus a Firstmate home whose recorded task scratch
 # lives inside it. Echoes "<reap root>|<home>".
 init_reap_fixture() {
@@ -815,12 +901,20 @@ make_orphan() {
 }
 
 test_reap_clears_pre_existing_orphans() {
-  local tmp reap home orphan fresh probe out
+  local tmp reap home orphan fresh recent probe out
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-reap.XXXXXX")
   IFS='|' read -r reap home <<<"$(init_reap_fixture "$tmp")"
   orphan=$(make_orphan "$reap" "fm-secondmate-safety.Ab12Cd")
   fresh="$reap/fm-recent-run.Zz99Yy"
   mkdir -p "$fresh"
+  # Twenty minutes old. The runner takes the sweep's own conservative window
+  # rather than shortening it, because this root is shared with other live
+  # firstmate tooling whose scratch can sit unwritten for far longer than a test
+  # fixture - bin/fm-home-seed.sh's rollback backup waits out a whole clone.
+  # A genuinely leaked fixture is days old, so nothing is lost by waiting.
+  recent="$reap/fm-seed-backup.Bb22Cc"
+  mkdir -p "$recent"
+  touch -d '20 minutes ago' "$recent" 2>/dev/null || touch -A -002000 "$recent"
   probe="$tmp/probe.test.sh"
   printf '#!/usr/bin/env bash\necho "ok - probe"\n' >"$probe"
   chmod +x "$probe"
@@ -831,6 +925,8 @@ test_reap_clears_pre_existing_orphans() {
   assert_contains "$out" "removed=1" "reap should report the one removed orphan: $out"
   assert_absent "$orphan" "a pre-existing orphan must be reaped: $orphan"
   assert_present "$fresh" "a fixture younger than the minimum age must be kept: $fresh"
+  assert_present "$recent" \
+    "the runner must not shorten the sweep's age window for other tooling's scratch: $recent"
   rm -rf "$tmp"
   pass "a later run reaps pre-existing orphans and spares recent ones"
 }
@@ -985,6 +1081,7 @@ test_fixture_removed_when_run_is_interrupted
 test_spawned_task_scratch_is_contained
 test_killed_run_is_healed_by_the_next_run
 test_signalled_jobs_run_stops_its_workers
+test_aborted_jobs_run_stops_its_workers
 test_reap_clears_pre_existing_orphans
 test_reap_never_touches_a_live_task_scratch
 test_reap_never_removes_a_held_open_fixture

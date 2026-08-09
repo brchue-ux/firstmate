@@ -390,6 +390,53 @@ test_reads_secondmate_homes_for_live_scratch() {
   pass "sweep reads registered secondmate homes for live task scratch"
 }
 
+test_unreadable_secondmate_registry_refuses_the_sweep() {
+  local root dir home out
+  if [ "$(id -u)" = 0 ]; then
+    pass "unreadable secondmate registry: root bypasses file permissions, nothing to assert"
+    return 0
+  fi
+  root=$(new_root unreadable-registry)
+  dir=$(make_stale_dir "$root" fm-teardown-tests.aB3xY9)
+  home="$TMP_ROOT/unreadable-registry-home"
+  mkdir -p "$home/state" "$home/data"
+  printf -- '- second (home: %s; scope: things)\n' "$TMP_ROOT/second" > "$home/data/secondmates.md"
+  chmod 000 "$home/data/secondmates.md"
+
+  out=$(run_sweep "$root" --protect-homes "$home")
+  chmod 644 "$home/data/secondmates.md"
+  # A registry that is simply absent says the home has no secondmates, which
+  # every other case here relies on. One that exists and cannot be read hides a
+  # whole class of homes, so the live tasks they record go unseen - the same
+  # ambiguity as an unreadable task record, and it must refuse the same way.
+  assert_present "$dir" \
+    "an unreadable secondmate registry must stop the sweep rather than let it guess"
+  assert_contains "$out" "task records could not be read" \
+    "refusing on an unreadable secondmate registry must say so"
+  pass "sweep refuses entirely when a home's secondmate registry cannot be read"
+}
+
+test_protects_a_live_task_recorded_through_a_symlinked_root() {
+  local root real live recorded home out
+  real=$(new_root symlinked-root-real)
+  root="$TMP_ROOT/symlinked-root"
+  ln -s "$real" "$root"
+  live=$(make_stale_dir "$real" fm-symtask.aB3xY9)
+  # What bin/fm-spawn.sh records on a host whose temp root is a symlink - macOS,
+  # where /tmp points at /private/tmp. Candidates always carry the resolved
+  # root, so a verbatim comparison can never match and the protection would be
+  # inert on exactly the hosts where the two spellings differ.
+  recorded="$root/fm-symtask.aB3xY9"
+  home=$(make_home "$TMP_ROOT/symlinked-root-home" symtask.aB3xY9 "$recorded")
+
+  out=$(run_sweep "$root" --protect-homes "$home")
+  assert_present "$live" \
+    "a live task recorded through a symlinked temp root must still be protected"
+  assert_contains "$out" "fm-symtask.aB3xY9: skipped: a firstmate home records it" \
+    "protecting a live task through a symlinked root must be reported"
+  pass "sweep resolves recorded task scratch before comparing it to a candidate"
+}
+
 test_age_minutes_window() {
   local root recent out
   root=$(new_root age-minutes)
@@ -414,8 +461,38 @@ test_max_bounds_the_examination() {
   out=$(run_sweep "$root" --max 1)
   [ "$(find "$root" -mindepth 1 -maxdepth 1 -type d | wc -l)" -eq 2 ] \
     || fail "--max 1 must examine exactly one candidate and defer the rest"
-  assert_contains "$out" "deferred" "a bounded sweep must say what it deferred"
-  pass "sweep stops after --max candidates and defers the rest"
+  # The reason matters as much as the count: an operator told the time budget
+  # ran out goes looking for a slow host instead of for the cap they set.
+  assert_contains "$out" "the --max 1 candidate cap was reached after removing 1, 2 candidate(s) deferred" \
+    "a bounded sweep must name the cap it stopped on"
+  assert_not_contains "$out" "budget exhausted" \
+    "the candidate cap must never be reported as the time budget"
+  pass "sweep stops after --max candidates and reports the cap as the reason"
+}
+
+# The session-start sweep is bounded only by its time budget, and must stay that
+# way: capping it by default would strand orphans on exactly the host that
+# leaked the most, which is the host this sweep exists for. The bound belongs to
+# the caller that wants it - bin/fm-test-run.sh passes its own --max.
+test_default_max_is_unbounded() {
+  local root out i
+  local -a dirs=()
+  root=$(new_root unbounded-default)
+  i=1
+  while [ "$i" -le 501 ]; do
+    dirs+=("$root/fm-bulk$i.aB3xY9")
+    i=$((i + 1))
+  done
+  mkdir -p "${dirs[@]}"
+  age_out "${dirs[@]}"
+
+  # A generous budget, so this measures the candidate bound and nothing else.
+  out=$(run_sweep "$root" --timeout 600)
+  [ "$(find "$root" -mindepth 1 -maxdepth 1 -type d | wc -l)" -eq 0 ] \
+    || fail "the default sweep must examine more than 500 candidates, not cap itself"
+  assert_not_contains "$out" "deferred" \
+    "an unbounded sweep with time to spare must defer nothing"
+  pass "sweep examines every candidate by default and bounds only when asked"
 }
 
 test_removes_stale_scratch_dir
@@ -440,5 +517,8 @@ test_refuses_when_task_records_cannot_be_read
 test_reads_secondmate_homes_for_live_scratch
 test_age_minutes_window
 test_max_bounds_the_examination
+test_default_max_is_unbounded
+test_unreadable_secondmate_registry_refuses_the_sweep
+test_protects_a_live_task_recorded_through_a_symlinked_root
 
 echo "all fm-tmp-sweep tests passed"

@@ -62,15 +62,19 @@
 #   that were killed outright (SIGKILL leaves no trap to run), so a host that
 #   already leaked heals on the next test run. bin/fm-tmp-sweep.sh is the single
 #   owner of which directories are safe to remove and of every refusal that
-#   protects a live task, an in-use directory, or an operational home; this
-#   runner only supplies the shorter age window a test host wants and the homes
-#   this checkout can see. Read that script's header for the full contract.
-#   FM_TEST_REAP_ROOT (default /tmp), FM_TEST_REAP_MIN_AGE_SECONDS (default
-#   900, rounded up to whole minutes), FM_TEST_REAP_MAX (default 500), and
+#   protects a live task, an in-use directory, or an operational home, including
+#   the age window; this runner supplies only the candidate cap a test host
+#   wants and the homes this checkout can see. Read that script's header for the
+#   full contract. The sweep's own conservative age window applies unchanged: a
+#   shorter one would shorten the destructive horizon for scratch owned by other
+#   live firstmate tooling in the same shared root, and containment plus the
+#   signal traps above already cover this runner's own fixtures.
+#   FM_TEST_REAP_ROOT (default /tmp), FM_TEST_REAP_MAX (default 500),
 #   FM_TEST_REAP_HOMES (extra colon-separated Firstmate homes whose state/*.meta
-#   to read) exist so this behavior is testable without touching the host's real
-#   /tmp. FM_TEST_RUN_ACTIVE=1 is exported to every executed script and
-#   suppresses the reap in a nested run.
+#   to read), and FM_TEST_REAP_MIN_AGE_SECONDS (unset by default; when set,
+#   rounded up to whole minutes and passed to the sweep) exist so this behavior
+#   is testable without touching the host's real /tmp. FM_TEST_RUN_ACTIVE=1 is
+#   exported to every executed script and suppresses the reap in a nested run.
 #
 # Per-script machine-parseable markers (stdout):
 #   FM_TEST_BEGIN <iso8601> <script> family=<family> expected_gate_skip=<class>
@@ -155,7 +159,9 @@ now_ms() {
 # --- run root, fixture containment, and orphan reap -------------------------
 
 REAP_ROOT=${FM_TEST_REAP_ROOT:-/tmp}
-REAP_MIN_AGE_SECONDS=${FM_TEST_REAP_MIN_AGE_SECONDS:-900}
+# Unset means "use the sweep's own window", which is the operating contract. It
+# is a test seam, not a knob this runner turns.
+REAP_MIN_AGE_SECONDS=${FM_TEST_REAP_MIN_AGE_SECONDS:-}
 REAP_MAX=${FM_TEST_REAP_MAX:-500}
 # Descriptor 9 is held open inside the run root for its whole life. A concurrent
 # runner's reap sees this open file and keeps the root, which is what makes the
@@ -242,9 +248,21 @@ stop_run_workers() {
   wait 2>/dev/null || true
 }
 
+# Every exit removes the run root, and every exit must stop this run's children
+# first. A signal is not the only way to leave with workers still in flight: any
+# `die` or set -e abort during dispatch does the same, and a surviving child
+# then recreates the run root through its own TMPDIR after the removal. On the
+# normal path every worker slot is already unset, so this costs nothing.
+# shellcheck disable=SC2329 # Registered by the EXIT trap below.
+on_run_exit() {
+  stop_run_workers
+  remove_run_tmp
+}
+
 # Stop this run's children, remove the run root, then die from the same signal
 # so a caller (a shell, CI, or a supervising script) still sees a normal signal
-# death rather than a swallowed interrupt.
+# death rather than a swallowed interrupt. The EXIT trap is cleared first, so
+# the workers are stopped once, not twice.
 # shellcheck disable=SC2329 # Registered by the signal traps below.
 on_run_signal() {
   local sig=$1
@@ -262,12 +280,14 @@ ensure_run_tmp() {
   [ -z "$RUN_TMP" ] || return 0
   RUN_TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run.XXXXXX") \
     || die "could not create a run temp root"
-  chmod 0700 "$RUN_TMP" || die "could not chmod 0700 run temp root $RUN_TMP"
-  trap 'remove_run_tmp' EXIT
+  # Armed before anything else can fail, so even a die between here and the
+  # first script still takes the root with it.
+  trap 'on_run_exit' EXIT
   trap 'on_run_signal INT' INT
   trap 'on_run_signal TERM' TERM
   trap 'on_run_signal HUP' HUP
   trap 'on_run_signal QUIT' QUIT
+  chmod 0700 "$RUN_TMP" || die "could not chmod 0700 run temp root $RUN_TMP"
   : >"$RUN_TMP/.fm-test-run-live"
   exec 9<"$RUN_TMP/.fm-test-run-live"
 }
@@ -277,13 +297,17 @@ ensure_run_tmp() {
 #
 # The decision "is this scratch directory safe to remove" lives in exactly one
 # place, bin/fm-tmp-sweep.sh, and this delegates to it rather than keeping a
-# second copy. Session start sweeps the same shared root on a longer horizon;
-# two implementations of a destructive predicate would drift the moment only one
-# was edited. The runner contributes only what it alone knows: the much shorter
-# horizon a test host wants, and which firstmate homes this checkout can see,
-# whose recorded task scratch must never be deleted out from under live work.
+# second copy. Two implementations of a destructive predicate would drift the
+# moment only one was edited. The runner contributes only what it alone knows: a
+# bound on how much work one test run should spend reclaiming, and which
+# firstmate homes this checkout can see, whose recorded task scratch must never
+# be deleted out from under live work. The age window is the sweep's own, not
+# this runner's: /tmp is shared with other live firstmate tooling, and a shorter
+# window here would put that tooling's scratch at risk to heal something
+# containment and the signal traps already handle.
 reap_orphan_fixtures() {
-  local sweep="$ROOT/bin/fm-tmp-sweep.sh" homes common out line status age_minutes removed
+  local sweep="$ROOT/bin/fm-tmp-sweep.sh" homes common out line status removed
+  local -a age_args=()
 
   # A nested run inherits the outer run's root, which the outer run already
   # swept; sweeping again would only race it.
@@ -293,14 +317,17 @@ reap_orphan_fixtures() {
     log "orphan reap skipped: $sweep is not executable"
     return 0
   fi
-  case "$REAP_MIN_AGE_SECONDS" in
-    ''|*[!0-9]*)
-      log "orphan reap skipped: FM_TEST_REAP_MIN_AGE_SECONDS must be a non-negative integer"
-      return 0
-      ;;
-  esac
-  # Rounded up, so a caller asking for any nonzero age never gets a zero window.
-  age_minutes=$(( (REAP_MIN_AGE_SECONDS + 59) / 60 ))
+  if [ -n "$REAP_MIN_AGE_SECONDS" ]; then
+    case "$REAP_MIN_AGE_SECONDS" in
+      *[!0-9]*)
+        log "orphan reap skipped: FM_TEST_REAP_MIN_AGE_SECONDS must be a non-negative integer"
+        return 0
+        ;;
+    esac
+    # Rounded up, so a caller asking for any nonzero age never gets a zero
+    # window. Unset leaves the window to the sweep, which is the normal path.
+    age_args=(--age-minutes "$(( (REAP_MIN_AGE_SECONDS + 59) / 60 ))")
+  fi
 
   # Homes whose state/*.meta may record a live task's scratch root: this
   # checkout, an explicit FM_HOME, the primary checkout this worktree belongs to,
@@ -318,7 +345,7 @@ reap_orphan_fixtures() {
   fi
   [ -z "${FM_TEST_REAP_HOMES:-}" ] || homes="$homes:$FM_TEST_REAP_HOMES"
 
-  out=$("$sweep" --root "$REAP_ROOT" --age-minutes "$age_minutes" \
+  out=$("$sweep" --root "$REAP_ROOT" ${age_args[@]+"${age_args[@]}"} \
     --max "$REAP_MAX" --protect-homes "$homes" 2>&1) && status=0 || status=$?
 
   removed=0
