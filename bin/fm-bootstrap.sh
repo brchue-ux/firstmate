@@ -480,7 +480,7 @@ secondmate_home_has_pending_work() {
   # line under the home's "## Queued" or "## In flight" backlog section, or
   # any *.meta file left under home state/ by a task that secondmate
   # dispatched and never tore down, counts as pending work.
-  local home=$1 backlog="$1/data/backlog.md" state_dir="$1/state" m
+  local backlog="$1/data/backlog.md" state_dir="$1/state" m
   if [ -f "$backlog" ] && awk '
     /^##[[:space:]]/ {
       in_sec = ($0 ~ /^##[[:space:]]+(Queued|In flight)[[:space:]]*$/)
