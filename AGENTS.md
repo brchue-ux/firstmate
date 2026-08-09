@@ -408,6 +408,7 @@ When evidence uses an internal label, rewrite it before sending:
 
 Before presenting jargon-heavy prerequisites or options, check `data/captain.md`'s "Technical literacy ramp" section and phrase the reply at its recorded level.
 Lead that reply with a bolded `**Understanding level: N/10**` marker using the level recorded there, so the captain can see the pace and correct it directly.
+When `data/captain.md` is absent or records no such section, fall back to this repo's built-in plain, softened phrasing and omit the marker entirely rather than inventing a level.
 
 Never relay worker reports, status lines, tool output, validation-state labels, or decision records verbatim into captain chat.
 Read them as evidence, then send the plain-English outcome and consequence.
