@@ -809,6 +809,57 @@ test_live_declared_pause_stays_an_awaiting_external_wait() {
   pass "a genuinely alive declared pause surfaces once, then stays an absorbed awaiting-external wait - never gone, dead, or wedged"
 }
 
+# The mirror of the test above, on the FULL (non-throttled) classification path:
+# a crew whose agent has exited while fm-crew-state still answers from the status
+# log rather than the pane. That shape - a `paused:` log, a pane that reads as a
+# bare shell, no attributed no-mistakes run, so the verdict is
+# "state: paused · source: status-log" and not "state: stopped · source: pane" -
+# is the production case, and it reaches this path on the first sight of a stale
+# hash and on the first poll after any watcher restart, when no
+# .paused-rechecked-<key> marker exists to open the recheck throttle. The live
+# agent verdict alone must decide it: a dead agent is named as a confirmed-dead
+# crew even though the authoritative state read said paused.
+test_status_log_paused_dead_agent_is_confirmed_dead_on_the_full_path() {
+  local dir state fakebin out drain_out capture_file statusf window key pane_hash sig pid back
+  dir=$(make_case status-log-paused-dead-agent); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  statusf="$state/upstream.status"
+  window="test:fm-upstream"
+  printf 'idle bare shell, agent exited\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/upstream.meta"
+  printf 'paused: waiting on the upstream release\n' > "$statusf"
+  back=$(( $(date +%s) - 500 ))
+  set_mtime "$back" "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-upstream_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle bare shell, agent exited")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  # No .paused-rechecked-<key> and no .paused-<key>: the recheck throttle cannot
+  # apply, so the full classification path is the one under test.
+  [ ! -e "$state/.paused-rechecked-$key" ] || fail "fixture leaked a recheck-throttle marker"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+    FM_FAKE_CREW_STATE='state: paused · source: status-log · waiting on the upstream release' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "a status-log paused crew with a dead agent did not re-surface on the full path"
+  grep -F "stale: $window" "$out" >/dev/null || fail "the full-path re-surface did not print a stale wake"
+  grep -F "confirmed dead" "$out" >/dev/null \
+    || fail "a status-log paused crew with a dead agent was downgraded to a plain pause on the full path"
+  grep -F "awaiting external" "$out" >/dev/null \
+    && fail "a confirmed-dead crew was re-surfaced as an ordinary awaiting-external wait on the full path"
+  grep -F "possible wedge" "$out" >/dev/null && fail "a confirmed-dead crew was mislabeled a possible wedge"
+  [ -e "$state/.paused-$key" ] || fail "the confirmed-dead re-surface lost its bounded cadence marker"
+  [ ! -e "$state/.stale-since-$key" ] || fail "a confirmed-dead re-surface must not use the wedge timer"
+  [ -e "$state/.paused-rechecked-$key" ] || fail "the full path did not record the recheck-throttle marker for a dead verdict"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the confirmed-dead re-surface failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "confirmed-dead re-surface was not queued"
+  pass "a dead agent under a status-log declared pause is named confirmed dead on the full classification path"
+}
+
 # A captain-held crew can leave a stable backend endpoint after its agent exits.
 # fm-crew-state then authoritatively reports stopped rather than paused, but the
 # confirmed-dead agent plus the declared wait or captain-held transfer must retain
@@ -1709,6 +1760,7 @@ test_busy_pane_default_turn_age_bound_is_3600s
 test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_live_declared_pause_stays_an_awaiting_external_wait
+test_status_log_paused_dead_agent_is_confirmed_dead_on_the_full_path
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
 test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed
