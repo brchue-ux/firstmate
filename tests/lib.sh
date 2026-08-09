@@ -65,6 +65,12 @@ pass() {
 # on EXIT. The first call installs the cleanup trap. A test file that needs
 # extra teardown (e.g. killing a daemon) should define its own EXIT trap and
 # call fm_test_cleanup from inside it so registered dirs are still removed.
+#
+# The EXIT trap cannot run when the test process is killed abruptly, so the dir
+# is orphaned in a temp root every firstmate home on the host shares. The
+# fm- prefix is forced here rather than trusted to each caller so bin/fm-tmp-
+# sweep.sh's session-start reclamation matches every scratch dir this suite has
+# ever created, including ones added after that sweep shipped.
 
 FM_TEST_CLEANUP_DIRS=()
 
@@ -77,6 +83,10 @@ fm_test_cleanup() {
 
 fm_test_tmproot() {
   local prefix=${1:-fm-test} root
+  case "$prefix" in
+    fm-*) ;;
+    *) prefix="fm-$prefix" ;;
+  esac
   root=$(mktemp -d "${TMPDIR:-/tmp}/${prefix}.XXXXXX")
   if [ "${#FM_TEST_CLEANUP_DIRS[@]}" -eq 0 ]; then
     trap fm_test_cleanup EXIT
