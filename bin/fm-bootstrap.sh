@@ -350,10 +350,6 @@ secondmate_sync() {
     for marker in "$SECOND_MATE_NUDGE_PENDING_DIR"/*.pending; do
       [ -f "$marker" ] || continue
       id=$(fm_meta_get "$marker" id)
-      # A mate the liveness sweep left down has a dead endpoint by design;
-      # retrying its marked send only re-fails every session. Keep the marker
-      # untouched for the session that reopens it.
-      secondmate_left_down "$id" && continue
       if ! expected_marker=$(secondmate_nudge_marker_path "$id"); then
         echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: send failed: retry marker has unsafe id"
         continue
@@ -362,6 +358,15 @@ secondmate_sync() {
         echo "NUDGE_SECONDMATES: secondmate $id: send failed: retry marker filename mismatch"
         continue
       }
+      # A mate the liveness sweep left down has a dead endpoint by design, and
+      # its home keeps advancing past the commit this marker pins, so the send
+      # can never be satisfied again. The nudge only ever existed to refresh an
+      # already-running agent; whenever this mate is next launched it reads its
+      # instruction surface from disk anyway, so retire the marker.
+      if secondmate_left_down "$id"; then
+        rm -f "$marker"
+        continue
+      fi
       selector=$(fm_meta_get "$marker" selector)
       home=$(fm_meta_get "$marker" home)
       commit=$(fm_meta_get "$marker" commit)
