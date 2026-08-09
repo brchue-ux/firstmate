@@ -658,6 +658,14 @@ test_nonterminal_stale_not_working_surfaced() {
 # uses the wedge timer; it re-surfaces once past PAUSE_RESURFACE_SECS (anchored on
 # the pause's own status-file age, so a churny idle pane cannot reset the cadence)
 # for a recheck, so a forgotten pause cannot rot invisibly.
+# This crew's pane is a bare shell, so its live agent recheck is confidently dead
+# and the eventual re-surface must name it as such. Phase B additionally covers
+# the recheck-throttle window (the classification is re-derived within
+# STALE_ESCALATE_SECS of the previous one, on a changed hash): that shorter window
+# owns most polls under the production cadence, so a dead verdict downgraded to
+# plain paused there would have mis-framed nearly every confirmed-dead re-surface.
+# The genuinely-alive counterpart is
+# test_live_declared_pause_stays_an_awaiting_external_wait.
 test_nonterminal_stale_paused_absorbed_then_resurfaced() {
   local dir state fakebin out drain_out capture_file window key pane_hash sig pid back statusf
   dir=$(make_case nonterminal-stale-paused); state="$dir/state"; fakebin="$dir/fakebin"
@@ -710,13 +718,95 @@ test_nonterminal_stale_paused_absorbed_then_resurfaced() {
   pid=$!
   wait_for_exit "$pid" 40 || fail "watcher did not re-surface a declared pause past the threshold"
   grep -F "stale: $window" "$out" >/dev/null || fail "re-surface did not print a stale wake"
-  grep -F "awaiting external" "$out" >/dev/null || fail "re-surface was not labeled a paused/awaiting-external recheck"
+  grep -F "confirmed dead" "$out" >/dev/null \
+    || fail "a re-surface inside the recheck throttle downgraded a confirmed-dead crew to a plain pause"
+  grep -F "awaiting external" "$out" >/dev/null \
+    && fail "a confirmed-dead crew was re-surfaced as an ordinary awaiting-external wait"
   grep -F "possible wedge" "$out" >/dev/null && fail "a declared pause was mislabeled a possible wedge"
   [ -e "$state/.paused-resurfaced-$key" ] || fail "the paused re-surface throttle marker was not recorded"
   [ ! -e "$state/.stale-since-$key" ] || fail "a paused re-surface must not use the wedge timer"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the paused re-surface failed"
   grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "paused re-surface was not queued"
-  pass "a declared pause is absorbed on first sight, then re-surfaced as a recheck past the threshold, never wedge-escalated"
+  pass "a declared pause is absorbed on first sight, then re-surfaced past the threshold as a confirmed-dead recheck even inside the recheck throttle, never wedge-escalated"
+}
+
+# --- the regression guard for the two fixes above: a genuinely ALIVE declared
+#     pause must stay an ordinary awaiting-external wait ----------------------
+# Both surfacing fixes (a capture failure treated as a gone window, and a dead
+# recheck overriding a declared pause) push toward reporting more crews as
+# stopped. The failure mode they must not introduce is the mirror image: a crew
+# that really is just idling on an external wait, with a live agent in a
+# readable pane, being escalated as gone or dead. It surfaces exactly once when
+# its pane first goes stale (a live crew parked at an external gate is worth one
+# look), then stays quiet on the bounded pause cadence, and its eventual
+# re-surface is still the ordinary "awaiting external ... confirm the wait still
+# holds" recheck - never a confirmed-dead or possible-wedge wake.
+test_live_declared_pause_stays_an_awaiting_external_wait() {
+  local dir state fakebin out capture_file statusf window key pane_hash sig pid round wakes crew_state
+  dir=$(make_case live-declared-pause); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/wait.status"
+  window="test:fm-wait"
+  printf 'idle at the upstream wait\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/wait.meta"
+  printf 'paused: waiting on the upstream release\n' > "$statusf"
+  set_mtime $(( $(date +%s) - 500 )) "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-wait_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle at the upstream wait")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  # Every round below runs the recorded harness as the pane's foreground command,
+  # so the live agent recheck reads alive - the one thing separating this crew
+  # from the bare-shell cases above - while fm-crew-state reports the pause.
+  crew_state='state: paused · source: status-log · waiting on the upstream release'
+
+  # Round 1: first sight of the stale hash surfaces once.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=grok FM_FAKE_CREW_STATE="$crew_state" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "a live crew's first stale sight did not surface"
+
+  # Rounds 2-4: the same unchanged hash must be absorbed on the pause cadence -
+  # no wake, no wedge timer, and never a capture-failure or confirmed-dead wake
+  # for a pane that reads perfectly well.
+  round=2
+  while [ "$round" -le 4 ]; do
+    : > "$out"
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+      FM_FAKE_TMUX_CURRENT_COMMAND=grok FM_FAKE_CREW_STATE="$crew_state" \
+      FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+    pid=$!
+    if ! wait_live "$pid" 25; then
+      reap "$pid"; fail "a live declared pause was escalated on round $round instead of absorbed: $(cat "$out")"
+    fi
+    [ ! -s "$out" ] || { reap "$pid"; fail "a live declared pause printed a wake reason on round $round: $(cat "$out")"; }
+    reap "$pid"
+    round=$((round + 1))
+  done
+  [ -e "$state/.paused-$key" ] || fail "a live declared pause lost its bounded pause cadence marker"
+  [ ! -e "$state/.stale-since-$key" ] || fail "a live declared pause started the wedge timer"
+  [ ! -e "$state/.missing-$key" ] || fail "a readable pane was recorded as a gone window"
+  wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' "$state/.wake-queue")
+  [ "$wakes" -eq 1 ] || fail "a live declared pause should surface once, got $wakes wakes"
+
+  # Round 5: age the re-surface throttle past the cadence. The recheck fires as
+  # an ordinary awaiting-external wait, not as a stopped crew.
+  set_mtime $(( $(date +%s) - 500 )) "$state/.paused-resurfaced-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=grok FM_FAKE_CREW_STATE="$crew_state" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "a live declared pause did not re-surface on the bounded cadence"
+  grep -F "awaiting external" "$out" >/dev/null || fail "a live declared pause lost its awaiting-external recheck framing"
+  grep -F "confirmed dead" "$out" >/dev/null && fail "a live declared pause was mislabeled a confirmed-dead crew"
+  grep -F "pane capture failed" "$out" >/dev/null && fail "a readable pane was mislabeled a gone window"
+  grep -F "possible wedge" "$out" >/dev/null && fail "a live declared pause was mislabeled a possible wedge"
+  pass "a genuinely alive declared pause surfaces once, then stays an absorbed awaiting-external wait - never gone, dead, or wedged"
 }
 
 # A captain-held crew can leave a stable backend endpoint after its agent exits.
@@ -1618,6 +1708,7 @@ test_busy_pane_repeated_escalation_reaches_demand_deep_inspection
 test_busy_pane_default_turn_age_bound_is_3600s
 test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
+test_live_declared_pause_stays_an_awaiting_external_wait
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
 test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed

@@ -20,7 +20,11 @@
 #                          line, since the crew's own log gets no new entry once
 #                          firstmate hands it to a no-mistakes validation. A declared
 #                          external-wait pause is absorbed instead with its own long
-#                          re-surface cadence, never as a wedge. Only when neither
+#                          re-surface cadence, never as a wedge - and re-surfaces as a
+#                          confirmed-dead crew, not a continuing wait, whenever its live
+#                          agent recheck comes back dead. A window whose pane capture
+#                          fails outright is surfaced once as gone rather than dropped
+#                          from every later poll. Only when neither
 #                          absorb class applies does the log's last line decide:
 #                          terminal (captain-relevant) or non-terminal (no verb),
 #                          both surfaced at once. A provably-working stale past the
@@ -394,7 +398,17 @@ pause_state_class() {  # <window> <task>
         printf 'none'
         return
       fi
+      # The recheck throttle bounds how often the costly crew-state read runs;
+      # it never downgrades a live dead verdict this branch just obtained.
+      # Reporting plain paused here would have re-framed a confirmed-stopped
+      # crew as an ordinary continuing wait on most polls, since this throttle
+      # window is far shorter than PAUSE_RESURFACE_SECS and therefore usually
+      # owns the eventual re-surface.
+      printf 'dead'
+      return
     fi
+    # A secondmate is idle by default, so its declared pause keeps the bounded
+    # cadence without an agent verdict at all (see the same exemption below).
     printf 'paused'
     return
   fi
