@@ -43,7 +43,19 @@
 #   local-only   implement on branch, stop and report "ready in branch" (no push/PR);
 #                captain approves, firstmate merges to local main
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
+# That assertion names firstmate's own main repository checkout explicitly and
+# disclaims the harness's generic "Primary working directory" environment label,
+# because the bare word "primary" let workers read their own correct disposable
+# worktree as a failed isolation check.
 # Scout tasks ignore mode - their deliverable is a report, not a merge.
+# Every scaffold opens with a short legitimacy preamble telling the worker this
+# is its own real first message and that a leading invisible routing marker and
+# typed operational header are an expected delivery convention. Without it,
+# workers have read their own launch brief as smuggled prompt injection and sat
+# idle awaiting a human confirmation that never comes, since a worker only ever
+# hears from firstmate. The preamble deliberately only frames that envelope:
+# bin/fm-operational-input.sh owns the wire format and must not be restated here.
+# tests/fm-brief.test.sh asserts both facts against generated briefs.
 # Every scaffold's status protocol distinguishes the configured
 # declared-external-wait verb (FM_CLASSIFY_PAUSED_VERB, default "paused") from
 # "blocked:": pause for a known external wait expected to clear on its own,
