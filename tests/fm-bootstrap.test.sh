@@ -348,6 +348,47 @@ SH
   pass "bootstrap requires git with an install instruction"
 }
 
+# The stale-scratch reclamation is wired in as a MUTATING sweep: it runs on a
+# locked session start with no configuration, and a detect-only (lock-refused)
+# session must leave the temp root exactly as it found it.
+test_scratch_sweep_is_a_locked_mutating_sweep() {
+  local case_dir fakebin fake_root sweep_root stale out
+  case_dir="$TMP_ROOT/scratch-sweep"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  fake_root="$case_dir/fake-root"
+  mkdir -p "$fake_root/bin"
+  cp "$ROOT/bin/fm-tmp-sweep.sh" "$fake_root/bin/fm-tmp-sweep.sh"
+
+  sweep_root="$case_dir/tmp"
+  mkdir -p "$sweep_root/fm-teardown-tests.aB3xY9/nested"
+  stale="$sweep_root/fm-teardown-tests.aB3xY9"
+  printf 'orphaned\n' > "$stale/nested/payload"
+  touch -t 202601010000 "$stale/nested/payload" "$stale/nested" "$stale"
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$fake_root" \
+    FM_TMP_SWEEP_ROOT="$sweep_root" FM_BOOTSTRAP_DETECT_ONLY=1 \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_present "$stale" "a detect-only session must not sweep the temp root"
+  assert_not_contains "$out" "reclaimed" "a detect-only session must not report reclamation"
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$fake_root" \
+    FM_TMP_SWEEP_ROOT="$sweep_root" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_absent "$stale" "a locked session start must reclaim stale scratch with no configuration"
+  assert_contains "$out" "BOOTSTRAP_INFO: reclaimed 1 stale scratch dir(s)" \
+    "reclamation is completed benign work, so it reports as a no-action fact"
+  assert_not_contains "$out" "SCRATCH_SWEEP:" \
+    "a clean reclamation must not print an actionable diagnostic"
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$fake_root" \
+    FM_TMP_SWEEP_ROOT="$sweep_root" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "a bootstrap with nothing to reclaim must stay silent, got: $out"
+  pass "bootstrap reclaims stale temp-root scratch only when locked, and silently when there is none"
+}
+
 test_orca_backend_gates_orca_tool_only_when_selected() {
   local case_dir fakebin out missing_orca
   missing_orca="MISSING: orca (install: brew install orca  # or the platform's package manager)"
@@ -792,6 +833,7 @@ ROWS
 }
 
 test_bootstrap_reporting
+test_scratch_sweep_is_a_locked_mutating_sweep
 test_no_mistakes_min_version
 test_git_is_required_with_supported_install_instruction
 test_orca_backend_gates_orca_tool_only_when_selected

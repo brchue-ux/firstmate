@@ -12,6 +12,7 @@
 #                 "CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>",
 #                 "FLEET_SYNC: <repo>: skipped|recovered|STUCK: <detail>",
 #                 "PR_CHECK_MIGRATION: <private remediation>",
+#                 "SCRATCH_SWEEP: <name|temp root>: skipped: <reason>",
 #                 "TANGLE: <remediation>",
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
 #                 "NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>",
@@ -64,6 +65,12 @@
 #          X mode is OPTIONAL and inert unless FM_HOME/.env has a non-empty
 #          FMX_PAIRING_TOKEN. When opted in, bootstrap requires curl+jq, writes
 #          the relay poll shim and 30s cadence config, and prints an FMX line.
+#          The scratch sweep reclaims orphaned "fm-<slug>.XXXXXX" scratch
+#          directories left in the shared temp root by killed test and tool
+#          processes whose cleanup traps never ran; bin/fm-tmp-sweep.sh owns the
+#          matching, age, and in-use rules. Successful reclamation prints one
+#          BOOTSTRAP_INFO count; a SCRATCH_SWEEP line means a stale directory was
+#          deliberately left in place and says why. An empty sweep is silent.
 #          Fleet sync fetches, fast-forwards safe default-branch states, reports
 #          recovered and STUCK clone drift, and prunes gone local branches; it is
 #          bounded by FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT when it is a non-empty
@@ -73,9 +80,10 @@
 #          refresh relays any completed fm-fleet-sync.sh output before the
 #          aggregate timeout skip line with timeout and elapsed seconds.
 #          Set FM_FLEET_PRUNE=0 to skip branch pruning during that refresh.
-#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the five MUTATING sweeps
-#          (PR-check migration, secondmate_sync, secondmate_liveness_sweep,
-#          x_mode_setup, fleet_sync) while still printing every read-only detect line
+#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the six MUTATING sweeps
+#          (PR-check migration, scratch_sweep, secondmate_sync,
+#          secondmate_liveness_sweep, x_mode_setup, fleet_sync) while still
+#          printing every read-only detect line
 #          above; the TANGLE line switches to advisory-only wording with no
 #          checkout command. Used by
 #          fm-session-start.sh's read-only path when another live session holds
@@ -162,6 +170,28 @@ fleet_sync_relay_all_output() {
     [ -n "$line" ] || continue
     echo "FLEET_SYNC: $line"
   done < "$tmp"
+}
+
+scratch_sweep() {
+  # Orphaned scratch directories under the shared temp root are the one leak
+  # that takes every home on the host down at once: the temp filesystem is
+  # small and shared, and once it fills, every temp write - and so effectively
+  # every command - fails silently. The matching, age, and safety rules are
+  # owned by bin/fm-tmp-sweep.sh; bootstrap only classifies its output.
+  [ -x "$FM_ROOT/bin/fm-tmp-sweep.sh" ] || return 0
+  local out line removed=0
+  out=$("$FM_ROOT/bin/fm-tmp-sweep.sh" 2>/dev/null || true)
+  [ -n "$out" ] || return 0
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    case "$line" in
+      *': removed') removed=$((removed + 1)) ;;
+      *) echo "SCRATCH_SWEEP: $line" ;;
+    esac
+  done <<<"$out"
+  if [ "$removed" -gt 0 ]; then
+    echo "BOOTSTRAP_INFO: reclaimed $removed stale scratch dir(s) from ${TMPDIR:-/tmp}"
+  fi
 }
 
 fleet_sync() {
@@ -858,6 +888,9 @@ fi
 if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   "$SCRIPT_DIR/fm-pr-check-migrate.sh" || true
   startup_memory_budget_setup
+  # Early, so the temp root this bootstrap's own sweeps and every later command
+  # write into has room before they need it.
+  scratch_sweep
 fi
 
 if [ "$BACKEND_VALID" -eq 0 ]; then
