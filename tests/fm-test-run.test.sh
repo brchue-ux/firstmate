@@ -931,6 +931,38 @@ test_reap_clears_pre_existing_orphans() {
   pass "a later run reaps pre-existing orphans and spares recent ones"
 }
 
+test_reap_uses_a_short_window_only_for_its_own_run_roots() {
+  local tmp reap home killed foreign old probe out
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-reap-window.XXXXXX")
+  IFS='|' read -r reap home <<<"$(init_reap_fixture "$tmp")"
+  # Both twenty minutes old: past the runner's short window, well inside the
+  # sweep's conservative one, so only the name decides which window applies.
+  # SIGKILL runs no trap, so the reap is the only thing that reclaims a killed
+  # run - and every fixture it stranded is nested inside that one root.
+  killed="$reap/fm-test-run.Dd77Ee"
+  foreign="$reap/fm-home-seed.Ff88Gg"
+  mkdir -p "$killed" "$foreign"
+  touch -d '20 minutes ago' "$killed" "$foreign" 2>/dev/null \
+    || touch -A -002000 "$killed" "$foreign"
+  old=$(make_orphan "$reap" "fm-home-seed.Hh99Ii")
+  probe="$tmp/probe.test.sh"
+  printf '#!/usr/bin/env bash\necho "ok - probe"\n' >"$probe"
+  chmod +x "$probe"
+  out=$(FM_TEST_REAP_ROOT="$reap" FM_TEST_REAP_HOMES="$home" \
+    run_runner_unnested "$probe" 2>"$tmp/err") \
+    || fail "reap run should pass: $(cat "$tmp/err")"
+  assert_contains "$out" "removed=2" \
+    "the marker must total both passes: the killed root and the old orphan: $out"
+  assert_absent "$killed" \
+    "a killed run's root must be reclaimed on the short window: $killed"
+  assert_present "$foreign" \
+    "another tool's scratch of the same age must never see the short window: $foreign"
+  assert_absent "$old" \
+    "a genuinely old orphan must still be reclaimed by the conservative pass: $old"
+  rm -rf "$tmp"
+  pass "the reap's short window reaches only the run roots this runner creates"
+}
+
 test_reap_never_touches_a_live_task_scratch() {
   local tmp reap home tasktmp gotmp probe out
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-reap-task.XXXXXX")
@@ -1083,6 +1115,7 @@ test_killed_run_is_healed_by_the_next_run
 test_signalled_jobs_run_stops_its_workers
 test_aborted_jobs_run_stops_its_workers
 test_reap_clears_pre_existing_orphans
+test_reap_uses_a_short_window_only_for_its_own_run_roots
 test_reap_never_touches_a_live_task_scratch
 test_reap_never_removes_a_held_open_fixture
 test_reap_stays_within_fm_fixture_names

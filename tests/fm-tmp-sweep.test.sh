@@ -411,9 +411,57 @@ test_unreadable_secondmate_registry_refuses_the_sweep() {
   # ambiguity as an unreadable task record, and it must refuse the same way.
   assert_present "$dir" \
     "an unreadable secondmate registry must stop the sweep rather than let it guess"
-  assert_contains "$out" "task records could not be read" \
-    "refusing on an unreadable secondmate registry must say so"
+  # Naming the wrong records sends the operator to inspect state/ and find
+  # nothing wrong, which is the same misdirection as reporting a candidate cap
+  # as an exhausted time budget.
+  assert_contains "$out" "directory or secondmate registry could not be read" \
+    "refusing on an unreadable registry must name the registry, not task records"
+  assert_not_contains "$out" "task records could not be read" \
+    "an unreadable registry must not be reported as an unreadable task record"
   pass "sweep refuses entirely when a home's secondmate registry cannot be read"
+}
+
+test_unsearchable_home_root_refuses_the_sweep() {
+  local root dir home out
+  if [ "$(id -u)" = 0 ]; then
+    pass "unsearchable home root: root bypasses directory permissions, nothing to assert"
+    return 0
+  fi
+  root=$(new_root unsearchable-home)
+  dir=$(make_stale_dir "$root" fm-teardown-tests.aB3xY9)
+  home=$(make_home "$TMP_ROOT/unsearchable-home-root" sometask "$TMP_ROOT/nowhere")
+  chmod 000 "$home"
+
+  out=$(run_sweep "$root" --protect-homes "$home")
+  chmod 755 "$home"
+  # From outside, a home with no search permission is indistinguishable from a
+  # home that simply has no state/ - so without refusing, every live task it
+  # records would go unprotected while the sweep reported a clean run.
+  assert_present "$dir" \
+    "a home that exists but cannot be searched must stop the sweep, not be skipped"
+  assert_contains "$out" "directory or secondmate registry could not be read" \
+    "refusing on an unsearchable home must name the home, not task records"
+  pass "sweep refuses entirely when a home exists but cannot be searched"
+}
+
+test_name_prefix_narrows_the_candidate_set() {
+  local root scoped unscoped outside out
+  root=$(new_root name-prefix)
+  scoped=$(make_stale_dir "$root" fm-test-run.aB3xY9)
+  unscoped=$(make_stale_dir "$root" fm-other-tool.Cc44Dd)
+  # Outside the naming convention entirely: a prefix must narrow what the
+  # convention already allowed, never reach past it.
+  outside="$root/test-run.Ee55Ff"
+  mkdir -p "$outside"
+  age_out "$outside"
+
+  out=$(run_sweep "$root" --name-prefix fm-test-run.)
+  assert_absent "$scoped" "a candidate matching the prefix must still be reclaimed"
+  assert_present "$unscoped" \
+    "a stale candidate outside the prefix must be left to an unscoped pass: $unscoped"
+  assert_present "$outside" "a prefix must never widen the sweep past the name convention"
+  assert_contains "$out" "fm-test-run.aB3xY9: removed" "the scoped removal must be reported"
+  pass "sweep --name-prefix narrows the candidate set and cannot widen it"
 }
 
 test_protects_a_live_task_recorded_through_a_symlinked_root() {
@@ -519,6 +567,8 @@ test_age_minutes_window
 test_max_bounds_the_examination
 test_default_max_is_unbounded
 test_unreadable_secondmate_registry_refuses_the_sweep
+test_unsearchable_home_root_refuses_the_sweep
+test_name_prefix_narrows_the_candidate_set
 test_protects_a_live_task_recorded_through_a_symlinked_root
 
 echo "all fm-tmp-sweep tests passed"
