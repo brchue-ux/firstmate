@@ -59,18 +59,27 @@ pass() {
   printf 'ok - %s\n' "$1"
 }
 
-# --- self-cleaning temp root ------------------------------------------------
+# --- temp roots -------------------------------------------------------------
 #
-# fm_test_tmproot <prefix> echoes a fresh temp dir and registers it for removal
-# on EXIT. The first call installs the cleanup trap. A test file that needs
-# extra teardown (e.g. killing a daemon) should define its own EXIT trap and
-# call fm_test_cleanup from inside it so registered dirs are still removed.
+# fm_test_tmproot <prefix> echoes a fresh temp dir under TMPDIR.
 #
-# The EXIT trap cannot run when the test process is killed abruptly, so the dir
-# is orphaned in a temp root every firstmate home on the host shares. The
-# fm- prefix is forced here rather than trusted to each caller so bin/fm-tmp-
-# sweep.sh's session-start reclamation matches every scratch dir this suite has
-# ever created, including ones added after that sweep shipped.
+# bin/fm-test-run.sh is the single owner of fixture cleanup: it points TMPDIR at
+# a private directory for each executed script and removes it when that script
+# finishes, on an interrupted run as well as a normal one, and reaps fixtures
+# orphaned by earlier killed runs. A test file therefore needs no EXIT trap of
+# its own for its temp roots.
+#
+# The fm- prefix is still forced here rather than trusted to each caller, so a
+# fixture that escapes the runner entirely - a direct `bash tests/<name>.test.sh`
+# run killed outright - matches bin/fm-tmp-sweep.sh's session-start reclamation,
+# which is the backstop for scratch the runner never saw.
+#
+# The registration below is only a convenience for a direct
+# `bash tests/<name>.test.sh` run, and it takes effect only when the function is
+# called in this shell: the common `root=$(fm_test_tmproot p)` form runs it in a
+# command-substitution subshell, so the registered array never reaches the
+# caller. A test file that needs extra teardown (e.g. killing a daemon) should
+# define its own EXIT trap and call fm_test_cleanup from inside it.
 
 FM_TEST_CLEANUP_DIRS=()
 

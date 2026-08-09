@@ -43,9 +43,53 @@
 #                   families never schedule under --jobs.
 #   -h, --help      print this header
 #
+# Fixture containment:
+#   Every executed script runs with TMPDIR and TMP pointed at a private
+#   directory inside this run's own root, so a fixture built the way the suite
+#   builds them - mktemp -d "${TMPDIR:-/tmp}/fm-<prefix>.XXXXXX", directly or
+#   through tests/lib.sh fm_test_tmproot - lands inside the run instead of
+#   beside it. Each script's private root is removed as soon as that script
+#   finishes, and the run root is removed on normal exit and on INT, TERM, HUP,
+#   or QUIT. This is the single owner of fixture cleanup: no test file needs its
+#   own EXIT trap for temp roots, and an interrupted run cleans up too. /tmp is
+#   a tmpfs on some hosts, where a leaked fixture is leaked RAM, not disk.
+#   FM_TASK_TMP_ROOT is pointed at the same private directory, so a test that
+#   drives a real bin/fm-spawn.sh keeps its per-task scratch root inside the run
+#   instead of leaving a /tmp/fm-<fixture id>/ that no teardown will ever claim.
+#
+# Orphan reap:
+#   An executing run first reaps fixture directories orphaned by earlier runs
+#   that were killed outright (SIGKILL leaves no trap to run), so a host that
+#   already leaked heals on the next test run. bin/fm-tmp-sweep.sh is the single
+#   owner of which directories are safe to remove and of every refusal that
+#   protects a live task, an in-use directory, or an operational home; this
+#   runner supplies only the candidate cap a test host wants, the homes this
+#   checkout can see, and the horizons below. Read that script's header for the
+#   full contract.
+#
+#   The reap runs as two passes. The first is scoped by name to fm-test-run.*,
+#   the run roots this runner alone creates, on a short window: SIGKILL runs no
+#   trap, so the reap is the only thing that reclaims a killed run, and every
+#   fixture is nested inside that root. The second uses the sweep's own
+#   conservative window over everything else, because the shared root also holds
+#   scratch belonging to live firstmate tooling that can sit unwritten far
+#   longer than a fixture. No tool has to register itself to stay out of the
+#   short window; it cannot reach a name this runner did not create.
+#   FM_TEST_REAP_ROOT (default /tmp), FM_TEST_REAP_MIN_AGE_SECONDS (default 900,
+#   rounded up to whole minutes, and applied only to the first pass),
+#   FM_TEST_REAP_MAX (default 500), and FM_TEST_REAP_HOMES (extra
+#   colon-separated Firstmate homes whose state/*.meta to read) exist so this
+#   behavior is testable without touching the host's real /tmp.
+#   FM_TEST_RUN_ACTIVE=1 is exported to every executed script and suppresses the
+#   reap in a nested run.
+#
 # Per-script machine-parseable markers (stdout):
 #   FM_TEST_BEGIN <iso8601> <script> family=<family> expected_gate_skip=<class>
 #   FM_TEST_END <iso8601> <script> exit=<code> duration_ms=<n> gate_skip=<true|false>
+#
+# Reap marker (stdout, once, executing runs only, and never when the sweep
+# refused as a whole):
+#   FM_TEST_REAP root=<dir> removed=<n>
 #
 # After all scripts (stdout):
 #   FM_TEST_SUMMARY total=<n> failed=<n> skipped_gate=<n> duration_ms=<n>
@@ -117,6 +161,242 @@ now_ms() {
     # Second precision only when python3 is unavailable.
     echo $(($(date +%s) * 1000))
   fi
+}
+
+# --- run root, fixture containment, and orphan reap -------------------------
+
+REAP_ROOT=${FM_TEST_REAP_ROOT:-/tmp}
+# The short window, and the only names it is ever allowed to reach. SIGKILL runs
+# no trap, so the reap is the only thing that reclaims a killed run, and waiting
+# out the sweep's conservative window would hold that run's fixtures in the
+# tmpfs for half a day. Scoping the short window to the prefix this runner alone
+# creates buys that back without shortening the horizon for any other tool's
+# scratch in the shared root - by construction, so nothing has to register
+# itself to stay safe.
+RUN_TMP_PREFIX=fm-test-run.
+REAP_MIN_AGE_SECONDS=${FM_TEST_REAP_MIN_AGE_SECONDS:-900}
+REAP_MAX=${FM_TEST_REAP_MAX:-500}
+# Descriptor 9 is held open inside the run root for its whole life. A concurrent
+# runner's reap sees this open file and keeps the root, which is what makes the
+# reap safe to run while another suite is in flight. Executed scripts get it
+# closed so only this runner pins the root.
+RUN_TMP=
+
+# shellcheck disable=SC2329 # Registered by the EXIT and signal traps below.
+remove_run_tmp() {
+  local doomed=$RUN_TMP
+  [ -n "$doomed" ] || return 0
+  RUN_TMP=
+  exec 9<&-
+  rm -rf "$doomed" 2>/dev/null || true
+}
+
+# Every pid in the process tree rooted at the given pids, walked breadth-first
+# from one ps snapshot so the walk cannot chase pids that appear mid-scan.
+# shellcheck disable=SC2329 # Called from stop_run_workers below.
+run_process_tree_pids() {
+  local table=$1 frontier=" $2 " found=" $2 " next pid ppid
+  while [ -n "${frontier// /}" ]; do
+    next=
+    while read -r pid ppid; do
+      [ -n "$pid" ] || continue
+      case "$frontier" in *" $ppid "*) ;; *) continue ;; esac
+      case "$found" in *" $pid "*) continue ;; esac
+      found="$found$pid "
+      next="$next$pid "
+    done <<<"$table"
+    frontier=" $next"
+  done
+  printf '%s\n' "$found"
+}
+
+# Stop the worker subshells this run started, and the scripts they launched,
+# before the run root is removed. Otherwise a child keeps executing against a
+# deleted TMPDIR and can recreate the run root after the removal, leaving
+# exactly the orphan this runner exists to prevent.
+# shellcheck disable=SC2329 # Called from on_run_signal below.
+stop_run_workers() {
+  local slot pid roots table tree waited alive
+  # Worker slots are numbered from 1, so the array must be tested through a
+  # subscript: an unsubscripted ${WORKER_PIDS+x} asks about element 0 and is
+  # empty for every populated run, and for the serial path that never declares
+  # the array at all.
+  [ -n "${WORKER_PIDS[*]+x}" ] || return 0
+  roots=
+  for slot in "${!WORKER_PIDS[@]}"; do
+    pid=${WORKER_PIDS[$slot]}
+    [ -n "$pid" ] || continue
+    roots="$roots $pid"
+  done
+  [ -n "${roots// /}" ] || return 0
+  table=$(ps -eo pid=,ppid= 2>/dev/null || true)
+  if [ -n "$table" ]; then
+    tree=$(run_process_tree_pids "$table" "${roots# }")
+  else
+    tree=$roots
+  fi
+  for pid in $tree; do
+    kill -s TERM "$pid" 2>/dev/null || true
+  done
+  # Poll the descendants only: a worker subshell is a direct child of this
+  # shell, so between its death and the wait below it is a zombie that still
+  # answers kill -0 and would hold this loop open for the whole deadline.
+  waited=0
+  while [ "$waited" -lt 40 ]; do
+    alive=0
+    for pid in $tree; do
+      case " $roots " in *" $pid "*) continue ;; esac
+      if kill -0 "$pid" 2>/dev/null; then
+        alive=1
+        break
+      fi
+    done
+    [ "$alive" -eq 1 ] || break
+    waited=$((waited + 1))
+    sleep 0.05
+  done
+  for pid in $tree; do
+    kill -s KILL "$pid" 2>/dev/null || true
+  done
+  wait 2>/dev/null || true
+}
+
+# Every exit removes the run root, and every exit must stop this run's children
+# first. A signal is not the only way to leave with workers still in flight: any
+# `die` or set -e abort during dispatch does the same, and a surviving child
+# then recreates the run root through its own TMPDIR after the removal. On the
+# normal path every worker slot is already unset, so this costs nothing.
+# shellcheck disable=SC2329 # Registered by the EXIT trap below.
+on_run_exit() {
+  stop_run_workers
+  remove_run_tmp
+}
+
+# Stop this run's children, remove the run root, then die from the same signal
+# so a caller (a shell, CI, or a supervising script) still sees a normal signal
+# death rather than a swallowed interrupt. The EXIT trap is cleared first, so
+# the workers are stopped once, not twice.
+# shellcheck disable=SC2329 # Registered by the signal traps below.
+on_run_signal() {
+  local sig=$1
+  trap - EXIT INT TERM HUP QUIT
+  stop_run_workers
+  remove_run_tmp
+  kill -s "$sig" "$$" 2>/dev/null || true
+  exit 1
+}
+
+# Create this run's private root once and arm removal for both a normal exit and
+# an interruption. Every temp path the runner needs lives under it, so one
+# removal covers the whole run.
+ensure_run_tmp() {
+  [ -z "$RUN_TMP" ] || return 0
+  RUN_TMP=$(mktemp -d "${TMPDIR:-/tmp}/${RUN_TMP_PREFIX}XXXXXX") \
+    || die "could not create a run temp root"
+  # Armed before anything else can fail, so even a die between here and the
+  # first script still takes the root with it.
+  trap 'on_run_exit' EXIT
+  trap 'on_run_signal INT' INT
+  trap 'on_run_signal TERM' TERM
+  trap 'on_run_signal HUP' HUP
+  trap 'on_run_signal QUIT' QUIT
+  chmod 0700 "$RUN_TMP" || die "could not chmod 0700 run temp root $RUN_TMP"
+  : >"$RUN_TMP/.fm-test-run-live"
+  exec 9<"$RUN_TMP/.fm-test-run-live"
+}
+
+# Reap fixtures orphaned by runs that were killed outright, so a host that has
+# already leaked heals on the next test run.
+#
+# The decision "is this scratch directory safe to remove" lives in exactly one
+# place, bin/fm-tmp-sweep.sh, and this delegates to it rather than keeping a
+# second copy. Two implementations of a destructive predicate would drift the
+# moment only one was edited. The runner contributes only what it alone knows: a
+# bound on how much work one test run should spend reclaiming, and which
+# firstmate homes this checkout can see, whose recorded task scratch must never
+# be deleted out from under live work, plus the one prefix it alone creates.
+#
+# Two passes, because the two things being reclaimed have different horizons. A
+# run root left by a SIGKILL is dead the moment its runner is, and it is the one
+# artifact this runner can say that about with certainty, so it gets the short
+# window - scoped by name so the short window cannot reach anything else. Every
+# other orphan waits out the sweep's own conservative window, because the shared
+# root also holds scratch belonging to live firstmate tooling that can sit
+# unwritten far longer than a fixture.
+reap_orphan_fixtures() {
+  local sweep="$ROOT/bin/fm-tmp-sweep.sh" homes common age_minutes
+  local removed=0 refused=0 pass_removed status
+
+  # A nested run inherits the outer run's root, which the outer run already
+  # swept; sweeping again would only race it.
+  [ -z "${FM_TEST_RUN_ACTIVE:-}" ] || return 0
+
+  if [ ! -x "$sweep" ]; then
+    log "orphan reap skipped: $sweep is not executable"
+    return 0
+  fi
+  case "$REAP_MIN_AGE_SECONDS" in
+    ''|*[!0-9]*)
+      log "orphan reap skipped: FM_TEST_REAP_MIN_AGE_SECONDS must be a non-negative integer"
+      return 0
+      ;;
+  esac
+  # Rounded up, so a caller asking for any nonzero age never gets a zero window.
+  age_minutes=$(( (REAP_MIN_AGE_SECONDS + 59) / 60 ))
+
+  # Homes whose state/*.meta may record a live task's scratch root: this
+  # checkout, an explicit FM_HOME, the primary checkout this worktree belongs to,
+  # and any extra homes the caller names. The sweep expands each one's registered
+  # secondmates itself.
+  homes="$ROOT"
+  [ -z "${FM_HOME:-}" ] || homes="$homes:$FM_HOME"
+  common=$(git -C "$ROOT" rev-parse --git-common-dir 2>/dev/null || true)
+  if [ -n "$common" ]; then
+    case "$common" in
+      /*) ;;
+      *) common="$ROOT/$common" ;;
+    esac
+    [ ! -d "$common" ] || homes="$homes:$(dirname "$common")"
+  fi
+  [ -z "${FM_TEST_REAP_HOMES:-}" ] || homes="$homes:$FM_TEST_REAP_HOMES"
+
+  pass_removed=$(reap_sweep_pass "$sweep" --root "$REAP_ROOT" --max "$REAP_MAX" \
+    --protect-homes "$homes" --name-prefix "$RUN_TMP_PREFIX" \
+    --age-minutes "$age_minutes") && status=0 || status=$?
+  removed=$((removed + pass_removed))
+  [ "$status" -ne 3 ] || refused=1
+
+  pass_removed=$(reap_sweep_pass "$sweep" --root "$REAP_ROOT" --max "$REAP_MAX" \
+    --protect-homes "$homes") && status=0 || status=$?
+  removed=$((removed + pass_removed))
+  [ "$status" -ne 3 ] || refused=1
+
+  # Status 3 is the sweep refusing as a whole, so nothing was reaped and this run
+  # must not claim otherwise.
+  [ "$refused" -eq 0 ] || return 0
+  # The count stays on stdout with the marker: the sweep's own lines are progress
+  # for a human and go to stderr with the rest of the runner's logging.
+  printf 'FM_TEST_REAP root=%s removed=%s\n' "$REAP_ROOT" "$removed"
+}
+
+# One sweep invocation. Echoes how many directories it removed and returns the
+# sweep's own exit status, so the caller can total the passes and still notice a
+# whole-sweep refusal.
+# shellcheck disable=SC2329 # Called from reap_orphan_fixtures above.
+reap_sweep_pass() {
+  local out line status removed=0
+  out=$("$@" 2>&1) && status=0 || status=$?
+  if [ -n "$out" ]; then
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      log "orphan reap: $line"
+      case "$line" in
+        *": removed") removed=$((removed + 1)) ;;
+      esac
+    done <<<"$out"
+  fi
+  printf '%s\n' "$removed"
+  return "$status"
 }
 
 # Primary family for one tests/*.test.sh basename. Unmapped scripts are
@@ -371,7 +651,9 @@ select_lane() {
 run_coverage_guard() {
   local tmp missing extra a b
   local -a saved_scripts=()
-  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-coverage.XXXXXX")
+  ensure_run_tmp
+  tmp="$RUN_TMP/coverage"
+  mkdir -p "$tmp"
 
   all_repo_tests | LC_ALL=C sort -u >"$tmp/all"
   list_proven_isolated | LC_ALL=C sort -u >"$tmp/proven"
@@ -1132,8 +1414,9 @@ if [ "${#SCRIPTS[@]}" -eq 0 ]; then
   log "nothing to run"
   printf 'FM_TEST_SUMMARY total=0 failed=0 skipped_gate=0 duration_ms=0\n'
   if [ -n "$JSON_PATH" ]; then
-    empty_rec=$(mktemp)
-    empty_fam=$(mktemp)
+    ensure_run_tmp
+    empty_rec="$RUN_TMP/empty-records.tsv"
+    empty_fam="$RUN_TMP/empty-families.tsv"
     : >"$empty_rec"
     : >"$empty_fam"
     started=$(now_iso)
@@ -1159,11 +1442,11 @@ if [ "$JOBS" -gt 1 ]; then
   done
 fi
 
-RUN_TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run.XXXXXX")
+ensure_run_tmp
+reap_orphan_fixtures
 RECORDS="$RUN_TMP/records.tsv"
 FAMILIES_TSV="$RUN_TMP/families.tsv"
 : >"$RECORDS"
-trap 'rm -rf "$RUN_TMP"' EXIT
 
 RUN_STARTED_ISO=$(now_iso)
 RUN_STARTED_MS=$(now_ms)
@@ -1240,11 +1523,17 @@ record_script_result() {
 
 run_one_serial() {
   local script=$1
-  local base family expected out begin_iso begin_ms end_ms end_iso duration rc
+  local base family expected out script_tmp begin_iso begin_ms end_ms end_iso duration rc
   base=$(basename "$script")
   family=$(family_for_basename "$base")
   expected=$(expected_gate_skip_for_family "$family")
   out="$RUN_TMP/out.$TOTAL"
+  # Private temp root for this one script. Fixtures land inside it, and it is
+  # removed as soon as the script finishes, so peak temp usage stays at one
+  # script's fixtures rather than the whole run's.
+  script_tmp="$RUN_TMP/t$TOTAL"
+  mkdir -p "$script_tmp" || die "could not create per-script temp root $script_tmp"
+  chmod 0700 "$script_tmp" || die "could not chmod 0700 per-script temp root $script_tmp"
   begin_iso=$(now_iso)
   begin_ms=$(now_ms)
 
@@ -1254,7 +1543,10 @@ run_one_serial() {
   set +e
   # Stream live output while retaining a copy for gate-skip detection.
   # PIPESTATUS[0] is the test script; tee's exit is ignored for aggregate.
-  bash "$script" 2>&1 | tee "$out"
+  # The run-root descriptor is closed in the child so only this runner keeps the
+  # root pinned against a concurrent reap.
+  TMPDIR="$script_tmp" TMP="$script_tmp" FM_TASK_TMP_ROOT="$script_tmp" \
+    FM_TEST_RUN_ACTIVE=1 bash "$script" 9<&- 2>&1 | tee "$out"
   rc=${PIPESTATUS[0]}
   set -e
   : "${rc:=1}"
@@ -1265,6 +1557,7 @@ run_one_serial() {
   if [ "$duration" -lt 0 ]; then
     duration=0
   fi
+  rm -rf "$script_tmp"
   record_script_result "$script" "$rc" "$duration" "$out" "$end_iso"
 }
 
@@ -1312,6 +1605,8 @@ else
         ;;
     esac
     record_script_result "$script" "$rc" "$duration" "$out" "$end_iso"
+    # The worker's fixtures are done with; free them now rather than at run end.
+    rm -rf "$work/tmp"
   }
 
   worker_pid_is_running() {
@@ -1355,13 +1650,12 @@ else
       "$(now_iso)" "$script" "$family" "$expected"
     (
       set +e
-      export TMPDIR="$work/tmp"
-      export TMP="$work/tmp"
       unset FM_HOME FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_ROOT_OVERRIDE \
         FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE FM_BACKEND 2>/dev/null || true
       cd "$ROOT" || exit 1
       begin_ms=$(now_ms)
-      bash "$script" >"$work/output" 2>&1
+      TMPDIR="$work/tmp" TMP="$work/tmp" FM_TASK_TMP_ROOT="$work/tmp" \
+        FM_TEST_RUN_ACTIVE=1 bash "$script" 9<&- >"$work/output" 2>&1
       rc=$?
       end_ms=$(now_ms)
       duration=$((end_ms - begin_ms))

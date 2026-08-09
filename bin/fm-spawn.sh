@@ -1325,7 +1325,20 @@ fi
 # Nested (not a bare /tmp/fm-<id>/gotmp) so other per-task temp can live alongside
 # later, and teardown cleans one deterministic path. GOTMPDIR (not TMPDIR) is the
 # targeted knob: TMPDIR is too broad (affects every program's temp, not just Go's).
-TASK_TMP="/tmp/fm-$ID"
+#
+# FM_TASK_TMP_ROOT relocates that root and is unset in normal operation, so the
+# real path is unchanged. bin/fm-test-run.sh sets it to the executed script's
+# private temp root: a test that drives a real spawn would otherwise leave a
+# /tmp/fm-<fixture id>/ behind with no task and no teardown to remove it, and on
+# a tmpfs /tmp that residue is held in RAM. It must be absolute: this path is
+# recorded as tasktmp= and reaches an unguarded rm -rf in bin/fm-teardown.sh,
+# which would resolve a relative value against whatever directory teardown
+# happens to run in.
+case "${FM_TASK_TMP_ROOT:-/tmp}" in
+  /*) ;;
+  *) echo "error: FM_TASK_TMP_ROOT must be an absolute path, got '$FM_TASK_TMP_ROOT'" >&2; exit 1 ;;
+esac
+TASK_TMP="${FM_TASK_TMP_ROOT:-/tmp}/fm-$ID"
 mkdir -p "$TASK_TMP/gotmp"
 
 # Per-harness turn-end hook where enabled: a file that touches

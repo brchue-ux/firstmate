@@ -889,11 +889,19 @@ test_pi_session_transition_generation_owner() {
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  # The child pid file is this fixture's publication point: the assertions below
+  # wait on it and then immediately read the arm log for the same pid. So the arm
+  # log entry is appended first, and the pid file is published by rename, never
+  # by a create-then-write a reader can observe half done. Written the other way
+  # round, an arm child that is descheduled between the two writes is seen as
+  # started while the arm log still lists only its dead predecessors, and the
+  # live-arm-child assertions fail on a scheduling accident.
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
 printf 'watcher: started pid=%s\n' "$$"
-printf '%s\n' "$$" > "${FM_CHILD_PID_FILE:?}"
 printf 'arm pid=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+printf '%s\n' "$$" > "${FM_CHILD_PID_FILE:?}.new"
+mv -f "${FM_CHILD_PID_FILE:?}.new" "${FM_CHILD_PID_FILE:?}"
 trap 'exit 0' TERM INT
 while :; do sleep 0.2; done
 SH

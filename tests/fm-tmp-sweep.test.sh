@@ -312,6 +312,237 @@ test_missing_root_is_a_silent_no_op() {
   pass "sweep treats an absent temp root as a silent no-op"
 }
 
+# make_home <dir> <task id> <tasktmp>: a firstmate home whose task records name
+# <tasktmp> as a live task's scratch root.
+make_home() {
+  local home=$1 id=$2 tasktmp=$3
+  mkdir -p "$home/state" "$home/data"
+  printf 'window=w\ntasktmp=%s\n' "$tasktmp" > "$home/state/$id.meta"
+  printf '%s\n' "$home"
+}
+
+test_leaves_a_live_tasks_scratch_root() {
+  local root home live orphan out
+  root=$(new_root live-task)
+  # A task id ending in a dot plus six alphanumerics is shaped exactly like a
+  # mktemp fixture, which is the only way a live scratch root reaches the
+  # candidate list at all.
+  live=$(make_stale_dir "$root" fm-report.v2beta)
+  orphan=$(make_stale_dir "$root" fm-teardown-tests.aB3xY9)
+  home=$(make_home "$TMP_ROOT/live-task-home" report.v2beta "$live")
+
+  out=$(run_sweep "$root" --protect-homes "$home")
+  assert_present "$live" "a scratch root a home records as a live task must never be removed"
+  assert_absent "$orphan" "an ordinary orphan beside it must still be reclaimed"
+  assert_contains "$out" "fm-report.v2beta: skipped: a firstmate home records it as a live task's scratch root" \
+    "refusing a live task's scratch must be reported"
+  pass "sweep never removes a scratch root a home records as a live task's"
+}
+
+test_leaves_a_task_scratch_root_carrying_gotmp() {
+  local root dir out
+  root=$(new_root gotmp)
+  dir=$(make_stale_dir "$root" fm-someid.aB3xY9)
+  mkdir -p "$dir/gotmp"
+  age_out "$dir/gotmp" "$dir"
+
+  out=$(run_sweep "$root")
+  assert_present "$dir" "a per-task scratch root carrying gotmp/ must never be removed"
+  assert_contains "$out" "fm-someid.aB3xY9: skipped: looks like a live task's scratch root" \
+    "refusing a per-task scratch root must be reported"
+  pass "sweep never removes a per-task scratch root carrying gotmp/"
+}
+
+test_refuses_when_task_records_cannot_be_read() {
+  local root home dir out
+  if [ "$(id -u)" = 0 ]; then
+    pass "unreadable task records: root bypasses directory permissions, nothing to assert"
+    return 0
+  fi
+  root=$(new_root unreadable-records)
+  dir=$(make_stale_dir "$root" fm-teardown-tests.aB3xY9)
+  home=$(make_home "$TMP_ROOT/unreadable-home" sometask /nowhere)
+  chmod 000 "$home/state"
+
+  out=$(run_sweep "$root" --protect-homes "$home")
+  chmod 755 "$home/state"
+  assert_present "$dir" \
+    "an unreadable task record must stop the sweep rather than let it guess"
+  assert_contains "$out" "task records could not be read" \
+    "refusing on unreadable task records must say so"
+  pass "sweep refuses entirely when a home's task records cannot be read"
+}
+
+test_reads_secondmate_homes_for_live_scratch() {
+  local root primary second live out
+  root=$(new_root secondmate-task)
+  live=$(make_stale_dir "$root" fm-second.aB3xY9)
+  second=$(make_home "$TMP_ROOT/second-home" second.aB3xY9 "$live")
+  primary="$TMP_ROOT/primary-home"
+  mkdir -p "$primary/data" "$primary/state"
+  printf -- '- second (home: %s; scope: things)\n' "$second" > "$primary/data/secondmates.md"
+
+  out=$(run_sweep "$root" --protect-homes "$primary")
+  assert_present "$live" \
+    "a live task recorded by a registered secondmate home must be protected too"
+  assert_contains "$out" "fm-second.aB3xY9: skipped: a firstmate home records it" \
+    "protecting a secondmate's live task must be reported"
+  pass "sweep reads registered secondmate homes for live task scratch"
+}
+
+test_unreadable_secondmate_registry_refuses_the_sweep() {
+  local root dir home out
+  if [ "$(id -u)" = 0 ]; then
+    pass "unreadable secondmate registry: root bypasses file permissions, nothing to assert"
+    return 0
+  fi
+  root=$(new_root unreadable-registry)
+  dir=$(make_stale_dir "$root" fm-teardown-tests.aB3xY9)
+  home="$TMP_ROOT/unreadable-registry-home"
+  mkdir -p "$home/state" "$home/data"
+  printf -- '- second (home: %s; scope: things)\n' "$TMP_ROOT/second" > "$home/data/secondmates.md"
+  chmod 000 "$home/data/secondmates.md"
+
+  out=$(run_sweep "$root" --protect-homes "$home")
+  chmod 644 "$home/data/secondmates.md"
+  # A registry that is simply absent says the home has no secondmates, which
+  # every other case here relies on. One that exists and cannot be read hides a
+  # whole class of homes, so the live tasks they record go unseen - the same
+  # ambiguity as an unreadable task record, and it must refuse the same way.
+  assert_present "$dir" \
+    "an unreadable secondmate registry must stop the sweep rather than let it guess"
+  # Naming the wrong records sends the operator to inspect state/ and find
+  # nothing wrong, which is the same misdirection as reporting a candidate cap
+  # as an exhausted time budget.
+  assert_contains "$out" "directory or secondmate registry could not be read" \
+    "refusing on an unreadable registry must name the registry, not task records"
+  assert_not_contains "$out" "task records could not be read" \
+    "an unreadable registry must not be reported as an unreadable task record"
+  pass "sweep refuses entirely when a home's secondmate registry cannot be read"
+}
+
+test_unsearchable_home_root_refuses_the_sweep() {
+  local root dir home out
+  if [ "$(id -u)" = 0 ]; then
+    pass "unsearchable home root: root bypasses directory permissions, nothing to assert"
+    return 0
+  fi
+  root=$(new_root unsearchable-home)
+  dir=$(make_stale_dir "$root" fm-teardown-tests.aB3xY9)
+  home=$(make_home "$TMP_ROOT/unsearchable-home-root" sometask "$TMP_ROOT/nowhere")
+  chmod 000 "$home"
+
+  out=$(run_sweep "$root" --protect-homes "$home")
+  chmod 755 "$home"
+  # From outside, a home with no search permission is indistinguishable from a
+  # home that simply has no state/ - so without refusing, every live task it
+  # records would go unprotected while the sweep reported a clean run.
+  assert_present "$dir" \
+    "a home that exists but cannot be searched must stop the sweep, not be skipped"
+  assert_contains "$out" "directory or secondmate registry could not be read" \
+    "refusing on an unsearchable home must name the home, not task records"
+  pass "sweep refuses entirely when a home exists but cannot be searched"
+}
+
+test_name_prefix_narrows_the_candidate_set() {
+  local root scoped unscoped outside out
+  root=$(new_root name-prefix)
+  scoped=$(make_stale_dir "$root" fm-test-run.aB3xY9)
+  unscoped=$(make_stale_dir "$root" fm-other-tool.Cc44Dd)
+  # Outside the naming convention entirely: a prefix must narrow what the
+  # convention already allowed, never reach past it.
+  outside="$root/test-run.Ee55Ff"
+  mkdir -p "$outside"
+  age_out "$outside"
+
+  out=$(run_sweep "$root" --name-prefix fm-test-run.)
+  assert_absent "$scoped" "a candidate matching the prefix must still be reclaimed"
+  assert_present "$unscoped" \
+    "a stale candidate outside the prefix must be left to an unscoped pass: $unscoped"
+  assert_present "$outside" "a prefix must never widen the sweep past the name convention"
+  assert_contains "$out" "fm-test-run.aB3xY9: removed" "the scoped removal must be reported"
+  pass "sweep --name-prefix narrows the candidate set and cannot widen it"
+}
+
+test_protects_a_live_task_recorded_through_a_symlinked_root() {
+  local root real live recorded home out
+  real=$(new_root symlinked-root-real)
+  root="$TMP_ROOT/symlinked-root"
+  ln -s "$real" "$root"
+  live=$(make_stale_dir "$real" fm-symtask.aB3xY9)
+  # What bin/fm-spawn.sh records on a host whose temp root is a symlink - macOS,
+  # where /tmp points at /private/tmp. Candidates always carry the resolved
+  # root, so a verbatim comparison can never match and the protection would be
+  # inert on exactly the hosts where the two spellings differ.
+  recorded="$root/fm-symtask.aB3xY9"
+  home=$(make_home "$TMP_ROOT/symlinked-root-home" symtask.aB3xY9 "$recorded")
+
+  out=$(run_sweep "$root" --protect-homes "$home")
+  assert_present "$live" \
+    "a live task recorded through a symlinked temp root must still be protected"
+  assert_contains "$out" "fm-symtask.aB3xY9: skipped: a firstmate home records it" \
+    "protecting a live task through a symlinked root must be reported"
+  pass "sweep resolves recorded task scratch before comparing it to a candidate"
+}
+
+test_age_minutes_window() {
+  local root recent out
+  root=$(new_root age-minutes)
+  recent=$(make_fresh_dir "$root" fm-recent.aB3xY9)
+  # Ten minutes old: stale under a 5-minute window, fresh under the 12h default.
+  touch -d '10 minutes ago' "$recent/nested/payload" "$recent/nested" "$recent" 2>/dev/null \
+    || touch -A -001000 "$recent/nested/payload" "$recent/nested" "$recent"
+
+  out=$(run_sweep "$root" --age-minutes 5)
+  assert_absent "$recent" "a dir past the minutes window must be reclaimed"
+  assert_contains "$out" "fm-recent.aB3xY9: removed" "the minutes window must report its removal"
+  pass "sweep honours a minutes-granularity age window"
+}
+
+test_max_bounds_the_examination() {
+  local root out i
+  root=$(new_root max-bound)
+  for i in 1 2 3; do
+    make_stale_dir "$root" "fm-bounded$i.aB3xY9" >/dev/null
+  done
+
+  out=$(run_sweep "$root" --max 1)
+  [ "$(find "$root" -mindepth 1 -maxdepth 1 -type d | wc -l)" -eq 2 ] \
+    || fail "--max 1 must examine exactly one candidate and defer the rest"
+  # The reason matters as much as the count: an operator told the time budget
+  # ran out goes looking for a slow host instead of for the cap they set.
+  assert_contains "$out" "the --max 1 candidate cap was reached after removing 1, 2 candidate(s) deferred" \
+    "a bounded sweep must name the cap it stopped on"
+  assert_not_contains "$out" "budget exhausted" \
+    "the candidate cap must never be reported as the time budget"
+  pass "sweep stops after --max candidates and reports the cap as the reason"
+}
+
+# The session-start sweep is bounded only by its time budget, and must stay that
+# way: capping it by default would strand orphans on exactly the host that
+# leaked the most, which is the host this sweep exists for. The bound belongs to
+# the caller that wants it - bin/fm-test-run.sh passes its own --max.
+test_default_max_is_unbounded() {
+  local root out i
+  local -a dirs=()
+  root=$(new_root unbounded-default)
+  i=1
+  while [ "$i" -le 501 ]; do
+    dirs+=("$root/fm-bulk$i.aB3xY9")
+    i=$((i + 1))
+  done
+  mkdir -p "${dirs[@]}"
+  age_out "${dirs[@]}"
+
+  # A generous budget, so this measures the candidate bound and nothing else.
+  out=$(run_sweep "$root" --timeout 600)
+  [ "$(find "$root" -mindepth 1 -maxdepth 1 -type d | wc -l)" -eq 0 ] \
+    || fail "the default sweep must examine more than 500 candidates, not cap itself"
+  assert_not_contains "$out" "deferred" \
+    "an unbounded sweep with time to spare must defer nothing"
+  pass "sweep examines every candidate by default and bounds only when asked"
+}
+
 test_removes_stale_scratch_dir
 test_leaves_fresh_scratch_dir
 test_leaves_dir_with_recent_deep_write
@@ -328,5 +559,16 @@ test_dry_run_reports_without_removing
 test_age_window_is_configurable
 test_rejects_invalid_arguments
 test_missing_root_is_a_silent_no_op
+test_leaves_a_live_tasks_scratch_root
+test_leaves_a_task_scratch_root_carrying_gotmp
+test_refuses_when_task_records_cannot_be_read
+test_reads_secondmate_homes_for_live_scratch
+test_age_minutes_window
+test_max_bounds_the_examination
+test_default_max_is_unbounded
+test_unreadable_secondmate_registry_refuses_the_sweep
+test_unsearchable_home_root_refuses_the_sweep
+test_name_prefix_narrows_the_candidate_set
+test_protects_a_live_task_recorded_through_a_symlinked_root
 
 echo "all fm-tmp-sweep tests passed"

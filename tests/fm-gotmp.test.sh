@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Behavior tests for per-task GOTMPDIR support (fm-gotmp).
 #
-# fm-spawn gives each task a temp root /tmp/fm-<id>/ with Go's build temp nested at
+# fm-spawn gives each task a temp root <FM_TASK_TMP_ROOT or /tmp>/fm-<id>/ with Go's build temp nested at
 # gotmp/, exports GOTMPDIR into the crewmate pane, and records tasktmp= in the task's
 # meta. fm-teardown reads tasktmp= and removes the whole root on cleanup.
 #

@@ -12,16 +12,28 @@
 # writes. This sweep is the backstop for that leak; making EXIT traps survive
 # SIGKILL is a separate, much larger problem and is deliberately out of scope.
 #
+# This is the single owner of the "is this scratch directory safe to remove"
+# decision. Both reap trigger points call it rather than reimplementing the
+# checks: bin/fm-bootstrap.sh sweeps at session start, and bin/fm-test-run.sh
+# sweeps at the start of a test run. Keeping one implementation is deliberate -
+# two copies of a destructive predicate drift the moment only one is edited.
+#
 # Usage:
-#   fm-tmp-sweep.sh [--age-hours <n>] [--root <dir>] [--timeout <seconds>]
-#                   [--dry-run] [--verbose]
+#   fm-tmp-sweep.sh [--age-hours <n> | --age-minutes <n>] [--root <dir>]
+#                   [--timeout <seconds>] [--max <n>] [--protect-homes <list>]
+#                   [--name-prefix <prefix>] [--dry-run] [--verbose]
 #   fm-tmp-sweep.sh -h | --help
 #
 # A candidate is removed only when every one of these holds, checked in this
 # order so the cheap filters run before the expensive ones:
 #   - its name matches this repo's scratch convention, fm-<slug>.<6 mktemp chars>
+#   - its name starts with --name-prefix, when one was given. This can only
+#     narrow the set above, never widen it, so a caller wanting a shorter age
+#     window for its own artifacts can scope that window to names only it
+#     creates instead of applying it to everything in the shared root
 #   - it is a real directory, not a symlink, and is owned by the current user
 #   - it holds neither the current working directory nor FM_HOME
+#   - the sweep has not yet examined --max candidates
 #   - the sweep still has time budget left; once the budget trips, every
 #     remaining candidate is counted and deferred without further probing
 #   - nothing anywhere inside it has been modified within the age window
@@ -29,6 +41,11 @@
 #     marker, or real home content under data/ (backlog.md, projects.md,
 #     secondmates.md). Bare empty state/, data/ and config/ directories are a
 #     common test-fixture shape and are NOT home evidence.
+#   - it is not, and does not contain, a scratch root any discoverable home
+#     records as a live task's tasktmp=, and it carries no per-task gotmp/
+#     marker. A task id is normally not mktemp-shaped so it never reaches this
+#     check, but a dotted task id can be, and deleting a live task's scratch
+#     corrupts running work.
 #   - no live process holds a path inside it open
 # A candidate failing any of those is left exactly as it is; the sweep never
 # forces, never follows symlinks out of the temp root, and never touches a path
@@ -42,13 +59,40 @@
 #                                   really an operational home) or failed to
 #                                   remove
 #   "<root>: skipped: <reason>"   - a whole-sweep limit (open handles could not
-#                                   be checked, time budget exhausted)
+#                                   be checked, time budget exhausted, the
+#                                   --max candidate cap reached)
 # Healthy skips - young, in use, not ours, not matching - stay silent unless
-# --verbose is passed. Exit status is 0 unless the arguments are invalid.
+# --verbose is passed.
+#
+# Exit status:
+#   0  the sweep ran; individual candidates may still have been skipped
+#   1  the arguments were invalid
+#   3  the sweep refused as a whole before examining anything, because a home's
+#      records could not be read and a live task's scratch therefore could not
+#      be ruled out. The message names which records - task records under
+#      state/, or the home directory and secondmate registry that decide which
+#      homes are read at all - so an operator inspects the right place. Callers
+#      that report a completed sweep must not report one here.
+#      bin/fm-bootstrap.sh ignores the status and classifies output.
 #
 # Environment overrides (defaults are the operating contract; these exist for
 # tests and one-off manual runs, not as a configuration surface):
 #   FM_TMP_SWEEP_AGE_HOURS   age window in hours (default 12)
+#   FM_TMP_SWEEP_AGE_MINUTES age window in minutes; wins over the hours form.
+#                            Exists for a caller that cannot express its window
+#                            in whole hours; no caller shortens the default
+#   FM_TMP_SWEEP_MAX         stop after examining this many candidates
+#                            (default 0, meaning unbounded). A caller that
+#                            wants a bound passes --max: session start must
+#                            reclaim everything it can, so bounding it by
+#                            default would strand orphans on the very host that
+#                            leaked the most
+#   FM_TMP_SWEEP_HOMES       extra firstmate homes to read task records from,
+#                            colon-separated. FM_HOME and the secondmate homes
+#                            each discoverable home registers are always read
+#   FM_TMP_SWEEP_NAME_PREFIX consider only candidates whose name starts with
+#                            this prefix (default none). Narrows the candidate
+#                            set and never widens it
 #   FM_TMP_SWEEP_ROOT        temp root to sweep (default ${TMPDIR:-/tmp})
 #   FM_TMP_SWEEP_TIMEOUT     whole-sweep time budget in seconds (default 20);
 #                            0 leaves no time for any candidate, so every one
@@ -74,17 +118,33 @@ die() {
 }
 
 AGE_HOURS=${FM_TMP_SWEEP_AGE_HOURS:-12}
+AGE_MINUTES_OPT=${FM_TMP_SWEEP_AGE_MINUTES:-}
 ROOT_DIR=${FM_TMP_SWEEP_ROOT:-${TMPDIR:-/tmp}}
 BUDGET=${FM_TMP_SWEEP_TIMEOUT:-20}
+MAX=${FM_TMP_SWEEP_MAX:-0}
+PROTECT_HOMES=${FM_TMP_SWEEP_HOMES:-}
+NAME_PREFIX=${FM_TMP_SWEEP_NAME_PREFIX:-}
 PROC_ROOT=${FM_TMP_SWEEP_PROC_ROOT:-/proc}
 DRY_RUN=0
 VERBOSE=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --age-hours) [ $# -ge 2 ] || die "--age-hours needs a value"; AGE_HOURS=$2; shift 2 ;;
+    --age-hours) [ $# -ge 2 ] || die "--age-hours needs a value"; AGE_HOURS=$2; AGE_MINUTES_OPT=; shift 2 ;;
+    --age-minutes) [ $# -ge 2 ] || die "--age-minutes needs a value"; AGE_MINUTES_OPT=$2; shift 2 ;;
     --root) [ $# -ge 2 ] || die "--root needs a value"; ROOT_DIR=$2; shift 2 ;;
     --timeout) [ $# -ge 2 ] || die "--timeout needs a value"; BUDGET=$2; shift 2 ;;
+    --max) [ $# -ge 2 ] || die "--max needs a value"; MAX=$2; shift 2 ;;
+    --protect-homes) [ $# -ge 2 ] || die "--protect-homes needs a value"; PROTECT_HOMES=$2; shift 2 ;;
+    --name-prefix)
+      [ $# -ge 2 ] || die "--name-prefix needs a value"
+      # An empty prefix would read as "scope this pass" while scoping nothing,
+      # which is the one way this option could hand a caller a wider sweep than
+      # it asked for. Absent means unscoped; present has to mean something.
+      [ -n "$2" ] || die "name prefix must not be empty"
+      NAME_PREFIX=$2
+      shift 2
+      ;;
     --dry-run) DRY_RUN=1; shift ;;
     --verbose) VERBOSE=1; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -98,9 +158,24 @@ esac
 case "$BUDGET" in
   ''|*[!0-9]*) die "timeout must be a non-negative integer, got '$BUDGET'" ;;
 esac
-[ -d "$ROOT_DIR" ] || exit 0
+case "$MAX" in
+  ''|*[!0-9]*) die "max must be a non-negative integer, got '$MAX'" ;;
+esac
 
-AGE_MINUTES=$((AGE_HOURS * 60))
+# The minutes form wins when it is set, so a caller on a short horizon does not
+# have to express itself in whole hours.
+if [ -n "$AGE_MINUTES_OPT" ]; then
+  case "$AGE_MINUTES_OPT" in
+    ''|*[!0-9]*) die "age minutes must be a non-negative integer, got '$AGE_MINUTES_OPT'" ;;
+  esac
+  AGE_MINUTES=$AGE_MINUTES_OPT
+  AGE_WINDOW="${AGE_MINUTES}m"
+else
+  AGE_MINUTES=$((AGE_HOURS * 60))
+  AGE_WINDOW="${AGE_HOURS}h"
+fi
+
+[ -d "$ROOT_DIR" ] || exit 0
 
 note() {
   [ "$VERBOSE" -eq 1 ] || return 0
@@ -155,6 +230,166 @@ looks_like_home() {
     if [ -e "$dir/$rel" ] || [ -L "$dir/$rel" ]; then
       return 0
     fi
+  done
+  return 1
+}
+
+# --- live task scratch ------------------------------------------------------
+#
+# bin/fm-spawn.sh roots a task's scratch at "${FM_TASK_TMP_ROOT:-/tmp}/fm-<task
+# id>" and records it as tasktmp= in state/<id>.meta. That name normally carries
+# no mktemp suffix, so it never reaches the candidate list at all - but a task id
+# ending in a dot plus six alphanumerics is shaped exactly like a fixture, and
+# removing a live task's scratch corrupts work in flight. Reading the records is
+# cheap next to the probes that follow, and it is the only check that can tell a
+# live task's scratch from an abandoned fixture.
+
+# Emitted by candidate_homes in place of a home it could not enumerate. The
+# discovery walk runs inside a pipeline, so an exit status cannot reach the
+# caller; the failure has to travel as a line. No real home path can collide
+# with it.
+HOME_SCAN_FAILED='!fm-tmp-sweep: a home registry could not be read'
+
+# Bits protected_tasktmp sets, so the whole-sweep refusal can name where the
+# operator should actually look. An unreadable state/<id>.meta and an
+# unreadable home directory or secondmate registry are both fatal ambiguity,
+# but they send an operator to different places.
+AMBIGUOUS_TASK_RECORDS=1
+AMBIGUOUS_HOME_RECORDS=2
+
+# candidate_homes: the homes whose task records may name a live scratch root -
+# this session's FM_HOME, every home named by --protect-homes, and every
+# secondmate each of those registers.
+candidate_homes() {
+  local seeded home registry
+  {
+    [ -z "${FM_HOME:-}" ] || printf '%s\n' "$FM_HOME"
+    if [ -n "$PROTECT_HOMES" ]; then
+      printf '%s\n' "${PROTECT_HOMES//:/$'\n'}"
+    fi
+  } | LC_ALL=C sort -u | while IFS= read -r seeded; do
+    [ -n "$seeded" ] || continue
+    printf '%s\n' "$seeded"
+    registry="$seeded/data/secondmates.md"
+    # An unreadable registry hides a whole class of homes, so every live task
+    # those homes record goes unseen - the same ambiguity as an unreadable task
+    # record, and it must stop the sweep the same way. A registry that simply
+    # is not there says the home has no secondmates, which is not ambiguous.
+    # An unsearchable data/ is indistinguishable from a missing registry by
+    # test alone, so it is checked first.
+    if [ -d "$seeded/data" ] && [ ! -x "$seeded/data" ]; then
+      printf '%s\n' "$HOME_SCAN_FAILED"
+      continue
+    fi
+    if [ ! -r "$registry" ]; then
+      if [ -e "$registry" ] || [ -L "$registry" ]; then
+        printf '%s\n' "$HOME_SCAN_FAILED"
+      fi
+      continue
+    fi
+    while IFS= read -r home; do
+      [ -n "$home" ] && printf '%s\n' "$home"
+    done < <(sed -n 's/.*(home: *\([^;)]*\).*/\1/p' "$registry")
+  done
+}
+
+# emit_protected_path <recorded>: a recorded tasktmp= value in every form a
+# candidate could be compared against. Candidates are always ROOT_PHYS-prefixed,
+# so a recorded path written through a symlinked temp root - /tmp on macOS -
+# never matches verbatim and the protection would be inert. The recorded value
+# is kept alongside the resolved one: a scratch root that has already gone means
+# resolution fails, and dropping it there would silently unprotect it.
+emit_protected_path() {
+  local recorded=$1 phys
+  [ -n "$recorded" ] || return 0
+  printf '%s\n' "$recorded"
+  phys=$(resolve_phys "$recorded") || return 0
+  [ "$phys" = "$recorded" ] || printf '%s\n' "$phys"
+}
+
+# protected_tasktmp: every tasktmp= path those homes record. Fails when a home's
+# records exist but cannot be read: an unreadable record is exactly the
+# ambiguity that must stop the sweep rather than let it delete on a guess. The
+# returned status carries which kind of record was unreadable.
+protected_tasktmp() {
+  local home meta recorded rc=0
+  local -a metas
+  while IFS= read -r home; do
+    [ -n "$home" ] || continue
+    if [ "$home" = "$HOME_SCAN_FAILED" ]; then
+      rc=$((rc | AMBIGUOUS_HOME_RECORDS))
+      continue
+    fi
+    # An unsearchable home root looks exactly like a home with no state/ from
+    # the outside, so without this it would be skipped silently and every live
+    # task it records would go unprotected.
+    if [ -d "$home" ] && [ ! -x "$home" ]; then
+      rc=$((rc | AMBIGUOUS_HOME_RECORDS))
+      continue
+    fi
+    [ -d "$home/state" ] || continue
+    if [ ! -r "$home/state" ] || [ ! -x "$home/state" ]; then
+      rc=$((rc | AMBIGUOUS_TASK_RECORDS))
+      continue
+    fi
+    metas=()
+    for meta in "$home"/state/*.meta; do
+      [ -f "$meta" ] || continue
+      if [ ! -r "$meta" ]; then
+        rc=$((rc | AMBIGUOUS_TASK_RECORDS))
+        continue
+      fi
+      metas+=("$meta")
+    done
+    [ "${#metas[@]}" -eq 0 ] && continue
+    while IFS= read -r recorded; do
+      emit_protected_path "$recorded"
+    done < <(sed -n 's/^tasktmp=//p' "${metas[@]}")
+  done < <(candidate_homes | LC_ALL=C sort -u)
+  return "$rc"
+}
+
+PROTECTED_PATHS=
+AMBIGUITY=0
+PROTECTED_PATHS=$(protected_tasktmp) || AMBIGUITY=$?
+if [ "$AMBIGUITY" -ne 0 ]; then
+  case "$AMBIGUITY" in
+    "$AMBIGUOUS_TASK_RECORDS")
+      AMBIGUITY_CAUSE="a firstmate home's task records could not be read" ;;
+    "$AMBIGUOUS_HOME_RECORDS")
+      AMBIGUITY_CAUSE="a firstmate home's directory or secondmate registry could not be read" ;;
+    *)
+      AMBIGUITY_CAUSE="a firstmate home's task records could not be read, and so could not another home's directory or secondmate registry" ;;
+  esac
+  report "$ROOT_DIR: skipped: $AMBIGUITY_CAUSE, so no scratch dir is safe to remove"
+  exit 3
+fi
+PROTECTED_PATHS=$'\n'"$PROTECTED_PATHS"$'\n'
+
+# is_live_task_scratch <dir>: true when <dir> is a recorded scratch root, sits
+# inside one, or contains one. All three directions matter: the sweep must not
+# remove a live scratch root, nor an ancestor that would take it with it.
+#
+# The walk is pure parameter expansion. A here-string or a pipe would make this
+# check depend on a writable temp root, and it runs only for candidates that
+# already cleared the age gate - which is to say on exactly the leaked or full
+# root this sweep exists to drain. A failure there would fall through to "not
+# live", the one direction that ends in a removal.
+is_live_task_scratch() {
+  local dir=$1 rest=${PROTECTED_PATHS#$'\n'} p
+  case "$PROTECTED_PATHS" in
+    *$'\n'"$dir"$'\n'*) return 0 ;;
+  esac
+  while [ -n "$rest" ]; do
+    p=${rest%%$'\n'*}
+    rest=${rest#*$'\n'}
+    [ -n "$p" ] || continue
+    case "$p" in
+      "$dir"/*) return 0 ;;
+    esac
+    case "$dir" in
+      "$p"/*) return 0 ;;
+    esac
   done
   return 1
 }
@@ -281,6 +516,10 @@ dir_in_use() {
 removed=0
 unverified=0
 deferred=0
+# Which of the two bounds stopped the examination. An operator reading the
+# deferral line diagnoses a slow host and a capped run differently, so the two
+# must never share a reason.
+deferred_reason=
 
 # Pass one is the cheap pass: name, type, ownership and live-containment filters
 # only, no syscall heavier than a stat. It exists so that when the time budget
@@ -294,6 +533,14 @@ for entry in "$ROOT_PHYS"/fm-*.??????; do
   # suffix is exactly six alphanumerics. Matching the convention rather than a
   # list of today's prefixes keeps new test files covered with no edit here.
   [[ $name =~ ^fm-[A-Za-z0-9][A-Za-z0-9._-]*\.[A-Za-z0-9]{6}$ ]] || continue
+  # Applied after the convention check and quoted so the prefix is literal, so
+  # it can only remove names from the set the convention already allowed.
+  if [ -n "$NAME_PREFIX" ]; then
+    case "$name" in
+      "$NAME_PREFIX"*) ;;
+      *) continue ;;
+    esac
+  fi
   [ -L "$entry" ] && continue
   [ -d "$entry" ] || continue
   [ -O "$entry" ] || { note "$name: skipped: owned by another user"; continue; }
@@ -311,11 +558,18 @@ for entry in ${candidates[@]+"${candidates[@]}"}; do
   index=$((index + 1))
   name=${entry##*/}
 
-  # Checked before the recursive age walk and the open-handle probe, because
-  # those are the sweep's dominant costs; checking after them would let a root
-  # full of large trees run far past the budget it claims to honour.
+  # Both bounds are checked before the recursive age walk and the open-handle
+  # probe, because those are the sweep's dominant costs; checking after them
+  # would let a root full of large trees run far past the limits it claims to
+  # honour.
+  if [ "$MAX" -gt 0 ] && [ "$index" -gt "$MAX" ]; then
+    deferred=$((total - index + 1))
+    deferred_reason="the --max $MAX candidate cap was reached"
+    break
+  fi
   if [ "$SECONDS" -ge "$BUDGET" ]; then
     deferred=$((total - index + 1))
+    deferred_reason="${BUDGET}s sweep budget exhausted"
     break
   fi
 
@@ -323,7 +577,7 @@ for entry in ${candidates[@]+"${candidates[@]}"}; do
   # top-level mtime alone is not enough: a long test writes deep in its tree
   # without ever restamping the root it was handed.
   if [ -n "$(find "$entry" -mmin "-$AGE_MINUTES" -print 2>/dev/null | head -n 1)" ]; then
-    note "$name: skipped: modified within ${AGE_HOURS}h"
+    note "$name: skipped: modified within $AGE_WINDOW"
     continue
   fi
 
@@ -332,6 +586,17 @@ for entry in ${candidates[@]+"${candidates[@]}"}; do
   # removed.
   if looks_like_home "$entry"; then
     report "$name: skipped: looks like a firstmate home, not scratch"
+    continue
+  fi
+
+  # A per-task scratch root carries a gotmp/ child; a recorded tasktmp= names it
+  # outright. Either one means live work owns this directory.
+  if [ -d "$entry/gotmp" ]; then
+    report "$name: skipped: looks like a live task's scratch root, not a fixture"
+    continue
+  fi
+  if is_live_task_scratch "$entry"; then
+    report "$name: skipped: a firstmate home records it as a live task's scratch root"
     continue
   fi
 
@@ -364,6 +629,6 @@ if [ "$unverified" -gt 0 ]; then
   report "$ROOT_PHYS: skipped: $unverified stale scratch dir(s) left in place: cannot verify open handles (needs lsof or a readable procfs)"
 fi
 if [ "$deferred" -gt 0 ]; then
-  report "$ROOT_PHYS: skipped: ${BUDGET}s sweep budget exhausted after removing $removed, $deferred candidate(s) deferred to the next session"
+  report "$ROOT_PHYS: skipped: $deferred_reason after removing $removed, $deferred candidate(s) deferred to the next session"
 fi
 exit 0
