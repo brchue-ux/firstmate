@@ -573,6 +573,69 @@ test_sweep_skips_missing_secondmate_with_missing_home_directory() {
   pass "sweep: a missing secondmate with a recorded-but-absent home is a reported skip, never guessed at"
 }
 
+test_sweep_skips_missing_secondmate_with_unsafe_home() {
+  local w fb tmuxfb log out
+  # An existing directory that is not a seeded secondmate home: the recorded
+  # home= must be validated, not merely tested with [ -d ], or an unrelated
+  # directory silently reads as idle and strands a busy secondmate.
+  w=$(new_world sweep-unmarked-home)
+  add_sm_home "$w" sm1 firstmate:fm-sm1
+  rm -f "$w/sm1/.fm-secondmate-home"
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  log="$w/calls.log"; : > "$log"
+
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" missing "$log")
+
+  assert_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1: skipped: recorded home $w/sm1 unsafe:" \
+    "a recorded home that is not a seeded secondmate home should be a reported skip"
+  assert_contains "$out" "cannot judge pending work" \
+    "an unsafe home should take the established refuse-to-guess skip shape"
+  [ ! -s "$log" ] || fail "an unvalidatable home must never trigger relaunch: $(cat "$log")"
+
+  # The specific stale value the launch policy cannot survive: home= pointing at
+  # the PRIMARY checkout, whose own state/*.meta records would otherwise read as
+  # this secondmate's in-flight work and relaunch it every single session.
+  w=$(new_world sweep-primary-home)
+  mkdir -p "$w/home/state"
+  {
+    printf 'window=firstmate:fm-sm1\n'
+    printf 'kind=secondmate\n'
+    printf 'harness=claude\n'
+    printf 'home=%s\n' "$ROOT"
+  } > "$w/home/state/sm1.meta"
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  log="$w/calls.log"; : > "$log"
+
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" missing "$log")
+
+  assert_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1: skipped: recorded home $ROOT unsafe:" \
+    "a home recorded as the primary checkout should be refused, not read for pending work"
+  [ ! -s "$log" ] || fail "a home recorded as the primary checkout must never trigger relaunch: $(cat "$log")"
+  pass "sweep: a recorded home that does not validate is a reported skip, never read for pending work"
+}
+
+test_sweep_skips_missing_secondmate_with_unreadable_backlog() {
+  local w fb tmuxfb log out
+  w=$(new_world sweep-unreadable-backlog)
+  add_sm_home "$w" sm1 firstmate:fm-sm1
+  # A real backlog item the sweep cannot read: an unreadable backlog must never
+  # be mistaken for the empty backlog it happens to look like from here.
+  chmod 000 "$w/sm1/data/backlog.md"
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  log="$w/calls.log"; : > "$log"
+
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" missing "$log")
+  chmod 600 "$w/sm1/data/backlog.md"
+
+  assert_contains "$out" \
+    "SECONDMATE_LIVENESS: secondmate sm1: skipped: recorded home $w/sm1 has an unreadable backlog, cannot judge pending work" \
+    "a backlog that exists but cannot be read should be a reported skip, not a silent idle reading"
+  assert_not_contains "$out" "awk:" \
+    "a backlog read failure must not leak a raw parser error into the bootstrap digest"
+  [ ! -s "$log" ] || fail "an unreadable backlog must never trigger relaunch: $(cat "$log")"
+  pass "sweep: an unreadable backlog is a reported skip, never read as no pending work"
+}
+
 test_sweep_never_acts_on_unverified_harness_dead_reading() {
   local w fb tmuxfb log out
   w=$(new_world sweep-unverified-harness)
@@ -660,6 +723,8 @@ test_sweep_leaves_down_idle_dead_secondmate
 test_sweep_respawns_dead_secondmate_with_in_flight_child_metadata
 test_sweep_skips_missing_secondmate_with_no_recorded_home
 test_sweep_skips_missing_secondmate_with_missing_home_directory
+test_sweep_skips_missing_secondmate_with_unsafe_home
+test_sweep_skips_missing_secondmate_with_unreadable_backlog
 test_sweep_never_acts_on_unverified_harness_dead_reading
 test_sweep_converges_no_retouch_once_alive
 test_sweep_skipped_under_detect_only

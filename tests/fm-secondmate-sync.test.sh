@@ -18,6 +18,9 @@
 #     failed send is reported as NUDGE_SECONDMATES:, an already-current or
 #     readme-only home is never nudged, a skipped home is reported as
 #     SECONDMATE_SYNC:, and a home with no live metadata is never swept.
+#   - A secondmate the liveness sweep deliberately left down still has its home
+#     fast-forwarded and its config propagated, but nothing is ever sent into
+#     its endpoint, so it leaves no retry marker and no actionable diagnostic.
 #   - Spawning a secondmate fast-forwards its worktree to the primary's HEAD
 #     before launch, or warns and launches unchanged when the sync is skipped.
 set -u
@@ -299,10 +302,13 @@ if [ -n "${FM_FAKE_TMUX_LOG:-}" ]; then
 fi
 case "$*" in
   list-windows*)
-    sed -n 's/^window=[^:]*://p' "${FM_HOME:?}"/state/*.meta
+    # The inventory must follow the EFFECTIVE state dir: the liveness sweep
+    # reads the same one, and a window it cannot find there reads as a missing
+    # endpoint rather than the running secondmate these fixtures describe.
+    sed -n 's/^window=[^:]*://p' "${FM_STATE_OVERRIDE:-${FM_HOME:?}/state}"/*.meta 2>/dev/null
     exit 0
     ;;
-  *display-message*'#{pane_current_command}'*) printf '%s\n' codex; exit 0 ;;
+  *display-message*'#{pane_current_command}'*) printf '%s\n' "${FM_FAKE_TMUX_PANE_CMD:-codex}"; exit 0 ;;
   *display-message*'#{pane_id}'*) printf '%s\n' '%1'; exit 0 ;;
   *display-message*'#{cursor_y}'*) printf '%s\n' 0; exit 0 ;;
   *'send-keys'*' -l '*)
@@ -404,6 +410,44 @@ test_bootstrap_sweep_nudges_only_instruction_change() {
   # The non-live home is never touched by the bootstrap sweep.
   [ "$(head_of "$w/sm-nonlive")" = "$c1" ] || fail "a home with no live meta was swept"
   pass "T8 bootstrap sweeps live homes and sends exactly one marked nudge for the instruction change"
+}
+
+test_bootstrap_never_sends_into_a_left_down_secondmate() {
+  local w c1 c3 fakebin out log marker
+  # The liveness sweep runs before this sweep and leaves a dead secondmate with
+  # no pending work down on purpose (fleet startup launches the first mate and
+  # nothing else). Its kind=secondmate meta survives, so "meta exists" must stop
+  # meaning "endpoint is live" for the sweeps that follow: the home still
+  # converges, but a send into an endpoint that is dead BY DESIGN would fail
+  # forever and leave retry state nobody can clear.
+  w=$(new_world boot-left-down)
+  c1=$(head_of "$w/main")
+  add_sm_worktree "$w" sm-instr "$c1"
+  bump_primary "$w" instr
+  c3=$(head_of "$w/main")
+  fakebin=$(make_fake_toolchain "$w")
+  log="$w/tmux.log"
+
+  # A bare shell on the recorded endpoint reads as dead; the home has no backlog
+  # and no dispatched child metadata, so it has no pending work either.
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_SEND_SETTLE=0 FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_PANE_CMD=zsh \
+    "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+
+  assert_not_contains "$out" "SECONDMATE_LIVENESS:" \
+    "precondition: a dead secondmate with no pending work is left down silently"
+  assert_not_contains "$out" "NUDGE_SECONDMATES:" \
+    "a left-down secondmate must not produce an unfixable instruction-nudge failure"
+  assert_not_contains "$out" "CONFIG_REREAD:" \
+    "a left-down secondmate must not produce an unfixable config-reread failure"
+  assert_not_contains "$out" "BOOTSTRAP_INFO: nudged fm-sm-instr" \
+    "a left-down secondmate endpoint must never be sent into"
+  marker="$w/home/state/.secondmate-nudge-pending/sm-instr.pending"
+  assert_absent "$marker" "a left-down secondmate must not accumulate a persistent retry marker"
+  # Only the SEND is skipped: the home is still fast-forwarded and still
+  # receives inherited config, so the launch that eventually reopens it is current.
+  [ "$(head_of "$w/sm-instr")" = "$c3" ] || fail "a left-down secondmate home was not fast-forwarded"
+  pass "T8g bootstrap converges a left-down secondmate home but never sends into its dead endpoint"
 }
 
 test_bootstrap_nudge_send_uses_state_override() {
@@ -853,6 +897,7 @@ test_ff_inflight_feature_branch
 test_no_fetch_in_local_path
 test_sweep_nudge_requires_instruction_change
 test_bootstrap_sweep_nudges_only_instruction_change
+test_bootstrap_never_sends_into_a_left_down_secondmate
 test_bootstrap_nudge_send_uses_state_override
 test_bootstrap_nudge_retry_rejects_malformed_marker_id
 test_bootstrap_nudge_failure_records_retry_marker

@@ -157,7 +157,12 @@ The stated reason is startup token cost, so the bar is "would this mate actually
 **Pending work is the test.**
 Relaunch a dead or missing secondmate only when its own durable records show pending work: a non-empty `## Queued` or `## In flight` section in that home's `data/backlog.md`, or any `*.meta` file left under that home's `state/` by a task it dispatched and never tore down (work paused mid-flight by a crash, quota limit, or killed session).
 A secondmate with neither - an empty backlog and no in-flight child task metadata - is left down even though it is registered, or was open when the fleet last stopped; the captain reopens an idle secondmate manually.
+Judge pending work only from a home you have validated the same way every other consumer of `home=` does - it must be a seeded secondmate home carrying the `.fm-secondmate-home` marker for that id, and never the primary checkout, whose own `state/` metadata would otherwise read as the secondmate's in-flight work.
+When the records cannot be read at all - no recorded home, a home that is missing or does not validate, or a `data/backlog.md` that exists but cannot be read or parsed - do not guess in either direction: repair the record first, because launching an idle secondmate and stranding a busy one are both wrong.
 `bin/fm-bootstrap.sh`'s `secondmate_home_has_pending_work` and `secondmate_liveness_sweep` are the exact-mechanics owner of this test for the session-start liveness sweep; apply the identical test by hand for an ad hoc mid-session recovery.
+
+A secondmate left down by this test is a fully handled state, not a half-recovered one.
+Its home is still fast-forwarded and still receives propagated config, but nothing is sent into its endpoint, so it produces no `SECONDMATE_LIVENESS:`, `NUDGE_SECONDMATES:`, or `CONFIG_REREAD:` diagnostic; the launch that eventually reopens it re-reads its instructions and config at startup anyway.
 
 When the test passes, respawn with:
 
