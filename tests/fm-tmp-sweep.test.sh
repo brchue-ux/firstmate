@@ -194,13 +194,64 @@ test_leaves_operational_home() {
   root=$(new_root home-shaped)
   dir="$root/fm-idle-home.Hh7788"
   mkdir -p "$dir/state" "$dir/data" "$dir/config"
-  age_out "$dir/state" "$dir/data" "$dir/config" "$dir"
+  # Real home content, not just the directory layout: an idle home can sit
+  # unwritten past the age window, so this is what has to protect it.
+  printf '# Backlog\n' > "$dir/data/backlog.md"
+  age_out "$dir/data/backlog.md" "$dir/state" "$dir/data" "$dir/config" "$dir"
 
   out=$(run_sweep "$root")
   assert_present "$dir" "an idle firstmate home in the temp root must never be swept"
   assert_contains "$out" "fm-idle-home.Hh7788: skipped: looks like a firstmate home" \
     "a home found in the temp root must be reported for hands-on attention"
-  pass "sweep refuses a home-shaped directory and reports it"
+  pass "sweep refuses a home with real content and reports it"
+}
+
+test_leaves_home_carrying_only_the_identity_marker() {
+  local root dir out
+  root=$(new_root home-marker)
+  dir="$root/fm-marked-home.Mm2244"
+  mkdir -p "$dir"
+  : > "$dir/.fm-secondmate-home"
+  age_out "$dir/.fm-secondmate-home" "$dir"
+
+  out=$(run_sweep "$root")
+  assert_present "$dir" "the seeded secondmate identity marker alone must protect a home"
+  assert_contains "$out" "fm-marked-home.Mm2244: skipped: looks like a firstmate home" \
+    "a marked home found in the temp root must be reported for hands-on attention"
+  pass "sweep refuses a directory carrying the secondmate home marker"
+}
+
+# The exact shape tests/fm-backend-autodetect-smoke.test.sh leaves behind when it
+# is killed: a scratch root whose top level holds state/, data/ and config/. That
+# layout alone must never buy a permanent exemption, or the orphan this sweep
+# exists for is the one orphan it can never reclaim.
+test_reclaims_scratch_shaped_like_a_home_but_empty() {
+  local root dir out
+  root=$(new_root home-shaped-scratch)
+  dir="$root/fm-backend-autodetect-smoke.Nn6688"
+  mkdir -p "$dir/state" "$dir/data" "$dir/config"
+  age_out "$dir/state" "$dir/data" "$dir/config" "$dir"
+
+  out=$(run_sweep "$root")
+  assert_absent "$dir" "bare state/, data/ and config/ dirs are a fixture shape, not a home"
+  assert_contains "$out" "fm-backend-autodetect-smoke.Nn6688: removed" \
+    "the reclaimed fixture must be reported like any other removal"
+  pass "sweep reclaims a stale fixture whose layout only resembles a home"
+}
+
+test_exhausted_budget_defers_every_remaining_candidate() {
+  local root first second out
+  root=$(new_root budget)
+  first=$(make_stale_dir "$root" fm-teardown-tests.Oo1357)
+  second=$(make_stale_dir "$root" fm-teardown-tests.Pp2468)
+
+  out=$(run_sweep "$root" --timeout 0)
+  assert_present "$first" "a sweep with no time budget left must remove nothing"
+  assert_present "$second" "a sweep with no time budget left must remove nothing"
+  assert_contains "$out" "sweep budget exhausted after removing 0, 2 candidate(s) deferred" \
+    "an exhausted budget must report exactly how much work it handed to the next session"
+  assert_not_contains "$out" ": removed" "a deferred candidate must not be reported as removed"
+  pass "sweep defers every remaining candidate once its time budget is exhausted"
 }
 
 test_leaves_dir_holding_the_live_home_or_cwd() {
@@ -269,6 +320,9 @@ test_refuses_without_an_open_handle_check
 test_ignores_names_outside_the_convention
 test_leaves_symlinked_candidate
 test_leaves_operational_home
+test_leaves_home_carrying_only_the_identity_marker
+test_reclaims_scratch_shaped_like_a_home_but_empty
+test_exhausted_budget_defers_every_remaining_candidate
 test_leaves_dir_holding_the_live_home_or_cwd
 test_dry_run_reports_without_removing
 test_age_window_is_configurable

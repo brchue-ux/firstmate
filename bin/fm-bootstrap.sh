@@ -190,7 +190,7 @@ scratch_sweep() {
     esac
   done <<<"$out"
   if [ "$removed" -gt 0 ]; then
-    echo "BOOTSTRAP_INFO: reclaimed $removed stale scratch dir(s) from ${TMPDIR:-/tmp}"
+    echo "BOOTSTRAP_INFO: reclaimed $removed stale scratch dir(s) from ${FM_TMP_SWEEP_ROOT:-${TMPDIR:-/tmp}}"
   fi
 }
 

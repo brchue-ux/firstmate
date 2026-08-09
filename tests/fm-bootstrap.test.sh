@@ -377,8 +377,8 @@ test_scratch_sweep_is_a_locked_mutating_sweep() {
     FM_TMP_SWEEP_ROOT="$sweep_root" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
   assert_absent "$stale" "a locked session start must reclaim stale scratch with no configuration"
-  assert_contains "$out" "BOOTSTRAP_INFO: reclaimed 1 stale scratch dir(s)" \
-    "reclamation is completed benign work, so it reports as a no-action fact"
+  assert_contains "$out" "BOOTSTRAP_INFO: reclaimed 1 stale scratch dir(s) from $sweep_root" \
+    "reclamation is completed benign work, so it reports as a no-action fact naming the root it actually swept"
   assert_not_contains "$out" "SCRATCH_SWEEP:" \
     "a clean reclamation must not print an actionable diagnostic"
 

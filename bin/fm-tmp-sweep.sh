@@ -17,16 +17,23 @@
 #                   [--dry-run] [--verbose]
 #   fm-tmp-sweep.sh -h | --help
 #
-# A candidate is removed only when every one of these holds:
+# A candidate is removed only when every one of these holds, checked in this
+# order so the cheap filters run before the expensive ones:
 #   - its name matches this repo's scratch convention, fm-<slug>.<6 mktemp chars>
 #   - it is a real directory, not a symlink, and is owned by the current user
-#   - it holds neither the current working directory nor FM_HOME, and carries no
-#     firstmate-home marker of its own
+#   - it holds neither the current working directory nor FM_HOME
+#   - the sweep still has time budget left; once the budget trips, every
+#     remaining candidate is counted and deferred without further probing
 #   - nothing anywhere inside it has been modified within the age window
+#   - it carries no firstmate-home evidence of its own: a .fm-secondmate-home
+#     marker, or real home content under data/ (backlog.md, projects.md,
+#     secondmates.md). Bare empty state/, data/ and config/ directories are a
+#     common test-fixture shape and are NOT home evidence.
 #   - no live process holds a path inside it open
 # A candidate failing any of those is left exactly as it is; the sweep never
 # forces, never follows symlinks out of the temp root, and never touches a path
-# it did not enumerate itself.
+# it did not enumerate itself. The sweep writes nothing at all outside the
+# candidates it removes, so a full temp root cannot disable it.
 #
 # Output is one line per notable outcome and silent otherwise, in the same
 # "<subject>: <verb>: <detail>" shape the other session-start sweeps use:
@@ -43,7 +50,9 @@
 # tests and one-off manual runs, not as a configuration surface):
 #   FM_TMP_SWEEP_AGE_HOURS   age window in hours (default 12)
 #   FM_TMP_SWEEP_ROOT        temp root to sweep (default ${TMPDIR:-/tmp})
-#   FM_TMP_SWEEP_TIMEOUT     whole-sweep time budget in seconds (default 20)
+#   FM_TMP_SWEEP_TIMEOUT     whole-sweep time budget in seconds (default 20);
+#                            0 leaves no time for any candidate, so every one
+#                            is deferred
 #   FM_TMP_SWEEP_PROC_ROOT   procfs root for the open-handle fallback (/proc)
 #   FM_TMP_SWEEP_CHECKER     pin the open-handle check: auto (default), lsof,
 #                            proc, or none
@@ -132,15 +141,21 @@ path_contains() {
 
 # looks_like_home <dir>: a firstmate operational home must never be mistaken for
 # scratch. An idle secondmate home can sit unwritten for longer than the age
-# window, so this check is what protects it, not the mtime gate.
+# window, so this check is what protects it, not the mtime gate. It demands
+# evidence only a real home carries - the seeded identity marker, or an actual
+# home data file. The directory layout alone is not evidence: test fixtures
+# routinely build a bare state/ + data/ + config/ triple in a scratch root, and
+# exempting that shape would strand exactly the orphans this sweep exists for.
 looks_like_home() {
-  local dir=$1
+  local dir=$1 rel
   if [ -e "$dir/.fm-secondmate-home" ] || [ -L "$dir/.fm-secondmate-home" ]; then
     return 0
   fi
-  if [ -d "$dir/state" ] && [ -d "$dir/data" ] && [ -d "$dir/config" ]; then
-    return 0
-  fi
+  for rel in data/backlog.md data/projects.md data/secondmates.md; do
+    if [ -e "$dir/$rel" ] || [ -L "$dir/$rel" ]; then
+      return 0
+    fi
+  done
   return 1
 }
 
@@ -151,6 +166,13 @@ looks_like_home() {
 # preferred because it is the one check that works on every supported host;
 # procfs is the dependency-free Linux fallback. With neither available the sweep
 # refuses to remove anything rather than guessing.
+#
+# The inventory is reduced, in the single probe pass, to the set of names
+# directly under the swept root that some process holds open, and that set is
+# held in memory. It is never spilled to a file: the outage this sweep exists to
+# prevent is a full temp root, and a sweep that needed a writable temp root
+# would disable itself precisely when it is needed. Keeping it as a name set
+# also means each candidate costs one string test rather than a rescan.
 
 CHECKER=${FM_TMP_SWEEP_CHECKER:-auto}
 case "$CHECKER" in
@@ -167,8 +189,12 @@ case "$CHECKER" in
   *) die "open-handle check must be auto, lsof, proc, or none, got '$CHECKER'" ;;
 esac
 
-IN_USE_LIST=
+IN_USE_NAMES=
 IN_USE_BUILT=0
+IN_USE_OK=1
+
+TIMEOUT_CMD=
+command -v timeout >/dev/null 2>&1 && TIMEOUT_CMD=timeout
 
 proc_open_paths() {
   local pid link target
@@ -181,53 +207,86 @@ proc_open_paths() {
   done
 }
 
-build_in_use_list() {
-  [ "$IN_USE_BUILT" -eq 0 ] || return 0
-  IN_USE_BUILT=1
-  IN_USE_LIST=$(mktemp "$ROOT_PHYS/.fm-tmp-sweep.XXXXXX" 2>/dev/null) || {
-    IN_USE_LIST=
-    return 1
-  }
+# open_handle_probe: stream every open path the chosen checker can see, then one
+# trailing status line so the reducer can tell a probe that was cut short from
+# one that simply saw nothing. lsof gets -b so it can never block on a stale NFS
+# or autofs mount, and the whole probe is held inside what is left of the sweep
+# budget when a timeout command exists.
+open_handle_probe() {
+  local rc=0 left
   case "$CHECKER" in
-    lsof) lsof -n -P -w -F n 2>/dev/null | sed -n 's/^n//p' >"$IN_USE_LIST" ;;
-    proc) proc_open_paths >"$IN_USE_LIST" ;;
+    lsof)
+      if [ -n "$TIMEOUT_CMD" ]; then
+        left=$((BUDGET - SECONDS))
+        [ "$left" -ge 1 ] || left=1
+        "$TIMEOUT_CMD" "$left" lsof -b -n -P -w -F n 2>/dev/null | sed -n 's/^n//p'
+      else
+        lsof -b -n -P -w -F n 2>/dev/null | sed -n 's/^n//p'
+      fi
+      rc=${PIPESTATUS[0]}
+      ;;
+    proc) proc_open_paths || rc=$? ;;
   esac
-  # This process alone always holds open files, so an empty inventory means the
-  # check did not work rather than that the host is idle. Treat it as a failure
-  # so the caller reports instead of reading "nothing open" off a broken probe.
-  [ -s "$IN_USE_LIST" ]
+  printf 'fm-tmp-sweep-probe-status %s\n' "$rc"
 }
 
-# dir_in_use <dir>: true when any live process holds <dir> or a path below it.
-# Callers must have built the inventory first; a missing inventory counts as in
-# use, so a failure here can only ever prevent a removal.
-dir_in_use() {
-  local dir=$1
-  [ -n "$IN_USE_LIST" ] || return 0
-  # The candidate path travels through the environment, not through awk -v,
-  # which would interpret backslash escapes inside a path.
-  FM_TMP_SWEEP_CANDIDATE="$dir" awk '
-    BEGIN { self = ENVIRON["FM_TMP_SWEEP_CANDIDATE"]; below = self "/" }
-    index($0, below) == 1 { found = 1; exit }
-    $0 == self { found = 1; exit }
-    END { exit !found }
-  ' "$IN_USE_LIST"
-}
-
-# shellcheck disable=SC2329 # Invoked indirectly by the EXIT trap below.
-cleanup() {
-  [ -n "$IN_USE_LIST" ] && rm -f "$IN_USE_LIST"
+build_in_use_names() {
+  [ "$IN_USE_BUILT" -eq 0 ] || return "$IN_USE_OK"
+  IN_USE_BUILT=1
+  local names rc
+  # The root travels through the environment, not through awk -v, which would
+  # interpret backslash escapes inside a path.
+  names=$(open_handle_probe | FM_TMP_SWEEP_ROOT_PHYS="$ROOT_PHYS" awk '
+    BEGIN { root = ENVIRON["FM_TMP_SWEEP_ROOT_PHYS"] "/"; rlen = length(root) }
+    $1 == "fm-tmp-sweep-probe-status" { status = $2; next }
+    { lines++ }
+    index($0, root) != 1 { next }
+    {
+      rest = substr($0, rlen + 1)
+      slash = index(rest, "/")
+      if (slash > 0) rest = substr(rest, 1, slash - 1)
+      if (rest == "" || (rest in seen)) next
+      seen[rest] = 1
+      print rest
+    }
+    # This process alone always holds open files, so an empty probe means the
+    # check did not work rather than that the host is idle; a probe the timeout
+    # cut short saw only part of the host. Either way, fail so the caller
+    # reports instead of reading "nothing open" off an incomplete answer.
+    END { exit (lines > 0 && status != 124 && status != 137) ? 0 : 1 }
+  ')
+  rc=$?
+  [ "$rc" -eq 0 ] || return 1
+  IN_USE_NAMES=$'\n'"$names"$'\n'
+  IN_USE_OK=0
   return 0
 }
-trap cleanup EXIT
+
+# dir_in_use <name>: true when any live process holds the candidate named <name>
+# or a path below it open. Callers must have built the name set first; an
+# unusable set counts as in use, so a failure here can only ever prevent a
+# removal. Candidate names are constrained to the scratch convention, so they
+# carry no character that could widen this match.
+dir_in_use() {
+  local name=$1
+  [ "$IN_USE_OK" -eq 0 ] || return 0
+  case "$IN_USE_NAMES" in
+    *$'\n'"$name"$'\n'*) return 0 ;;
+  esac
+  return 1
+}
 
 # --- sweep ------------------------------------------------------------------
 
 removed=0
 unverified=0
 deferred=0
-budget_hit=0
 
+# Pass one is the cheap pass: name, type, ownership and live-containment filters
+# only, no syscall heavier than a stat. It exists so that when the time budget
+# trips in pass two the sweep can count what it is deferring without paying a
+# recursive walk per leftover candidate.
+candidates=()
 for entry in "$ROOT_PHYS"/fm-*.??????; do
   [ -e "$entry" ] || continue
   name=${entry##*/}
@@ -243,9 +302,21 @@ for entry in "$ROOT_PHYS"/fm-*.??????; do
     note "$name: skipped: holds a live working directory or home"
     continue
   fi
-  if looks_like_home "$entry"; then
-    report "$name: skipped: looks like a firstmate home, not scratch"
-    continue
+  candidates+=("$entry")
+done
+
+total=${#candidates[@]}
+index=0
+for entry in ${candidates[@]+"${candidates[@]}"}; do
+  index=$((index + 1))
+  name=${entry##*/}
+
+  # Checked before the recursive age walk and the open-handle probe, because
+  # those are the sweep's dominant costs; checking after them would let a root
+  # full of large trees run far past the budget it claims to honour.
+  if [ "$SECONDS" -ge "$BUDGET" ]; then
+    deferred=$((total - index + 1))
+    break
   fi
 
   # Nothing anywhere inside may have been touched within the age window. The
@@ -256,24 +327,22 @@ for entry in "$ROOT_PHYS"/fm-*.??????; do
     continue
   fi
 
-  if [ "$budget_hit" -eq 1 ]; then
-    deferred=$((deferred + 1))
-    continue
-  fi
-  if [ "$BUDGET" -gt 0 ] && [ "$SECONDS" -ge "$BUDGET" ]; then
-    budget_hit=1
-    deferred=$((deferred + 1))
+  # After the age gate, so a live or young home is skipped silently and the
+  # actionable line only fires for a directory that was otherwise about to be
+  # removed.
+  if looks_like_home "$entry"; then
+    report "$name: skipped: looks like a firstmate home, not scratch"
     continue
   fi
 
-  if [ "$CHECKER" != none ] && ! build_in_use_list; then
+  if [ "$CHECKER" != none ] && ! build_in_use_names; then
     CHECKER=none
   fi
   if [ "$CHECKER" = none ]; then
     unverified=$((unverified + 1))
     continue
   fi
-  if dir_in_use "$entry"; then
+  if dir_in_use "$name"; then
     note "$name: skipped: a live process holds it open"
     continue
   fi
@@ -292,7 +361,7 @@ for entry in "$ROOT_PHYS"/fm-*.??????; do
 done
 
 if [ "$unverified" -gt 0 ]; then
-  report "$ROOT_PHYS: skipped: $unverified stale scratch dir(s) left in place: cannot verify open handles (needs lsof or a readable procfs, plus a writable temp root)"
+  report "$ROOT_PHYS: skipped: $unverified stale scratch dir(s) left in place: cannot verify open handles (needs lsof or a readable procfs)"
 fi
 if [ "$deferred" -gt 0 ]; then
   report "$ROOT_PHYS: skipped: ${BUDGET}s sweep budget exhausted after removing $removed, $deferred candidate(s) deferred to the next session"
