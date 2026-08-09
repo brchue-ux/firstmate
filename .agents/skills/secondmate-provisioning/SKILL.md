@@ -76,10 +76,10 @@ This is secondmate-only: crewmate/scout model resolution is untouched by this fi
 
 This section is the single owner of the secondmate sync and inherited-local-material propagation contract; `AGENTS.md` sections 3 and 4 point here.
 Before launch, `fm-spawn.sh --secondmate` locally fast-forwards the home to the primary firstmate checkout's current default-branch commit when it is safe; dirty, diverged, or in-flight homes launch unchanged with a warning.
-The locked session-start bootstrap sweep runs the same guarded fast-forward for every live secondmate home, discovered from `state/<id>.meta` records with `kind=secondmate` (`data/secondmates.md` only backfills `home=` for older records).
+The locked session-start bootstrap sweep runs the same guarded fast-forward for every secondmate home it has a record for, discovered from `state/<id>.meta` records with `kind=secondmate` (`data/secondmates.md` only backfills `home=` for older records), including a home whose agent the liveness sweep deliberately left down under "Recovery".
 That no-fetch path is a purely local fast-forward of tracked files, never an origin fetch, and it never touches the gitignored operational dirs, so a secondmate's backlog, projects, and in-flight work are never disturbed; a linked worktree advances immediately, while a standalone clone that lacks the target receives firstmate updates through `/updatefirstmate`'s origin refresh.
 The same launch and the same locked bootstrap sweep also propagate the primary's declared inherited local material: `config/crew-dispatch.json`, `config/crew-harness`, `config/backlog-backend`, `config/backend`, `config/herdr-presentation-spaces`, `config/startup-memory-budget`, and the one shared captain-preference file `data/captain-shared.md`.
-Because these paths are gitignored, that propagation is a separate, primary-authoritative copy independent of the tracked-files fast-forward: it re-converges every live home whether or not its tracked files advanced, and it touches only the declared items.
+Because these paths are gitignored, that propagation is a separate, primary-authoritative copy independent of the tracked-files fast-forward: it re-converges every such home whether or not its tracked files advanced, and it touches only the declared items.
 Propagation failures warn without blocking secondmate launch or session-start continuation, and the destination keeps whatever safely validated state the helper left behind.
 Inheritance copies the literal `config/crew-harness` file, so a secondmate's own crewmates use the primary's crewmate harness only when it names a concrete adapter such as `codex`; an unset or `default` value has nothing concrete to inherit, and the secondmate's own crewmates fall back to the secondmate's own or detected harness instead.
 Inherited `config/backend` becomes that secondmate home's local runtime-backend default for future spawns only; it never retargets, rewrites, migrates, stops, or restarts an already-live worker endpoint.
@@ -149,7 +149,22 @@ Do not hand off `local-only` items.
 
 ## Recovery
 
-For `kind=secondmate` meta with no window, treat the secondmate as a dead persistent direct report and respawn it with:
+For `kind=secondmate` meta with no window, treat the secondmate as a dead persistent direct report.
+Reconciling its durable records - confirming its home, backlog, and any in-flight child task metadata - is always correct and never optional.
+Actually respawning it is conditional: **fleet startup launches the first mate and nothing else** (captain decision 2026-08-03, superseding the 2026-07-31 open-at-the-stop rule that this section previously documented).
+The stated reason is startup token cost, so the bar is "would this mate actually do something this session", not "was it open or registered before".
+
+**Pending work is the test.**
+Relaunch a dead or missing secondmate only when its own durable records show pending work: a non-empty `## Queued` or `## In flight` section in that home's `data/backlog.md`, or any `*.meta` file left under that home's `state/` by a task it dispatched and never tore down (work paused mid-flight by a crash, quota limit, or killed session).
+A secondmate with neither - an empty backlog and no in-flight child task metadata - is left down even though it is registered, or was open when the fleet last stopped; the captain reopens an idle secondmate manually.
+Judge pending work only from a home you have validated the same way every other consumer of `home=` does - it must be a seeded secondmate home carrying the `.fm-secondmate-home` marker for that id, and never the primary checkout, whose own `state/` metadata would otherwise read as the secondmate's in-flight work.
+When the records cannot be read at all - no recorded home, a home that is missing or does not validate, or a `data/backlog.md` that exists but cannot be read or parsed - do not guess in either direction: repair the record first, because launching an idle secondmate and stranding a busy one are both wrong.
+`bin/fm-bootstrap.sh`'s `secondmate_home_has_pending_work` and `secondmate_liveness_sweep` are the exact-mechanics owner of this test for the session-start liveness sweep; apply the identical test by hand for an ad hoc mid-session recovery.
+
+A secondmate left down by this test is a fully handled state, not a half-recovered one.
+Its home is still fast-forwarded and still receives propagated config, but nothing is sent into its endpoint, so it produces no `SECONDMATE_LIVENESS:`, `NUDGE_SECONDMATES:`, or `CONFIG_REREAD:` diagnostic; the launch that eventually reopens it re-reads its instructions and config at startup anyway.
+
+When the test passes, respawn with:
 
 ```sh
 bin/fm-spawn.sh <id> --secondmate

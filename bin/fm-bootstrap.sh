@@ -17,7 +17,10 @@
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
 #                 "NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>",
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
-#                 "SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed after <cause>: <reason>",
+#                 "SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed after <cause>: <reason>"
+#                 (a dead/missing secondmate with no pending work is left down and
+#                 reported only as a BOOTSTRAP_INFO fact under
+#                 FM_BOOTSTRAP_VERBOSE_FACTS=1, never as a SECONDMATE_LIVENESS line),
 #                 "FMX: X mode on ..." or "FMX: X mode off ...".
 #          When a RUNNING secondmate worktree is fast-forwarded to firstmate's
 #          own current default-branch commit (a purely LOCAL fast-forward, never
@@ -39,10 +42,21 @@
 #          SECONDMATE_LIVENESS lines report only actionable failures from the
 #          recovery-grade state owned by bin/fm-backend.sh's
 #          fm_backend_agent_state: skipped distinguishes an existing ambiguous
-#          process, an unreadable target, and an unverified backend; respawn
-#          failed names whether the endpoint was missing or agent-less.
-#          Already-live and successfully relaunched secondmates are silent
-#          unless FM_BOOTSTRAP_VERBOSE_FACTS=1 requests BOOTSTRAP_INFO facts.
+#          process, an unreadable target, an unresolved, unsafe, or unreadable
+#          secondmate home or backlog, and an unverified backend; respawn failed
+#          names whether the endpoint was missing or agent-less.
+#          Fleet startup launches only the primary - a dead or missing
+#          secondmate is relaunched only when that secondmate's OWN durable
+#          records show pending work: a non-empty "## Queued" or "## In flight"
+#          section in its home data/backlog.md, or any *.meta file left under
+#          its home state/ by a dispatched child task. A registered secondmate
+#          with neither is left down even though it was previously open or is
+#          still registered; the captain reopens an idle secondmate manually.
+#          Already-live, successfully relaunched, and correctly-left-down-idle
+#          secondmates are silent unless FM_BOOTSTRAP_VERBOSE_FACTS=1 requests
+#          BOOTSTRAP_INFO facts. A left-down secondmate keeps its home converged
+#          by the sweeps that follow, but nothing is sent into its endpoint, so
+#          it never produces a NUDGE_SECONDMATES or CONFIG_REREAD line either.
 #          A TANGLE line means the firstmate primary checkout (FM_ROOT) is stranded
 #          on a feature branch instead of its default branch - a crewmate's work
 #          landed in the primary instead of its own worktree; restore it per the line.
@@ -227,6 +241,22 @@ fleet_sync() {
   rm -f "$tmp"
 }
 
+# Whether secondmate_liveness_sweep deliberately left this secondmate down for
+# having no pending work. A kind=secondmate meta normally IS the liveness
+# signal (bin/fm-ff-lib.sh's live_secondmate_meta_records), but a left-down mate
+# keeps its meta while its recorded endpoint is dead BY DESIGN, so the sweeps
+# that run after the liveness sweep must still converge its home and never send
+# into it: every such send fails and leaves retry state for a correct outcome
+# nobody can fix. SECONDMATE_LEFT_DOWN_IDS is the in-process hand-off, mirroring
+# SECONDMATE_RESPAWNED_IDS.
+SECONDMATE_LEFT_DOWN_IDS=""
+secondmate_left_down() {
+  case " ${SECONDMATE_LEFT_DOWN_IDS:-} " in
+    *" $1 "*) return 0 ;;
+  esac
+  return 1
+}
+
 secondmate_sync() {
   # shellcheck source=bin/fm-wake-lib.sh disable=SC1091
   . "$SCRIPT_DIR/fm-wake-lib.sh"
@@ -307,6 +337,7 @@ secondmate_sync() {
 
   fm_ff_after_instruction_update() {
     local id=$1 home=$2 _window=$3 instr=$4
+    secondmate_left_down "$id" && return 0
     secondmate_send_nudge "$id" "$home" "$primary_head" "$instr"
   }
 
@@ -327,6 +358,15 @@ secondmate_sync() {
         echo "NUDGE_SECONDMATES: secondmate $id: send failed: retry marker filename mismatch"
         continue
       }
+      # A mate the liveness sweep left down has a dead endpoint by design, and
+      # its home keeps advancing past the commit this marker pins, so the send
+      # can never be satisfied again. The nudge only ever existed to refresh an
+      # already-running agent; whenever this mate is next launched it reads its
+      # instruction surface from disk anyway, so retire the marker.
+      if secondmate_left_down "$id"; then
+        rm -f "$marker"
+        continue
+      fi
       selector=$(fm_meta_get "$marker" selector)
       home=$(fm_meta_get "$marker" home)
       commit=$(fm_meta_get "$marker" commit)
@@ -391,6 +431,7 @@ secondmate_sync() {
   # live agent does not keep applying stale defaults. Spawn/respawn already
   # re-reads at launch and needs no redundant nudge unless files changed after launch.
   local id home home_real home_lock propagated_homes report reread_out reread_skip_pending
+  local reread_skip_send
   propagated_homes=""
   SECONDMATE_RESPAWNED_IDS=${SECONDMATE_RESPAWNED_IDS:-}
   while IFS='|' read -r id home _window _meta; do
@@ -417,9 +458,17 @@ secondmate_sync() {
       continue
     }
     reread_skip_pending=0
+    reread_skip_send=0
     case " $SECONDMATE_RESPAWNED_IDS " in
       *" $id "*) reread_skip_pending=1 ;;
     esac
+    # A left-down mate still receives the propagated files below, but nothing is
+    # sent into its dead endpoint and no reread generation is queued against it:
+    # the launch the captain eventually makes re-reads at startup anyway.
+    if secondmate_left_down "$id"; then
+      reread_skip_pending=1
+      reread_skip_send=1
+    fi
     if [ "$reread_skip_pending" -eq 0 ] \
       && fm_config_reread_retry_queue_is_full "$FM_HOME" "$id"; then
       fm_config_reread_retry_pending "$id" "$home_real" || true
@@ -440,22 +489,63 @@ secondmate_sync() {
     else
       echo "SECONDMATE_SYNC: secondmate $id: skipped: inheritance failed"
     fi
-    if ! reread_out=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" \
-      FM_STATE_OVERRIDE="$STATE" \
-      FM_CONFIG_REREAD_SKIP_PENDING="$reread_skip_pending" \
-      fm_config_send_reread_nudge "$id" "$home_real" "$report" 2>&1); then
-      if [ -n "$reread_out" ]; then
+    if [ "$reread_skip_send" -eq 0 ]; then
+      if ! reread_out=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" \
+        FM_STATE_OVERRIDE="$STATE" \
+        FM_CONFIG_REREAD_SKIP_PENDING="$reread_skip_pending" \
+        fm_config_send_reread_nudge "$id" "$home_real" "$report" 2>&1); then
+        if [ -n "$reread_out" ]; then
+          printf '%s\n' "$reread_out"
+        else
+          echo "CONFIG_REREAD: secondmate $id: send failed: unknown error"
+        fi
+      elif [ -n "$reread_out" ]; then
         printf '%s\n' "$reread_out"
-      else
-        echo "CONFIG_REREAD: secondmate $id: send failed: unknown error"
       fi
-    elif [ -n "$reread_out" ]; then
-      printf '%s\n' "$reread_out"
     fi
     rm -f "$report"
     fm_lock_release "$home_lock" || true
   done < <(live_secondmate_meta_records "$STATE" "$DATA/secondmates.md")
   return 0
+}
+
+secondmate_home_has_pending_work() {
+  # Pending-work test for fleet-startup launch policy: captain decision
+  # 2026-08-03, superseding the 2026-07-31 open-at-the-stop rule. A dead or
+  # missing secondmate is worth the startup token cost of relaunching only
+  # when its OWN durable records show it would actually do something this
+  # session. This is a presence test, not the structured backlog schema
+  # tasks-axi and bin/fm-fleet-snapshot.sh's backlog_json own: any non-blank
+  # line under the home's "## Queued" or "## In flight" backlog section, or
+  # any *.meta file left under home state/ by a task that secondmate
+  # dispatched and never tore down, counts as pending work.
+  # Exit status: 0 pending work, 1 none, 2 cannot judge. An existing backlog
+  # that awk could not read or parse is a 2, never a 1: only a genuine "no
+  # items" answer may fall through to the state/ glob, because silently reading
+  # an unreadable backlog as idle strands a busy secondmate.
+  local backlog="$1/data/backlog.md" state_dir="$1/state" m rc
+  if [ -f "$backlog" ]; then
+    awk '
+      /^##[[:space:]]/ {
+        in_sec = ($0 ~ /^##[[:space:]]+(Queued|In flight)[[:space:]]*$/)
+        next
+      }
+      in_sec && NF { found = 1 }
+      END { exit (found ? 0 : 1) }
+    ' "$backlog" 2>/dev/null
+    rc=$?
+    case "$rc" in
+      0) return 0 ;;
+      1) ;;
+      *) return 2 ;;
+    esac
+  fi
+  if [ -d "$state_dir" ]; then
+    for m in "$state_dir"/*.meta; do
+      [ -f "$m" ] && return 0
+    done
+  fi
+  return 1
 }
 
 secondmate_liveness_sweep() {
@@ -471,8 +561,9 @@ secondmate_liveness_sweep() {
   # primary-only no-op there. Mid-session liveness remains explicitly out of
   # scope and requires a separate periodic signal.
   [ -d "$STATE" ] || return 0
-  local meta id window harness backend target agent_state out cause
+  local meta id window harness backend target agent_state out cause home pending
   SECONDMATE_RESPAWNED_IDS=""
+  SECONDMATE_LEFT_DOWN_IDS=""
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
     grep -q '^kind=secondmate$' "$meta" 2>/dev/null || continue
@@ -503,13 +594,36 @@ secondmate_liveness_sweep() {
         else
           cause="recorded endpoint confidently missing"
         fi
-        if out=$(FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "$id" --secondmate 2>&1); then
-          SECONDMATE_RESPAWNED_IDS="$SECONDMATE_RESPAWNED_IDS $id"
-          if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ]; then
-            echo "BOOTSTRAP_INFO: secondmate $id relaunched after $cause (backend=$backend)"
-          fi
+        home=$(fm_meta_get "$meta" home)
+        [ -n "$home" ] || home=$(secondmate_registry_field "$DATA/secondmates.md" "$id" home || true)
+        if [ -z "$home" ]; then
+          echo "SECONDMATE_LIVENESS: secondmate $id: skipped: no recorded home, cannot judge pending work (backend=$backend)"
+        elif [ ! -d "$home" ]; then
+          echo "SECONDMATE_LIVENESS: secondmate $id: skipped: recorded home $home not found, cannot judge pending work (backend=$backend)"
+        elif ! validate_secondmate_home "$id" "$home"; then
+          # Same boundary check every other consumer of home= applies. A stale
+          # home= pointing at the primary checkout would otherwise glob the
+          # PRIMARY's own secondmate metas and read as pending work every
+          # session - exactly the idle relaunch this policy forbids.
+          echo "SECONDMATE_LIVENESS: secondmate $id: skipped: recorded home $home unsafe: $VALIDATION_ERROR, cannot judge pending work (backend=$backend)"
         else
-          echo "SECONDMATE_LIVENESS: secondmate $id: respawn failed after $cause: $(first_line "$out")"
+          secondmate_home_has_pending_work "$VALIDATED_HOME"
+          pending=$?
+          if [ "$pending" -gt 1 ]; then
+            echo "SECONDMATE_LIVENESS: secondmate $id: skipped: recorded home $home has an unreadable backlog, cannot judge pending work (backend=$backend)"
+          elif [ "$pending" -eq 1 ]; then
+            SECONDMATE_LEFT_DOWN_IDS="$SECONDMATE_LEFT_DOWN_IDS $id"
+            if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ]; then
+              echo "BOOTSTRAP_INFO: secondmate $id left down after $cause: no pending work (backend=$backend)"
+            fi
+          elif out=$(FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "$id" --secondmate 2>&1); then
+            SECONDMATE_RESPAWNED_IDS="$SECONDMATE_RESPAWNED_IDS $id"
+            if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ]; then
+              echo "BOOTSTRAP_INFO: secondmate $id relaunched after $cause (backend=$backend)"
+            fi
+          else
+            echo "SECONDMATE_LIVENESS: secondmate $id: respawn failed after $cause: $(first_line "$out")"
+          fi
         fi
         ;;
       ambiguous)
