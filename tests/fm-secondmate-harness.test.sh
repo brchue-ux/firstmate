@@ -2179,7 +2179,13 @@ test_bootstrap_respawns_before_config_reread() {
   w=$(new_world config-reread-respawn-order)
   head=$(git -C "$w/main" rev-parse HEAD)
   add_sm_worktree "$w" sm "$head"
-  mkdir -p "$w/sm/config" "$w/sm/state"
+  mkdir -p "$w/sm/config" "$w/sm/data" "$w/sm/state"
+  # The dead mate this test respawns needs pending work of its own: under the
+  # fleet-startup launch policy (captain decision 2026-08-03) a dead secondmate
+  # with an empty backlog is deliberately left down. This test is about respawn
+  # ORDER versus the config reread, not about that gate.
+  printf '## In flight\n\n## Queued\n- [ ] backlog-item - a queued item for sm\n\n## Done\n' \
+    > "$w/sm/data/backlog.md"
   printf 'harness=codex\n' >> "$w/home/state/sm.meta"
   printf '%s' old > "$w/sm/config/crew-harness"
   printf '%s' codex > "$w/home/config/crew-harness"

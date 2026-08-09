@@ -440,6 +440,12 @@ EOF
   printf '%s\n' "$id" > "$mate/.fm-secondmate-home"
   printf '# Firstmate\n' > "$mate/AGENTS.md"
   printf 'Second mate charter.\n' > "$mate/data/charter.md"
+  # A queued backlog item: the recovery paths below relaunch a dead or missing
+  # secondmate only when its own durable records show pending work (captain
+  # decision 2026-08-03). An idle mate is deliberately left down, which is the
+  # subject of tests/fm-secondmate-liveness.test.sh, not of these boundary tests.
+  printf '## In flight\n\n## Queued\n- [ ] backlog-item - a queued item for %s\n\n## Done\n' "$id" \
+    > "$mate/data/backlog.md"
   printf '%s\n' pi > "$home/config/secondmate-harness"
   printf '%s\n' manual > "$home/config/backlog-backend"
   touch "$home/state/.last-watcher-beat"
@@ -479,6 +485,9 @@ EOF
   printf '%s\n' "$id" > "$mate/.fm-secondmate-home"
   printf '# Firstmate\n' > "$mate/AGENTS.md"
   printf 'Second mate charter.\n' > "$mate/data/charter.md"
+  # Pending work, for the same launch-policy reason as the tmux helper above.
+  printf '## In flight\n\n## Queued\n- [ ] backlog-item - a queued item for %s\n\n## Done\n' "$id" \
+    > "$mate/data/backlog.md"
   printf '%s\n' herdr > "$home/config/backend"
   printf '%s\n' pi > "$home/config/secondmate-harness"
   printf '%s\n' manual > "$home/config/backlog-backend"
