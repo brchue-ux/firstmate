@@ -718,6 +718,80 @@ test_killed_run_is_healed_by_the_next_run() {
   pass "a killed run's fixtures are reaped by the next run"
 }
 
+# Backstop for the looping worker fixtures below, so a failing assertion cannot
+# strand them. Targets the run's own process group by PID rather than a command
+# name, which cannot reach a process this test did not start. Always succeeds:
+# an already-empty group is the expected outcome.
+reap_stray_workers() {
+  local pid=$1
+  kill -KILL -- "-$pid" 2>/dev/null || true
+  return 0
+}
+
+test_signalled_jobs_run_stops_its_workers() {
+  local tmp repo runner reap runtmp a b f pid waited live leftover
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-jobs-signal.XXXXXX")
+  repo="$tmp/repo"
+  runner="$repo/bin/fm-test-run.sh"
+  reap="$tmp/reap"
+  runtmp="$tmp/runtmp"
+  a=tests/fm-brief.test.sh
+  b=tests/fm-composer-lib.test.sh
+  mkdir -p "$repo/bin" "$repo/tests" "$reap" "$runtmp"
+  cp "$RUNNER" "$runner"
+  chmod +x "$runner"
+  # Each worker script keeps rebuilding a directory under its own TMPDIR, so a
+  # child still running when the run root is removed recreates that root - the
+  # orphan this runner exists to prevent, and the one a signal aimed at the
+  # runner alone used to produce.
+  for f in "$a" "$b"; do
+    # shellcheck disable=SC2016 # $TMPDIR must be expanded by the worker, not here.
+    printf '#!/usr/bin/env bash\nwhile :; do mkdir -p "$TMPDIR/live"; sleep 0.05; done\n' \
+      >"$repo/$f"
+    chmod +x "$repo/$f"
+  done
+  # Monitor mode only so the run owns a process group this test can clean up by
+  # PID. The signal below still goes to the runner PID alone, never the group -
+  # that is the case a supervisor or `timeout` produces, and the one where the
+  # workers used to outlive the removal of their TMPDIR.
+  set -m
+  TMPDIR="$runtmp" FM_TEST_REAP_ROOT="$reap" \
+    env -u FM_TEST_RUN_ACTIVE "$runner" --jobs 2 "$a" "$b" >"$tmp/out" 2>"$tmp/err" &
+  pid=$!
+  set +m
+  waited=0
+  live=
+  while [ -z "$live" ]; do
+    for f in "$runtmp"/fm-test-run.*/w*/tmp/live; do
+      [ -d "$f" ] || continue
+      live=$f
+      break
+    done
+    [ -n "$live" ] && break
+    waited=$((waited + 1))
+    if [ "$waited" -ge 600 ]; then
+      kill -KILL "$pid" 2>/dev/null || true
+      reap_stray_workers "$pid"
+      rm -rf "$tmp"
+      fail "workers never started under --jobs"
+    fi
+    sleep 0.1
+  done
+  kill -TERM "$pid" 2>/dev/null || fail "could not signal the run"
+  wait "$pid" 2>/dev/null || true
+  # Long enough for any child that outlived the runner to rebuild what the
+  # removal took away.
+  sleep 1
+  leftover=$(ls -A "$runtmp" 2>/dev/null || true)
+  reap_stray_workers "$pid"
+  if [ -n "$leftover" ]; then
+    rm -rf "$tmp"
+    fail "a signalled --jobs run left its run root behind: $leftover"
+  fi
+  rm -rf "$tmp"
+  pass "a signalled --jobs run stops its workers before removing the run root"
+}
+
 # Build an isolated reap root plus a Firstmate home whose recorded task scratch
 # lives inside it. Echoes "<reap root>|<home>".
 init_reap_fixture() {
@@ -910,6 +984,7 @@ test_completed_run_leaves_no_fixture
 test_fixture_removed_when_run_is_interrupted
 test_spawned_task_scratch_is_contained
 test_killed_run_is_healed_by_the_next_run
+test_signalled_jobs_run_stops_its_workers
 test_reap_clears_pre_existing_orphans
 test_reap_never_touches_a_live_task_scratch
 test_reap_never_removes_a_held_open_fixture

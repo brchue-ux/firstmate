@@ -172,13 +172,84 @@ remove_run_tmp() {
   rm -rf "$doomed" 2>/dev/null || true
 }
 
-# Remove the run root, then die from the same signal so a caller (a shell, CI,
-# or a supervising script) still sees a normal signal death rather than a
-# swallowed interrupt.
+# Every pid in the process tree rooted at the given pids, walked breadth-first
+# from one ps snapshot so the walk cannot chase pids that appear mid-scan.
+# shellcheck disable=SC2329 # Called from stop_run_workers below.
+run_process_tree_pids() {
+  local table=$1 frontier=" $2 " found=" $2 " next pid ppid
+  while [ -n "${frontier// /}" ]; do
+    next=
+    while read -r pid ppid; do
+      [ -n "$pid" ] || continue
+      case "$frontier" in *" $ppid "*) ;; *) continue ;; esac
+      case "$found" in *" $pid "*) continue ;; esac
+      found="$found$pid "
+      next="$next$pid "
+    done <<<"$table"
+    frontier=" $next"
+  done
+  printf '%s\n' "$found"
+}
+
+# Stop the worker subshells this run started, and the scripts they launched,
+# before the run root is removed. Otherwise a child keeps executing against a
+# deleted TMPDIR and can recreate the run root after the removal, leaving
+# exactly the orphan this runner exists to prevent.
+# shellcheck disable=SC2329 # Called from on_run_signal below.
+stop_run_workers() {
+  local slot pid roots table tree waited alive
+  # Worker slots are numbered from 1, so the array must be tested through a
+  # subscript: an unsubscripted ${WORKER_PIDS+x} asks about element 0 and is
+  # empty for every populated run, and for the serial path that never declares
+  # the array at all.
+  [ -n "${WORKER_PIDS[*]+x}" ] || return 0
+  roots=
+  for slot in "${!WORKER_PIDS[@]}"; do
+    pid=${WORKER_PIDS[$slot]}
+    [ -n "$pid" ] || continue
+    roots="$roots $pid"
+  done
+  [ -n "${roots// /}" ] || return 0
+  table=$(ps -eo pid=,ppid= 2>/dev/null || true)
+  if [ -n "$table" ]; then
+    tree=$(run_process_tree_pids "$table" "${roots# }")
+  else
+    tree=$roots
+  fi
+  for pid in $tree; do
+    kill -s TERM "$pid" 2>/dev/null || true
+  done
+  # Poll the descendants only: a worker subshell is a direct child of this
+  # shell, so between its death and the wait below it is a zombie that still
+  # answers kill -0 and would hold this loop open for the whole deadline.
+  waited=0
+  while [ "$waited" -lt 40 ]; do
+    alive=0
+    for pid in $tree; do
+      case " $roots " in *" $pid "*) continue ;; esac
+      if kill -0 "$pid" 2>/dev/null; then
+        alive=1
+        break
+      fi
+    done
+    [ "$alive" -eq 1 ] || break
+    waited=$((waited + 1))
+    sleep 0.05
+  done
+  for pid in $tree; do
+    kill -s KILL "$pid" 2>/dev/null || true
+  done
+  wait 2>/dev/null || true
+}
+
+# Stop this run's children, remove the run root, then die from the same signal
+# so a caller (a shell, CI, or a supervising script) still sees a normal signal
+# death rather than a swallowed interrupt.
 # shellcheck disable=SC2329 # Registered by the signal traps below.
 on_run_signal() {
   local sig=$1
   trap - EXIT INT TERM HUP QUIT
+  stop_run_workers
   remove_run_tmp
   kill -s "$sig" "$$" 2>/dev/null || true
   exit 1
