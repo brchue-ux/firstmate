@@ -60,30 +60,25 @@
 # Orphan reap:
 #   An executing run first reaps fixture directories orphaned by earlier runs
 #   that were killed outright (SIGKILL leaves no trap to run), so a host that
-#   already leaked heals on the next test run. The reap is deliberately narrow
-#   and keeps anything it cannot establish:
-#     - only direct children of the reap root, never a wider glob;
-#     - only names shaped like an mktemp fixture, fm-<prefix>.<6+ alphanumerics>;
-#     - only directories (never symlinks) owned by the current user;
-#     - only entries older than the minimum age, so a concurrent run is safe;
-#     - never a path recorded as tasktmp= by any discoverable Firstmate home,
-#       and never a per-task scratch root (identified by its gotmp/ child);
-#     - never a directory any process still holds open;
-#     - nothing at all if the in-use inventory or a home's task records cannot
-#       be read.
+#   already leaked heals on the next test run. bin/fm-tmp-sweep.sh is the single
+#   owner of which directories are safe to remove and of every refusal that
+#   protects a live task, an in-use directory, or an operational home; this
+#   runner only supplies the shorter age window a test host wants and the homes
+#   this checkout can see. Read that script's header for the full contract.
 #   FM_TEST_REAP_ROOT (default /tmp), FM_TEST_REAP_MIN_AGE_SECONDS (default
-#   900), FM_TEST_REAP_MAX (default 500), and FM_TEST_REAP_HOMES (extra
-#   colon-separated Firstmate homes whose state/*.meta to read) exist so this
-#   behavior is testable without touching the host's real /tmp.
-#   FM_TEST_RUN_ACTIVE=1 is exported to every executed script and suppresses the
-#   reap in a nested run.
+#   900, rounded up to whole minutes), FM_TEST_REAP_MAX (default 500), and
+#   FM_TEST_REAP_HOMES (extra colon-separated Firstmate homes whose state/*.meta
+#   to read) exist so this behavior is testable without touching the host's real
+#   /tmp. FM_TEST_RUN_ACTIVE=1 is exported to every executed script and
+#   suppresses the reap in a nested run.
 #
 # Per-script machine-parseable markers (stdout):
 #   FM_TEST_BEGIN <iso8601> <script> family=<family> expected_gate_skip=<class>
 #   FM_TEST_END <iso8601> <script> exit=<code> duration_ms=<n> gate_skip=<true|false>
 #
-# Reap marker (stdout, once, executing runs only):
-#   FM_TEST_REAP root=<dir> removed=<n> kept=<n>
+# Reap marker (stdout, once, executing runs only, and never when the sweep
+# refused as a whole):
+#   FM_TEST_REAP root=<dir> removed=<n>
 #
 # After all scripts (stdout):
 #   FM_TEST_SUMMARY total=<n> failed=<n> skipped_gate=<n> duration_ms=<n>
@@ -206,225 +201,72 @@ ensure_run_tmp() {
   exec 9<"$RUN_TMP/.fm-test-run-live"
 }
 
-# One stat field, GNU format first and BSD format second. Prints nothing and
-# fails when neither works, so every caller can treat that as "unknown".
-stat_field() {
-  local gnu=$1 bsd=$2 path=$3 value
-  value=$(stat -c "$gnu" "$path" 2>/dev/null) || value=
-  if [ -z "$value" ]; then
-    value=$(stat -f "$bsd" "$path" 2>/dev/null) || value=
-  fi
-  [ -n "$value" ] || return 1
-  printf '%s\n' "$value"
-}
-
-# True when <name> looks like a directory mktemp -d built from a
-# "fm-<prefix>.XXXXXX" template: the template's random suffix is at least six
-# characters and always alphanumeric. A Firstmate per-task scratch root is
-# /tmp/fm-<task id> with no such suffix, so this alone already separates the two
-# populations; the tasktmp and gotmp checks below cover a task id that happens to
-# end in a matching suffix.
-reap_name_is_fixture() {
-  local name=$1 stem suffix
-  case "$name" in
-    fm-?*.?*) ;;
-    *) return 1 ;;
-  esac
-  stem=${name%.*}
-  suffix=${name##*.}
-  [ "${stem#fm-}" != "" ] || return 1
-  [ "${#suffix}" -ge 6 ] || return 1
-  case "$suffix" in
-    *[!A-Za-z0-9]*) return 1 ;;
-  esac
-  return 0
-}
-
-# Firstmate homes whose state/*.meta may record a live task's scratch root:
-# this checkout, an explicit FM_HOME, the primary checkout this worktree belongs
-# to, extra homes named by FM_TEST_REAP_HOMES, and every secondmate home each of
-# those registers.
-reap_candidate_homes() {
-  local seeded common home extra
-  {
-    printf '%s\n' "$ROOT"
-    [ -z "${FM_HOME:-}" ] || printf '%s\n' "$FM_HOME"
-    common=$(git -C "$ROOT" rev-parse --git-common-dir 2>/dev/null || true)
-    if [ -n "$common" ]; then
-      case "$common" in
-        /*) ;;
-        *) common="$ROOT/$common" ;;
-      esac
-      [ ! -d "$common" ] || printf '%s\n' "$(dirname "$common")"
-    fi
-    if [ -n "${FM_TEST_REAP_HOMES:-}" ]; then
-      while IFS= read -r extra; do
-        [ -n "$extra" ] || continue
-        printf '%s\n' "$extra"
-      done < <(printf '%s\n' "${FM_TEST_REAP_HOMES//:/$'\n'}")
-    fi
-  } | LC_ALL=C sort -u >"$RUN_TMP/reap-homes-seed"
-
-  while IFS= read -r seeded; do
-    [ -n "$seeded" ] || continue
-    printf '%s\n' "$seeded"
-    [ -f "$seeded/data/secondmates.md" ] || continue
-    while IFS= read -r home; do
-      [ -n "$home" ] || continue
-      printf '%s\n' "$home"
-    done < <(sed -n 's/.*(home: *\([^;)]*\).*/\1/p' "$seeded/data/secondmates.md")
-  done <"$RUN_TMP/reap-homes-seed" | LC_ALL=C sort -u
-}
-
-# Every tasktmp= path recorded by a discoverable home. Fails when a home's task
-# records exist but cannot be read, because an unreadable record is exactly the
-# ambiguity that must stop the reap rather than widen it.
-reap_protected_tasktmp() {
-  local home meta rc=0
-  local -a metas
-  while IFS= read -r home; do
-    [ -n "$home" ] || continue
-    [ -d "$home/state" ] || continue
-    if [ ! -r "$home/state" ] || [ ! -x "$home/state" ]; then
-      log "orphan reap skipped: unreadable task records in $home/state"
-      rc=1
-      continue
-    fi
-    metas=()
-    for meta in "$home"/state/*.meta; do
-      [ -f "$meta" ] || continue
-      if [ ! -r "$meta" ]; then
-        log "orphan reap skipped: unreadable task record $meta"
-        rc=1
-        continue
-      fi
-      metas+=("$meta")
-    done
-    # One reader per home rather than one per task record.
-    [ "${#metas[@]}" -eq 0 ] || sed -n 's/^tasktmp=//p' "${metas[@]}"
-  done < <(reap_candidate_homes)
-  return "$rc"
-}
-
-# Absolute paths under <root> that some process still holds: a working
-# directory, an open descriptor, a running executable, or a mapping. /proc is
-# exact and cheap where it exists; lsof covers hosts without it. Fails when
-# neither is available, which keeps the reap from running blind rather than
-# guessing that nothing is in use.
-reap_inuse_paths() {
-  local root=$1 proc link target root_re
-  root_re=$(printf '%s' "$root" | sed 's/[^A-Za-z0-9_/-]/\\&/g')
-  if [ -r /proc/self/fd ] && find /proc/self -maxdepth 0 -printf '' 2>/dev/null; then
-    # One find over the descriptor, cwd, and exe links of every process. A
-    # per-link readlink loop costs seconds on a busy host; this costs
-    # milliseconds.
-    find /proc/[0-9]*/cwd /proc/[0-9]*/exe /proc/[0-9]*/fd/ \
-      -maxdepth 1 -type l -printf '%l\n' 2>/dev/null \
-      | grep -E "^${root_re}(/|\$)" || true
-    grep -haoE "${root_re}/[^[:space:]]+" /proc/[0-9]*/maps 2>/dev/null || true
-    return 0
-  fi
-  if command -v lsof >/dev/null 2>&1; then
-    lsof -n -P -Fn 2>/dev/null | sed -n "s|^n\\(${root}/.*\\)|\\1|p"
-    return 0
-  fi
-  if [ -r /proc/self/fd ]; then
-    for proc in /proc/[0-9]*; do
-      for link in "$proc/cwd" "$proc/exe" "$proc"/fd/*; do
-        target=$(readlink "$link" 2>/dev/null) || continue
-        case "$target" in
-          "$root"/*) printf '%s\n' "$target" ;;
-        esac
-      done
-    done
-    return 0
-  fi
-  return 1
-}
-
-# Remove fixture directories orphaned by earlier killed runs. Every rejection
-# keeps the directory; nothing here removes on a maybe.
+# Reap fixtures orphaned by runs that were killed outright, so a host that has
+# already leaked heals on the next test run.
+#
+# The decision "is this scratch directory safe to remove" lives in exactly one
+# place, bin/fm-tmp-sweep.sh, and this delegates to it rather than keeping a
+# second copy. Session start sweeps the same shared root on a longer horizon;
+# two implementations of a destructive predicate would drift the moment only one
+# was edited. The runner contributes only what it alone knows: the much shorter
+# horizon a test host wants, and which firstmate homes this checkout can see,
+# whose recorded task scratch must never be deleted out from under live work.
 reap_orphan_fixtures() {
-  local root=$REAP_ROOT now uid entry name age mtime owner removed=0 kept=0 examined=0
-  local protected inuse
+  local sweep="$ROOT/bin/fm-tmp-sweep.sh" homes common out line status age_minutes removed
 
+  # A nested run inherits the outer run's root, which the outer run already
+  # swept; sweeping again would only race it.
   [ -z "${FM_TEST_RUN_ACTIVE:-}" ] || return 0
 
-  case "$root" in
-    /*) ;;
-    *) log "orphan reap skipped: reap root must be an absolute path (got '$root')"; return 0 ;;
-  esac
-  if [ -L "$root" ] || [ ! -d "$root" ]; then
-    log "orphan reap skipped: reap root is not a directory: $root"
+  if [ ! -x "$sweep" ]; then
+    log "orphan reap skipped: $sweep is not executable"
     return 0
   fi
   case "$REAP_MIN_AGE_SECONDS" in
-    ''|*[!0-9]*) log "orphan reap skipped: FM_TEST_REAP_MIN_AGE_SECONDS must be a non-negative integer"; return 0 ;;
+    ''|*[!0-9]*)
+      log "orphan reap skipped: FM_TEST_REAP_MIN_AGE_SECONDS must be a non-negative integer"
+      return 0
+      ;;
   esac
-  case "$REAP_MAX" in
-    ''|*[!0-9]*) log "orphan reap skipped: FM_TEST_REAP_MAX must be a non-negative integer"; return 0 ;;
-  esac
+  # Rounded up, so a caller asking for any nonzero age never gets a zero window.
+  age_minutes=$(( (REAP_MIN_AGE_SECONDS + 59) / 60 ))
 
-  protected="$RUN_TMP/reap-protected"
-  inuse="$RUN_TMP/reap-inuse"
-  if ! reap_protected_tasktmp >"$protected"; then
-    log "orphan reap skipped: could not read every task record, so no directory is safe to remove"
-    return 0
-  fi
-  if ! reap_inuse_paths "$root" >"$inuse"; then
-    log "orphan reap skipped: no way to tell which directories are still in use (no /proc, no lsof)"
-    return 0
-  fi
-
-  now=$(date +%s)
-  uid=$(id -u)
-  for entry in "$root"/fm-*; do
-    [ -e "$entry" ] || continue
-    name=$(basename "$entry")
-    reap_name_is_fixture "$name" || continue
-    if [ "$examined" -ge "$REAP_MAX" ]; then
-      log "orphan reap bounded at $REAP_MAX entries; re-run to continue"
-      break
-    fi
-    examined=$((examined + 1))
-    if [ -L "$entry" ] || [ ! -d "$entry" ]; then
-      kept=$((kept + 1))
-      continue
-    fi
-    if [ -d "$entry/gotmp" ]; then
-      kept=$((kept + 1))
-      continue
-    fi
-    owner=$(stat_field %u %u "$entry") || owner=
-    if [ "$owner" != "$uid" ]; then
-      kept=$((kept + 1))
-      continue
-    fi
-    mtime=$(stat_field %Y %m "$entry") || mtime=
-    case "$mtime" in
-      ''|*[!0-9]*) kept=$((kept + 1)); continue ;;
+  # Homes whose state/*.meta may record a live task's scratch root: this
+  # checkout, an explicit FM_HOME, the primary checkout this worktree belongs to,
+  # and any extra homes the caller names. The sweep expands each one's registered
+  # secondmates itself.
+  homes="$ROOT"
+  [ -z "${FM_HOME:-}" ] || homes="$homes:$FM_HOME"
+  common=$(git -C "$ROOT" rev-parse --git-common-dir 2>/dev/null || true)
+  if [ -n "$common" ]; then
+    case "$common" in
+      /*) ;;
+      *) common="$ROOT/$common" ;;
     esac
-    age=$((now - mtime))
-    if [ "$age" -lt "$REAP_MIN_AGE_SECONDS" ]; then
-      kept=$((kept + 1))
-      continue
-    fi
-    if grep -qxF "$entry" "$protected"; then
-      kept=$((kept + 1))
-      continue
-    fi
-    if grep -qE "^$(printf '%s' "$entry" | sed 's/[^A-Za-z0-9_/-]/\\&/g')(/|\$)" "$inuse"; then
-      kept=$((kept + 1))
-      continue
-    fi
-    if rm -rf "$entry" 2>/dev/null; then
-      removed=$((removed + 1))
-    else
-      kept=$((kept + 1))
-    fi
-  done
+    [ ! -d "$common" ] || homes="$homes:$(dirname "$common")"
+  fi
+  [ -z "${FM_TEST_REAP_HOMES:-}" ] || homes="$homes:$FM_TEST_REAP_HOMES"
 
-  printf 'FM_TEST_REAP root=%s removed=%s kept=%s\n' "$root" "$removed" "$kept"
+  out=$("$sweep" --root "$REAP_ROOT" --age-minutes "$age_minutes" \
+    --max "$REAP_MAX" --protect-homes "$homes" 2>&1) && status=0 || status=$?
+
+  removed=0
+  if [ -n "$out" ]; then
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      log "orphan reap: $line"
+      case "$line" in
+        *": removed") removed=$((removed + 1)) ;;
+      esac
+    done <<<"$out"
+  fi
+
+  # Status 3 is the sweep refusing as a whole, so nothing was reaped and this run
+  # must not claim otherwise.
+  [ "$status" -ne 3 ] || return 0
+  # The count stays on stdout with the marker: the sweep's own lines are progress
+  # for a human and go to stderr with the rest of the runner's logging.
+  printf 'FM_TEST_REAP root=%s removed=%s\n' "$REAP_ROOT" "$removed"
 }
 
 # Primary family for one tests/*.test.sh basename. Unmapped scripts are

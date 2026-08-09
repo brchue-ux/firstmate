@@ -729,11 +729,14 @@ init_reap_fixture() {
 }
 
 # One aged, fixture-shaped directory inside the reap root.
+# The reap refuses a tree with any recent write anywhere inside it, not just a
+# recent top-level mtime, so an orphan fixture has to be aged out all the way
+# down. Deepest paths first: writing or stamping a child restamps its parent.
 make_orphan() {
   local reap=$1 name=$2
   mkdir -p "$reap/$name/payload"
   head -c 2048 /dev/zero >"$reap/$name/payload/blob"
-  touch -t 200001010000 "$reap/$name"
+  touch -t 200001010000 "$reap/$name/payload/blob" "$reap/$name/payload" "$reap/$name"
   printf '%s\n' "$reap/$name"
 }
 

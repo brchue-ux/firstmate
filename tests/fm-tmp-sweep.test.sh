@@ -312,6 +312,112 @@ test_missing_root_is_a_silent_no_op() {
   pass "sweep treats an absent temp root as a silent no-op"
 }
 
+# make_home <dir> <task id> <tasktmp>: a firstmate home whose task records name
+# <tasktmp> as a live task's scratch root.
+make_home() {
+  local home=$1 id=$2 tasktmp=$3
+  mkdir -p "$home/state" "$home/data"
+  printf 'window=w\ntasktmp=%s\n' "$tasktmp" > "$home/state/$id.meta"
+  printf '%s\n' "$home"
+}
+
+test_leaves_a_live_tasks_scratch_root() {
+  local root home live orphan out
+  root=$(new_root live-task)
+  # A task id ending in a dot plus six alphanumerics is shaped exactly like a
+  # mktemp fixture, which is the only way a live scratch root reaches the
+  # candidate list at all.
+  live=$(make_stale_dir "$root" fm-report.v2beta)
+  orphan=$(make_stale_dir "$root" fm-teardown-tests.aB3xY9)
+  home=$(make_home "$TMP_ROOT/live-task-home" report.v2beta "$live")
+
+  out=$(run_sweep "$root" --protect-homes "$home")
+  assert_present "$live" "a scratch root a home records as a live task must never be removed"
+  assert_absent "$orphan" "an ordinary orphan beside it must still be reclaimed"
+  assert_contains "$out" "fm-report.v2beta: skipped: a firstmate home records it as a live task's scratch root" \
+    "refusing a live task's scratch must be reported"
+  pass "sweep never removes a scratch root a home records as a live task's"
+}
+
+test_leaves_a_task_scratch_root_carrying_gotmp() {
+  local root dir out
+  root=$(new_root gotmp)
+  dir=$(make_stale_dir "$root" fm-someid.aB3xY9)
+  mkdir -p "$dir/gotmp"
+  age_out "$dir/gotmp" "$dir"
+
+  out=$(run_sweep "$root")
+  assert_present "$dir" "a per-task scratch root carrying gotmp/ must never be removed"
+  assert_contains "$out" "fm-someid.aB3xY9: skipped: looks like a live task's scratch root" \
+    "refusing a per-task scratch root must be reported"
+  pass "sweep never removes a per-task scratch root carrying gotmp/"
+}
+
+test_refuses_when_task_records_cannot_be_read() {
+  local root home dir out
+  if [ "$(id -u)" = 0 ]; then
+    pass "unreadable task records: root bypasses directory permissions, nothing to assert"
+    return 0
+  fi
+  root=$(new_root unreadable-records)
+  dir=$(make_stale_dir "$root" fm-teardown-tests.aB3xY9)
+  home=$(make_home "$TMP_ROOT/unreadable-home" sometask /nowhere)
+  chmod 000 "$home/state"
+
+  out=$(run_sweep "$root" --protect-homes "$home")
+  chmod 755 "$home/state"
+  assert_present "$dir" \
+    "an unreadable task record must stop the sweep rather than let it guess"
+  assert_contains "$out" "task records could not be read" \
+    "refusing on unreadable task records must say so"
+  pass "sweep refuses entirely when a home's task records cannot be read"
+}
+
+test_reads_secondmate_homes_for_live_scratch() {
+  local root primary second live out
+  root=$(new_root secondmate-task)
+  live=$(make_stale_dir "$root" fm-second.aB3xY9)
+  second=$(make_home "$TMP_ROOT/second-home" second.aB3xY9 "$live")
+  primary="$TMP_ROOT/primary-home"
+  mkdir -p "$primary/data" "$primary/state"
+  printf -- '- second (home: %s; scope: things)\n' "$second" > "$primary/data/secondmates.md"
+
+  out=$(run_sweep "$root" --protect-homes "$primary")
+  assert_present "$live" \
+    "a live task recorded by a registered secondmate home must be protected too"
+  assert_contains "$out" "fm-second.aB3xY9: skipped: a firstmate home records it" \
+    "protecting a secondmate's live task must be reported"
+  pass "sweep reads registered secondmate homes for live task scratch"
+}
+
+test_age_minutes_window() {
+  local root recent out
+  root=$(new_root age-minutes)
+  recent=$(make_fresh_dir "$root" fm-recent.aB3xY9)
+  # Ten minutes old: stale under a 5-minute window, fresh under the 12h default.
+  touch -d '10 minutes ago' "$recent/nested/payload" "$recent/nested" "$recent" 2>/dev/null \
+    || touch -A -001000 "$recent/nested/payload" "$recent/nested" "$recent"
+
+  out=$(run_sweep "$root" --age-minutes 5)
+  assert_absent "$recent" "a dir past the minutes window must be reclaimed"
+  assert_contains "$out" "fm-recent.aB3xY9: removed" "the minutes window must report its removal"
+  pass "sweep honours a minutes-granularity age window"
+}
+
+test_max_bounds_the_examination() {
+  local root out i
+  root=$(new_root max-bound)
+  for i in 1 2 3; do
+    make_stale_dir "$root" "fm-bounded$i.aB3xY9" >/dev/null
+  done
+
+  out=$(run_sweep "$root" --max 1)
+  [ "$(find "$root" -mindepth 1 -maxdepth 1 -type d | wc -l)" -eq 2 ] \
+    || fail "--max 1 must examine exactly one candidate and defer the rest"
+  assert_contains "$out" "deferred" "a bounded sweep must say what it deferred"
+  pass "sweep stops after --max candidates and defers the rest"
+}
+
 test_removes_stale_scratch_dir
 test_leaves_fresh_scratch_dir
 test_leaves_dir_with_recent_deep_write
@@ -328,5 +434,11 @@ test_dry_run_reports_without_removing
 test_age_window_is_configurable
 test_rejects_invalid_arguments
 test_missing_root_is_a_silent_no_op
+test_leaves_a_live_tasks_scratch_root
+test_leaves_a_task_scratch_root_carrying_gotmp
+test_refuses_when_task_records_cannot_be_read
+test_reads_secondmate_homes_for_live_scratch
+test_age_minutes_window
+test_max_bounds_the_examination
 
 echo "all fm-tmp-sweep tests passed"
