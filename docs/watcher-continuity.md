@@ -37,10 +37,20 @@ The turn-end guard remains the final backstop rather than the normal continuity 
 
 ## Arm-layer cycle contract
 
-`bin/fm-watch-arm.sh` never returns a clean empty success.
+`bin/fm-watch-arm.sh` never returns a clean empty success from an owned cycle.
 An actionable child output returns that reason normally.
 A zero/empty child return rechecks the home lock and beacon, attaches to a verified healthy successor when one exists, or emits `watcher: FAILED - cycle ended without an actionable reason` and exits nonzero.
-An attached arm follows verified identity-matched successors and reports the same typed failure if that chain ends without one.
+
+An attached arm follows verified identity-matched successors, but its outcome depends on whether supervision is genuinely absent rather than on whether that arm personally saw the wake reason, because the owning arm consumes and prints it.
+Before reporting the typed failure it accepts three pieces of durable evidence that the cycle ended normally: the wake queue advanced during the cycle, so the owning arm is relaying that reason; this home no longer needs supervision at all; or a live Stop auto-arm claim held by a process other than this arm's own launcher already owns the next cycle.
+Any of those exits 0 quietly and records the classification in the lifecycle ledger as `attached-cycle-explained` with the deciding evidence in the successor field, which keeps a real unexplained cycle end distinguishable from a normal one.
+A claim held by this arm's own launcher is deliberately excluded: it says nothing about the next cycle, so honoring it would let a genuine outage close quietly.
+This is what the Claude ordering above requires - the successor arms at the next Stop, so an attached arm that waited for one would report a certainty, not a race.
+
+`--restart` refuses to kill a watcher it can verify as healthy and attaches to it instead, reporting `watcher: restart declined pid=<N>`.
+Killing a healthy watcher costs a live supervision cycle and makes the arm that owned it report a typed failure, so an unconditional restart aimed at a working watcher manufactures the alarm it was meant to repair.
+`--restart --force` remains available for a deliberate replacement.
+Pi's and OpenCode's `--restart` re-arm from a child close is unaffected, because their previous watcher has already exited by then.
 
 The arm layer appends one tab-separated record per observed cycle to `state/.watch-cycle-exits.log`.
 Each record includes arm and watcher PIDs, start and end timestamps, exit code and signal, classified reason, beacon age, lock identity before and after close, and successor disposition.
@@ -55,6 +65,7 @@ Only the watcher process touches `state/.last-watcher-beat`; no helper process c
 `tests/fm-pi-watch-extension.test.sh` checks Pi's first-cycle-or-explicit-repair tool metadata and ownership-based redundant-call no-ops, then simulates actionable and empty child closes against the actual Pi and OpenCode close handlers, blocks prompt delivery to prove the successor launches first, verifies single-flight behavior, changes the session lock before close to prove ownership is rechecked, and hangs each successor arm to prove bounded fallback delivery includes the typed restoration failure.
 The same suite covers ordinary same-process session replacement for `/new`, `/resume`, and `/fork`, same-instance shutdown-plus-start, stale prior-generation callbacks, repeated transitions with exactly one live cycle, disappearance of the shutting-down refusal after a valid replacement activates, and terminal quit still refusing late rearm.
 `tests/fm-watcher-lock.test.sh` covers verified-successor attach, the typed self-eviction failure, bounded and successor-linked lifecycle rows, and a SIGSTOP counterfactual that distinguishes a live PID from a stale beacon before classifying termination.
+It also covers the attached arm's outcome contract: two arms plus one actionable wake produce no failure from the attached arm, an idle home closes quietly, a foreign auto-arm claim accounts for a cycle end while this arm's own launcher does not, and `--restart` declines a verified healthy watcher unless `--force` is passed.
 `tests/fm-subagent-pretool-check.test.sh` proves Claude retains only the non-status Bash seatbelts.
 `tests/fm-claude-stop-autoarm.test.sh` covers the auto-arm's scope, stale and live session owners, unchanged AFK and need boundaries, single-flight, and exit-2 translation.
 `FM_CLAUDE_LIVE_E2E=1 tests/fm-claude-stop-autoarm-live-e2e.test.sh` starts with the reproduced stale-lock state, runs session start first, completes two tokenless cycles, and checks the competing-live-owner negative control.

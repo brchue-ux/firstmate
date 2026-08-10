@@ -185,7 +185,7 @@ if [ "$FAILED" -eq 1 ]; then
   {
     printf 'firstmate watcher cycle FAILED - supervision is down while this home still needs it.\n'
     [ -n "$OUT" ] && grep -E '^(watcher:|signal:|stale:|check:|heartbeat)' "$OUT" 2>/dev/null | head -8
-    printf 'Run bin/fm-wake-drain.sh first. Then repair supervision with bin/fm-watch-arm.sh as its own Claude Code background task (never shell &). If the failure repeats, treat it as a blocker and report it instead of ending blind.\n'
+    printf 'Run bin/fm-wake-drain.sh first. Then repair supervision with bin/fm-watch-arm.sh as its own Claude Code background task (never shell &); it attaches when a healthy watcher already exists, so never reach for a restart to silence a repeated report. If the failure repeats, treat it as a blocker and report it instead of ending blind.\n'
   } >&2
 else
   {

@@ -3,8 +3,11 @@
 #
 # The first stale command in one FM_HOME must print the full actionable watcher
 # banner.
-# Repeated commands in that same stale episode should print only a concise
-# reminder, while unrelated alarms such as queued wakes stay independent.
+# Repeated commands at the same outage escalation level should print only a
+# concise reminder, while unrelated alarms such as queued wakes stay independent.
+# A LENGTHENING outage must get louder rather than quieter: crossing a rung of
+# the escalation ladder re-claims the full banner even though the episode never
+# changed, and every line states how long supervision has been down.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -47,11 +50,54 @@ run_guard_case_read_only() {
     "$ROOT/bin/fm-guard.sh" 2>&1
 }
 
+# Escalation-ladder run: FM_GUARD_GRACE=0 makes any beacon stale, so the outage
+# duration the guard reports is exactly the beacon's age.
+run_guard_case_ladder() {
+  local dir=$1 ladder=$2 repeat=$3
+  FM_ROOT_OVERRIDE="$(case_root "$dir")" \
+    FM_HOME="$(case_home "$dir")" \
+    FM_GUARD_GRACE=0 \
+    FM_GUARD_ESCALATE_LADDER="$ladder" \
+    FM_GUARD_ESCALATE_REPEAT="$repeat" \
+    "$ROOT/bin/fm-guard.sh" 2>&1
+}
+
 count_text() {
   local haystack=$1 needle=$2
   awk -v needle="$needle" 'index($0, needle) { c++ } END { print c + 0 }' <<EOF
 $haystack
 EOF
+}
+
+# Portable mtime helpers: GNU `touch -d` and BSD `touch -A` disagree, and the
+# relative ages here have to be exact.
+age_beacon() {  # <home> <seconds-ago>
+  perl -e '
+    my ($path, $ago) = @ARGV;
+    open my $handle, ">>", $path or die "open: $!";
+    close $handle;
+    my $stamp = time - $ago;
+    utime $stamp, $stamp, $path or die "utime: $!";
+  ' "$1/state/.last-watcher-beat" "$2"
+}
+
+beacon_age() {  # <home>
+  perl -e 'my @s = stat($ARGV[0]) or exit 1; print time - $s[9], "\n"' \
+    "$1/state/.last-watcher-beat"
+}
+
+wait_for_outage() {  # <home> <seconds>
+  local home=$1 target=$2 i=0
+  while [ "$i" -lt 200 ]; do
+    [ "$(beacon_age "$home")" -ge "$target" ] && return 0
+    sleep 0.1
+    i=$((i + 1))
+  done
+  fail "beacon never reached an age of ${target}s"
+}
+
+episode_key_of() {  # <home>
+  awk 'NR == 1 { print $1 }' "$1/state/.guard-watcher-stale-banner" 2>/dev/null
 }
 
 test_first_stale_call_prints_full_banner() {
@@ -76,7 +122,7 @@ test_repeated_same_episode_prints_reminder_only() {
     || fail "first stale call did not print the full banner: $out1"
   [ "$(count_text "$out2" "WATCHER DOWN - SUPERVISION IS OFF")" -eq 0 ] \
     || fail "second stale call repeated the full banner: $out2"
-  assert_contains "$out2" "full banner already printed this episode" \
+  assert_contains "$out2" "full banner already printed at this escalation level" \
     "second stale call did not print the concise reminder"
   marker="$(case_home "$dir")/state/.guard-watcher-stale-banner"
   assert_present "$marker" "stale banner marker was not written under the owning home"
@@ -125,10 +171,79 @@ test_concurrent_same_episode_prints_one_full_banner() {
   done
   all=$(cat "$out_dir"/*.out)
   full=$(count_text "$all" "WATCHER DOWN - SUPERVISION IS OFF")
-  reminders=$(count_text "$all" "full banner already printed this episode")
+  reminders=$(count_text "$all" "full banner already printed at this escalation level")
   [ "$full" -eq 1 ] || fail "concurrent same-episode calls printed $full full banners"$'\n'"$all"
   [ "$reminders" -eq 29 ] || fail "concurrent same-episode calls printed $reminders reminders, expected 29"$'\n'"$all"
   pass "fm-guard stale banner: concurrent same-episode calls claim exactly one full banner"
+}
+
+test_lengthening_outage_reprints_full_banner() {
+  local dir home key_first key_last out
+  dir=$(make_guard_case escalating-outage)
+  home=$(case_home "$dir")
+  # One beacon, never touched again: the episode key cannot change, so every
+  # re-print below is caused by the outage getting LONGER, not by a new episode.
+  age_beacon "$home" 0
+
+  out=$(run_guard_case_ladder "$dir" "1 4" 4)
+  [ "$(count_text "$out" "WATCHER DOWN - SUPERVISION IS OFF")" -eq 1 ] \
+    || fail "first stale call did not print the full banner: $out"
+  printf '%s\n' "$out" | grep -Eq 'WATCHER DOWN - SUPERVISION IS OFF - down for [0-9]+s' \
+    || fail "full banner must state the outage duration: $out"
+  key_first=$(episode_key_of "$home")
+  [ -n "$key_first" ] || fail "first full banner did not record an episode key"
+
+  out=$(run_guard_case_ladder "$dir" "1 4" 4)
+  [ "$(count_text "$out" "WATCHER DOWN - SUPERVISION IS OFF")" -eq 0 ] \
+    || fail "same escalation level repeated the full banner: $out"
+  assert_contains "$out" "full banner already printed at this escalation level" \
+    "same escalation level did not print the concise reminder"
+
+  wait_for_outage "$home" 1
+  out=$(run_guard_case_ladder "$dir" "1 4" 4)
+  [ "$(count_text "$out" "WATCHER DOWN - SUPERVISION IS OFF")" -eq 1 ] \
+    || fail "crossing the first ladder rung did not re-print the full banner: $out"
+
+  wait_for_outage "$home" 2
+  out=$(run_guard_case_ladder "$dir" "1 4" 4)
+  [ "$(count_text "$out" "WATCHER DOWN - SUPERVISION IS OFF")" -eq 0 ] \
+    || fail "a duration between rungs re-printed the full banner: $out"
+
+  wait_for_outage "$home" 4
+  out=$(run_guard_case_ladder "$dir" "1 4" 4)
+  [ "$(count_text "$out" "WATCHER DOWN - SUPERVISION IS OFF")" -eq 1 ] \
+    || fail "crossing the second ladder rung did not re-print the full banner: $out"
+
+  # Past the last rung the repeat interval keeps the alarm coming, so a long
+  # outage never falls silent the way mtime-keyed suppression made it.
+  wait_for_outage "$home" 8
+  out=$(run_guard_case_ladder "$dir" "1 4" 4)
+  [ "$(count_text "$out" "WATCHER DOWN - SUPERVISION IS OFF")" -eq 1 ] \
+    || fail "outage past the last ladder rung stopped re-printing the full banner: $out"
+
+  key_last=$(episode_key_of "$home")
+  [ "$key_last" = "$key_first" ] \
+    || fail "escalation changed the episode key ('$key_first' -> '$key_last'); re-prints must come from duration alone"
+  pass "fm-guard stale banner: a lengthening outage re-claims the full banner on the escalation ladder"
+}
+
+test_banner_states_outage_duration() {
+  local dir home out
+  dir=$(make_guard_case outage-duration)
+  home=$(case_home "$dir")
+
+  out=$(run_guard_case "$dir")
+  assert_contains "$out" "down for an unknown time" \
+    "a never-seen beacon must be reported as an unknown-length outage, not a zero-length one"
+
+  age_beacon "$home" 90
+  out=$(run_guard_case_ladder "$dir" "300 900 3600" 3600)
+  assert_contains "$out" "down for 1m" "banner must state a minutes-scale outage duration"
+
+  age_beacon "$home" 7500
+  out=$(run_guard_case_ladder "$dir" "300 900 3600" 3600)
+  assert_contains "$out" "down for 2h 5m" "banner must state an hours-scale outage duration"
+  pass "fm-guard stale banner: every alarm states how long supervision has been down"
 }
 
 test_home_isolation() {
@@ -142,7 +257,7 @@ test_home_isolation() {
     || fail "home A first stale call did not print a full banner: $out_a1"
   [ "$(count_text "$out_b1" "WATCHER DOWN - SUPERVISION IS OFF")" -eq 1 ] \
     || fail "home B first stale call was suppressed by home A: $out_b1"
-  assert_contains "$out_a2" "full banner already printed this episode" \
+  assert_contains "$out_a2" "full banner already printed at this escalation level" \
     "home A repeated stale call did not remember its own episode"
   pass "fm-guard stale banner: deduplication is isolated per FM_HOME"
 }
@@ -156,7 +271,7 @@ test_queued_wake_warning_stays_independent() {
     || fail "first stale call did not print the full banner before queued wake case: $out1"
   printf 'signal: %s/state/task.status\n' "$home" > "$home/state/.wake-queue"
   out2=$(run_guard_case "$dir")
-  assert_contains "$out2" "full banner already printed this episode" \
+  assert_contains "$out2" "full banner already printed at this escalation level" \
     "same-episode stale call should still print its concise reminder"
   assert_contains "$out2" "queued wakes pending" \
     "queued wake warning must not be suppressed by stale-banner deduplication"
@@ -193,7 +308,7 @@ test_read_only_during_episode_observes_without_mutating_marker() {
   before=$(cat "$marker")
   out_ro=$(run_guard_case_read_only "$dir")
   after=$(cat "$marker")
-  assert_contains "$out_ro" "full banner already printed this episode" \
+  assert_contains "$out_ro" "full banner already printed at this escalation level" \
     "read-only stale call during a claimed episode should print the concise reminder"
   [ "$after" = "$before" ] || fail "read-only stale call must not update an existing marker"
   pass "fm-guard stale banner: read-only during episode observes without mutating marker"
@@ -244,6 +359,8 @@ test_first_stale_call_prints_full_banner
 test_repeated_same_episode_prints_reminder_only
 test_healthy_recovery_rearms_next_stale_episode
 test_concurrent_same_episode_prints_one_full_banner
+test_lengthening_outage_reprints_full_banner
+test_banner_states_outage_duration
 test_home_isolation
 test_queued_wake_warning_stays_independent
 test_read_only_before_writable_does_not_consume_full_banner
