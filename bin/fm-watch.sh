@@ -20,7 +20,11 @@
 #                          line, since the crew's own log gets no new entry once
 #                          firstmate hands it to a no-mistakes validation. A declared
 #                          external-wait pause is absorbed instead with its own long
-#                          re-surface cadence, never as a wedge. Only when neither
+#                          re-surface cadence, never as a wedge - and re-surfaces as a
+#                          confirmed-dead crew, not a continuing wait, whenever its live
+#                          agent recheck comes back dead. A window whose pane capture
+#                          fails outright is surfaced once as gone rather than dropped
+#                          from every later poll. Only when neither
 #                          absorb class applies does the log's last line decide:
 #                          terminal (captain-relevant) or non-terminal (no verb),
 #                          both surfaced at once. A provably-working stale past the
@@ -370,10 +374,12 @@ clear_pause_tracking() {  # <window>
 }
 
 # Reconcile a declared pause or captain-held status with authoritative crew state.
-# Prints one of: working, paused, dead, or none. A confidently dead ordinary
-# crew recovers a classification after fm-crew-state has fallen back to
-# stopped or unknown - but as dead, never plain paused, so a confirmed-stopped
-# crew is never reported as an ordinary continuing external wait.
+# Prints one of: working, paused, dead, or none. A live dead verdict from
+# fm_backend_agent_alive decides the answer for an ordinary crew on every path
+# through this function - it reports dead, never plain paused, whatever
+# fm-crew-state said, so a confirmed-stopped crew is never reported as an
+# ordinary continuing external wait. An actively-running pipeline still wins
+# first, and a secondmate is never asked for an agent verdict at all.
 pause_state_class() {  # <window> <task>
   local win=$1 task=$2 key last recheck_file class agent_alive
   key=${win//:/_}
@@ -394,7 +400,17 @@ pause_state_class() {  # <window> <task>
         printf 'none'
         return
       fi
+      # The recheck throttle bounds how often the costly crew-state read runs;
+      # it never downgrades a live dead verdict this branch just obtained.
+      # Reporting plain paused here would have re-framed a confirmed-stopped
+      # crew as an ordinary continuing wait on most polls, since this throttle
+      # window is far shorter than PAUSE_RESURFACE_SECS and therefore usually
+      # owns the eventual re-surface.
+      printf 'dead'
+      return
     fi
+    # A secondmate is idle by default, so its declared pause keeps the bounded
+    # cadence without an agent verdict at all (see the same exemption below).
     printf 'paused'
     return
   fi
@@ -412,7 +428,7 @@ pause_state_class() {  # <window> <task>
       return
     fi
   fi
-  [ "$class" = none ] && [ "${agent_alive:-unknown}" = dead ] && class=dead
+  [ "${agent_alive:-unknown}" = dead ] && class=dead
   case "$class" in
     paused|dead) date +%s > "$recheck_file" ;;
     *) rm -f "$recheck_file" ;;
