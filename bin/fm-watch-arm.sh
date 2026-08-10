@@ -28,19 +28,33 @@
 #   watcher: started pid=<N> (beacon fresh)              - it launched one and confirmed it
 #   watcher: attached pid=<N> (beacon <age>s)            - a live+fresh successor holds the lock;
 #                                                          this arm attaches and follows it
+#   watcher: restart declined pid=<N> (beacon <age>s)    - --restart found a verified healthy
+#                                                          watcher and attached instead of killing it
 #   watcher: FAILED - no live watcher with a fresh beacon  - could not confirm one
 #   watcher: FAILED - cycle ended without an actionable reason
-#                                                        - a clean cycle ended with no wake and no
-#                                                          verified healthy successor
+#                                                        - a clean cycle ended with no wake, no
+#                                                          verified healthy successor, and nothing
+#                                                          else accounting for supervision
 # It NEVER reports started/attached/healthy off a stale beacon or a dead/reused pid: a
 # stale-beacon or dead-pid holder either self-heals (the fresh child steals the
 # dead lock per the singleton self-eviction/steal path and is confirmed) or this
 # returns the FAILED line. On started it waits the child and propagates the wake
-# reason; on attached it stays live across identity-matched successors. An
-# attached cycle that ends without a healthy successor is a typed nonzero failure,
-# never a clean empty completion. On FAILED it exits non-zero so the failure is
-# loud. A live cycle already present means re-arm attaches - do not start a second
-# watcher.
+# reason; on attached it stays live across identity-matched successors. On FAILED
+# it exits non-zero so the failure is loud. A live cycle already present means
+# re-arm attaches - do not start a second watcher.
+#
+# An ATTACHED arm cannot see the wake reason, because the OWNING arm consumes and
+# prints it. Its outcome therefore depends on whether supervision is genuinely
+# absent, not on whether this particular arm personally saw the reason: before
+# reporting the typed cycle-end failure it checks the durable evidence that the
+# cycle is accounted for - the wake queue advanced during the cycle (another arm
+# relays that reason), this home no longer needs supervision at all, or a live
+# Stop auto-arm claim that is not this arm's own launcher already owns the next
+# cycle. Any of those is a normal cycle end and exits 0 quietly. This matters
+# because Claude's Stop hook arms the successor at the NEXT Stop
+# (docs/watcher-continuity.md), so a successor is not merely unlikely inside the
+# confirmation window - it is guaranteed absent, which turned every observed
+# attached cycle end into a false FAILED.
 #
 # Every observed watcher cycle appends one tab-separated lifecycle record to
 # state/.watch-cycle-exits.log. The arm layer owns that bounded ledger; it records
@@ -56,15 +70,34 @@
 # watcher. NEVER `pkill -f
 # bin/fm-watch.sh`: that pattern matches every firstmate home's watcher
 # (secondmate homes run the same script) and would kill siblings.
+# It also refuses to kill a watcher this script can VERIFY as healthy: killing
+# one costs a real supervision cycle and makes the arm that owned it report a
+# typed failure, so a restart aimed at a working watcher manufactures the very
+# alarm it was meant to repair. Without --force, a verified healthy holder is
+# attached to exactly as a plain arm would. Adapters that re-arm from a child
+# close (Pi, OpenCode) are unaffected: their previous watcher has already exited,
+# so there is nothing healthy to decline.
+#
+# --force: only with --restart, and only to deliberately replace a watcher that
+# is verifiably alive - for example when its behavior, not its liveness, is the
+# problem. Never use it to silence a repeated failure report.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# The "is supervision still needed here" predicate has one owner.
+# shellcheck source=bin/fm-supervision-lib.sh
+. "$SCRIPT_DIR/fm-supervision-lib.sh"
 
 WATCH="$SCRIPT_DIR/fm-watch.sh"
 WATCH_LOCK="$STATE/.watch.lock"
 BEAT="$STATE/.last-watcher-beat"
+AUTOARM_LOCK="$STATE/.claude-autoarm.lock"
+# Monotonic across drains: fm-wake-drain.sh truncates the queue but never this
+# counter, so a comparison across one cycle proves whether that cycle enqueued a
+# wake, independently of whether firstmate has already consumed it.
+WAKE_SEQ_FILE="$STATE/.wake-queue.seq"
 # "Fresh" reuses the guard's threshold so there is one definition of liveness.
 GRACE=${FM_GUARD_GRACE:-300}
 # How long to wait for a freshly forked watcher to acquire the lock and beat.
@@ -104,12 +137,23 @@ cycle_watcher_pid=none
 cycle_origin=unknown
 cycle_started_at=0
 cycle_lock_before='pid:none|identity:none'
+cycle_wake_seq=0
+
+wake_seq_now() {
+  local seq
+  seq=$(cat "$WAKE_SEQ_FILE" 2>/dev/null || true)
+  case "$seq" in
+    ''|*[!0-9]*) seq=0 ;;
+  esac
+  printf '%s' "$seq"
+}
 
 cycle_begin() {
   cycle_watcher_pid=$1
   cycle_origin=$2
   cycle_started_at=$(date +%s)
   cycle_lock_before=$(lock_snapshot)
+  cycle_wake_seq=$(wake_seq_now)
   cycle_active=1
 }
 
@@ -261,9 +305,65 @@ fail_unexplained_cycle() {
   return 1
 }
 
+# True when <pid> is this process or one of its (bounded) ancestors. Used to tell
+# "some other process holds the Stop auto-arm claim" from "the hook that launched
+# ME holds it" - the latter proves nothing about the NEXT cycle, so treating it as
+# coverage would let this arm swallow a genuine outage.
+arm_is_descendant_of() {
+  local target=$1 pid=${BASHPID:-$$} depth=0 parent
+  case "$target" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  while [ "$depth" -lt 8 ]; do
+    [ "$pid" = "$target" ] && return 0
+    [ "$pid" = 1 ] && return 1
+    parent=$(ps -p "$pid" -o ppid= 2>/dev/null | tr -d '[:space:]')
+    case "$parent" in
+      ''|*[!0-9]*|0) return 1 ;;
+    esac
+    pid=$parent
+    depth=$((depth + 1))
+  done
+  return 1
+}
+
+# A live Stop auto-arm owner that did NOT launch this arm already owns the next
+# cycle for this home.
+foreign_autoarm_claim() {
+  local pid
+  pid=$(cat "$AUTOARM_LOCK/pid" 2>/dev/null || true)
+  fm_pid_alive "$pid" || return 1
+  ! arm_is_descendant_of "$pid"
+}
+
+# Durable evidence that an attached cycle ended normally rather than leaving this
+# home unsupervised. Prints the classification so the lifecycle ledger records
+# WHY the cycle was not a failure; returns 1 when nothing accounts for it.
+FM_ARM_CYCLE_EXPLANATION=
+attached_cycle_end_is_explained() {
+  FM_ARM_CYCLE_EXPLANATION=
+  if [ "$(wake_seq_now)" != "$cycle_wake_seq" ]; then
+    # The watcher enqueues its actionable wake before it prints and exits, so an
+    # advanced counter means this cycle ended with a reason the owning arm is
+    # relaying. Only the watcher appends to the queue.
+    FM_ARM_CYCLE_EXPLANATION=wake-enqueued
+    return 0
+  fi
+  if ! fm_supervision_needed "$STATE" "$GRACE"; then
+    FM_ARM_CYCLE_EXPLANATION=no-supervision-need
+    return 0
+  fi
+  if foreign_autoarm_claim; then
+    FM_ARM_CYCLE_EXPLANATION=autoarm-claim
+    return 0
+  fi
+  return 1
+}
+
 # Stay alive across identity-matched healthy holders. If one cycle ends, attach
-# to a verified successor. With no successor, fail loudly instead of returning a
-# clean empty completion that an adapter could mistake for a no-op.
+# to a verified successor. With no successor and nothing else accounting for
+# supervision, fail loudly instead of returning a clean empty completion that an
+# adapter could mistake for a no-op.
 attach_and_wait() {
   local attached_pid=$1
   while :; do
@@ -283,6 +383,10 @@ attach_and_wait() {
       cycle_begin "$attached_pid" attached
       report_attached
       continue
+    fi
+    if attached_cycle_end_is_explained; then
+      cycle_log_append unknown unknown attached-cycle-explained "$FM_ARM_CYCLE_EXPLANATION"
+      return 0
     fi
     cycle_log_append unknown unknown attached-cycle-ended none
     fail_unexplained_cycle
@@ -325,11 +429,28 @@ print_watch_output() {
 }
 
 mode=arm
-case "${1:-}" in
-  ''|arm|--arm) mode=arm ;;
-  --restart) mode=restart ;;
-  *) echo "usage: $(basename "$0") [--restart]" >&2; exit 2 ;;
-esac
+force=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    ''|arm|--arm) mode=arm ;;
+    --restart) mode=restart ;;
+    --force) force=1 ;;
+    *) echo "usage: $(basename "$0") [--restart [--force]]" >&2; exit 2 ;;
+  esac
+  shift
+done
+if [ "$force" -eq 1 ] && [ "$mode" != restart ]; then
+  echo "usage: $(basename "$0") [--restart [--force]] (--force is only meaningful with --restart)" >&2
+  exit 2
+fi
+
+# Declining to kill a verified healthy watcher is the whole point of the guard:
+# report it, then fall through to the ordinary arm path so the caller still ends
+# up following one live cycle instead of getting a bare refusal.
+if [ "$mode" = restart ] && [ "$force" -eq 0 ] && healthy_watcher; then
+  echo "watcher: restart declined pid=$HEALTHY_PID (beacon $(fm_path_age "$BEAT")s, verified healthy) - attaching instead; use --restart --force to replace a live watcher"
+  mode=arm
+fi
 
 if [ "$mode" = restart ]; then
   # Home-scoped stop: only the watcher pid recorded in THIS home's lock.

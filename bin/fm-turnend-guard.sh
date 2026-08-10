@@ -236,7 +236,7 @@ if [ "$COUNT" -gt "$BLOCK_BUDGET" ]; then
   else
     NEED_DESC="X-mode relay polling active"
   fi
-  printf '{"systemMessage":"firstmate turn-end guard: %s with no live watcher and no Stop auto-arm claim; block budget exhausted, allowing this stop. Repair supervision (bin/fm-watch-arm.sh as a Claude Code background task) or investigate why bin/fm-claude-stop-autoarm.sh is not claiming this home."}\n' "$NEED_DESC"
+  printf '{"systemMessage":"firstmate turn-end guard: %s with no live watcher and no Stop auto-arm claim; block budget exhausted, allowing this stop. Repair supervision (bin/fm-watch-arm.sh as a Claude Code background task, which attaches instead of disturbing a watcher that is already healthy) or investigate why bin/fm-claude-stop-autoarm.sh is not claiming this home."}\n' "$NEED_DESC"
   exit 0
 fi
 printf 'session=%s\ncount=%s\n' "$SESSION_ID" "$COUNT" > "$BUDGET_FILE" 2>/dev/null || true
