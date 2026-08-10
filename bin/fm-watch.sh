@@ -52,6 +52,9 @@
 #                          running a check or removing poll artifacts
 #   heartbeat              fleet-scan backstop found an unsurfaced captain-relevant
 #                          status, unless afk is active
+# Every heartbeat tick also runs bin/fm-idle-sweep.sh to reclaim finished tasks
+# that still hold a pane or worktree. That sweep never produces a reason line of
+# its own; see idle_sweep_tick.
 # For normal supervision, resume the session-start primary-harness protocol
 # after each printed reason. Direct duplicate invocations of this script still
 # no-op through the watcher singleton lock.
@@ -652,6 +655,28 @@ heartbeat_scan_finds_actionable() {
   return 1
 }
 
+# Heartbeat-cadence cleanup of finished tasks that are still holding a pane or a
+# worktree. bin/fm-idle-sweep.sh owns every eligibility decision, and
+# bin/fm-teardown.sh owns the landed-work refusal beneath it; the watcher
+# supplies only the cadence.
+#
+# It runs on EVERY heartbeat tick, including the absorbed ones, because a
+# finished task produces no further wake of its own - the absorbed tick is
+# exactly when nothing else is going to notice it. Its outcomes go to the triage
+# log rather than the wake stream: reclaiming a task whose work already landed
+# is not a captain-facing event, and turning it into one would make routine
+# cleanup wake firstmate. Bounded and best-effort, so a sweep that fails or
+# overruns can never break the supervision cycle.
+idle_sweep_tick() {
+  local out line
+  out=$("$SCRIPT_DIR/fm-idle-sweep.sh" --verbose 2>&1) || true
+  [ -n "$out" ] || return 0
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    triage_log "idle sweep: $line"
+  done <<< "$out"
+}
+
 # event_wait_or_sleep: the terminal wait of each supervision cycle. For a home
 # with push-capable windows (herdr), it replaces the blind `sleep POLL` with a
 # bounded wait on the backend's native transition stream, so a crew going
@@ -1130,6 +1155,9 @@ EOF
   hb=$(( HEARTBEAT * (1 << streak) ))
   [ "$hb" -gt "$HEARTBEAT_MAX" ] && hb=$HEARTBEAT_MAX
   if [ "$(age_of "$STATE/.last-heartbeat")" -ge "$hb" ]; then
+    # Reclaim finished tasks first, before any branch below can wake() and exit
+    # the cycle, so the sweep is genuinely part of every heartbeat.
+    idle_sweep_tick
     # Triage: in always-on mode a heartbeat is benign unless the cheap fleet-scan
     # turns up a captain-relevant status the per-wake path missed. Absorb the
     # no-change case (advance the schedule and back off exactly as wake() would,

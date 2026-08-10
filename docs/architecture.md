@@ -26,6 +26,9 @@ Live or inconclusive liveness remains fail-open at that initial surface, and the
 Its initial normal-mode status signal still surfaces through the no-verb path, while away mode self-handles that routine signal and owns the later recheck.
 Fresh stale panes use the same current-state read before trusting the status log, so an active run or busy pane outranks an old captain-relevant status-log line left behind before validation.
 No-change heartbeats are also benign.
+Every heartbeat tick, absorbed or surfaced, additionally runs `bin/fm-idle-sweep.sh`, which offers each of this home's finished tasks that still holds a worktree or runtime endpoint to `bin/fm-teardown.sh`.
+That sweep decides only which tasks to offer; teardown keeps sole ownership of the landed-work refusal, and the sweep never passes `--force`, so a task whose work has not landed is refused, backed off, and retried once its records move or its retry window elapses.
+Its outcomes go to the triage log rather than the wake stream, because reclaiming a task whose work already landed is not a captain-facing event, and each home's own watcher sweeps only that home's tasks.
 Absorbed wakes advance their suppression markers, log to `state/.watch-triage.log`, and keep the watcher blocking without a queue record or LLM turn.
 After each drain, `fm-wake-drain.sh` runs the same liveness guard as the supervision scripts, so a lapsed watcher chain surfaces even on a turn that only drains and handles queued wakes.
 Routine watcher polling, supervision no-ops, elapsed waiting time, and absorbed benign wakes stay silent.

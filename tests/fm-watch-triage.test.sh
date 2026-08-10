@@ -1621,6 +1621,65 @@ test_heartbeat_no_change_absorbed() {
   pass "a heartbeat with no captain-relevant change is absorbed and backs off the cadence"
 }
 
+test_heartbeat_sweeps_a_finished_task_while_absorbing() {
+  local dir state fakebin out sig pid i
+  dir=$(make_case heartbeat-idle-sweep); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  # A finished task still holding its worktree - the case that used to sit in the
+  # sidebar forever, because a task that already reported done: produces no
+  # further wake of its own. It is deliberately set up so the heartbeat is
+  # ABSORBED (its status is already marked surfaced, and its .seen-* signature
+  # already matches): the sweep must still run on that quiet tick, since a
+  # surfaced heartbeat is exactly what will not happen here.
+  mkdir -p "$dir/wt"
+  # No window= : the pane is already gone, the worktree is what is still held, so
+  # the stale path has nothing to look at and only the heartbeat is in play.
+  fm_write_meta "$state/sweepme.meta" \
+    "endpoint_task_id=sweepme" \
+    "worktree=$dir/wt" \
+    "project=$dir/wt" \
+    "harness=claude" \
+    "kind=ship" \
+    "mode=no-mistakes"
+  printf 'done: PR https://example.test/pr/3 checks green\n' > "$state/sweepme.status"
+  sig=$(seen_sig "$state/sweepme.status"); printf '%s' "$sig" > "$state/.seen-sweepme_status"
+  printf '%s' "done: PR https://example.test/pr/3 checks green" > "$state/.hb-surfaced-sweepme"
+  # Record cleanup attempts instead of performing them; the landed-work refusal
+  # itself is covered against the real script in tests/fm-idle-sweep.test.sh.
+  cat > "$fakebin/record-teardown" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$dir/teardown.calls"
+exit 1
+SH
+  chmod +x "$fakebin/record-teardown"
+
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=1 \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_FAKE_CREW_STATE='state: done · source: status-log · done: PR checks green' \
+    FM_IDLE_SWEEP_TEARDOWN_BIN="$fakebin/record-teardown" \
+    "$WATCH" > "$out" &
+  pid=$!
+  i=0
+  while [ "$i" -lt 60 ]; do
+    [ -s "$dir/teardown.calls" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if [ ! -s "$dir/teardown.calls" ]; then
+    reap "$pid"; fail "the heartbeat never attempted cleanup of a finished task: $(cat "$out")"
+  fi
+  [ "$(head -1 "$dir/teardown.calls")" = "sweepme" ] \
+    || fail "the heartbeat sweep asked for something other than a plain cleanup: $(head -1 "$dir/teardown.calls")"
+  wait_live "$pid" 5 || { reap "$pid"; fail "the sweep turned an absorbed heartbeat into a wake: $(cat "$out")"; }
+  [ ! -s "$out" ] || { reap "$pid"; fail "the sweep printed a wake reason: $(cat "$out")"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "the sweep enqueued a durable wake record"; }
+  grep -F "idle sweep: sweepme" "$state/.watch-triage.log" >/dev/null \
+    || { reap "$pid"; fail "the sweep outcome was not recorded in the triage log"; }
+  reap "$pid"
+  pass "every heartbeat attempts cleanup of a finished task, without waking firstmate to do it"
+}
+
 test_heartbeat_backstop_surfaces_unsurfaced_status() {
   local dir state fakebin out drain_out sig pid
   dir=$(make_case heartbeat-backstop); state="$dir/state"; fakebin="$dir/fakebin"
@@ -1771,6 +1830,7 @@ test_paused_authoritative_working_preserves_wedge_timer
 test_nonterminal_stale_repairs_missing_or_corrupt_timer
 test_triage_log_size_cap_accepts_spaced_wc_counts
 test_heartbeat_no_change_absorbed
+test_heartbeat_sweeps_a_finished_task_while_absorbing
 test_heartbeat_backstop_surfaces_unsurfaced_status
 test_beacon_stays_fresh_while_absorbing
 test_afk_present_reverts_watcher_to_one_shot
