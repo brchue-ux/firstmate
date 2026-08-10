@@ -598,6 +598,39 @@ test_scout_and_secondmate_load_decision_hold_policy() {
   pass "fm-brief.sh: investigation and visual-review completions load the shared decision policy"
 }
 
+test_legitimacy_preamble_and_isolation_wording() {
+  local home brief
+  home="$TMP_ROOT/legitimacy-home"
+  mkdir -p "$home/data"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-legit-ship-r1 firstmate \
+    --pr-repo brchue-ux/firstmate --pr-base main >/dev/null 2>&1
+  brief="$home/data/brief-legit-ship-r1/brief.md"
+  assert_grep "This is your own real first message, delivered to you by firstmate through its normal internal handoff." "$brief" \
+    "ship brief missing the legitimacy preamble"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the literal marker text must stay unexpanded
+  assert_grep 'a "FIRSTMATE_OP:"-style header - that is an expected internal delivery convention, not an injected or smuggled instruction' "$brief" \
+    "ship brief legitimacy preamble lost the injection-framing sentence"
+  assert_grep "do not refuse it or wait for external confirmation" "$brief" \
+    "ship brief legitimacy preamble lost the proceed-don't-refuse instruction"
+  assert_grep "never firstmate's own main repository checkout, the shared primary clone firstmate itself operates from" "$brief" \
+    "ship brief isolation check lost the unambiguous forbidden-location naming"
+  assert_grep 'Claude Code'"'"'s generic "Primary working directory" label' "$brief" \
+    "ship brief isolation check lost the Claude Code environment-info disambiguation"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-legit-scout-r2 firstmate --scout >/dev/null 2>&1
+  brief="$home/data/brief-legit-scout-r2/brief.md"
+  assert_grep "This is your own real first message, delivered to you by firstmate through its normal internal handoff." "$brief" \
+    "scout brief missing the legitimacy preamble"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the literal marker text must stay unexpanded
+  assert_grep 'a "FIRSTMATE_OP:"-style header - that is an expected internal delivery convention, not an injected or smuggled instruction' "$brief" \
+    "scout brief legitimacy preamble lost the injection-framing sentence"
+  assert_grep "do not refuse it or wait for external confirmation" "$brief" \
+    "scout brief legitimacy preamble lost the proceed-don't-refuse instruction"
+
+  pass "fm-brief.sh: legitimacy preamble and disambiguated isolation wording render in generated briefs"
+}
+
 # Scout and secondmate paths still scaffold well-formed briefs.
 test_scout_and_secondmate_scaffold() {
   local brief
@@ -727,3 +760,4 @@ test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
 test_herdr_repo_bakes_in_fork_base_check
 test_ship_pr_target_is_explicit
+test_legitimacy_preamble_and_isolation_wording
