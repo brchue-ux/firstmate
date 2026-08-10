@@ -227,6 +227,32 @@ test_lengthening_outage_reprints_full_banner() {
   pass "fm-guard stale banner: a lengthening outage re-claims the full banner on the escalation ladder"
 }
 
+# Upgrade path: a marker written by an older firstmate records only the episode
+# key. With no beacon either, nothing dates the outage, so the guard has to
+# escalate once and persist an anchor rather than sitting at rung 0 forever.
+test_legacy_bare_key_marker_escalates_once_then_settles() {
+  local dir home marker out1 out2 since
+  dir=$(make_guard_case legacy-bare-key-marker)
+  home=$(case_home "$dir")
+  marker="$home/state/.guard-watcher-stale-banner"
+  rm -f "$home/state/.last-watcher-beat"
+  printf 'beat:absent\n' > "$marker"
+
+  out1=$(run_guard_case "$dir")
+  [ "$(count_text "$out1" "WATCHER DOWN - SUPERVISION IS OFF")" -eq 1 ] \
+    || fail "a legacy bare-key marker suppressed the full banner instead of escalating once: $out1"
+  since=$(awk 'NR == 1 { for (i = 1; i <= NF; i++) if ($i ~ /^since=[0-9]+$/) print $i }' "$marker")
+  [ -n "$since" ] \
+    || fail "escalating from a legacy bare-key marker did not persist an outage anchor: $(cat "$marker")"
+
+  out2=$(run_guard_case "$dir")
+  [ "$(count_text "$out2" "WATCHER DOWN - SUPERVISION IS OFF")" -eq 0 ] \
+    || fail "an upgraded marker repeated the full banner at the same escalation level: $out2"
+  assert_contains "$out2" "full banner already printed at this escalation level" \
+    "an upgraded marker did not settle onto the concise reminder"
+  pass "fm-guard stale banner: a legacy bare-key marker escalates once and then settles onto the ladder"
+}
+
 test_banner_states_outage_duration() {
   local dir home out
   dir=$(make_guard_case outage-duration)
@@ -360,6 +386,7 @@ test_repeated_same_episode_prints_reminder_only
 test_healthy_recovery_rearms_next_stale_episode
 test_concurrent_same_episode_prints_one_full_banner
 test_lengthening_outage_reprints_full_banner
+test_legacy_bare_key_marker_escalates_once_then_settles
 test_banner_states_outage_duration
 test_home_isolation
 test_queued_wake_warning_stays_independent

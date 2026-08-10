@@ -137,13 +137,19 @@ FM_GUARD_EVAL_RUNG=0
 FM_GUARD_EVAL_SINCE=0
 FM_GUARD_OUTAGE_DESC=
 fm_guard_stale_banner_evaluate() {
-  local state=$1 key=$2 now beat mtime dur
+  local state=$1 key=$2 now beat mtime dur unanchored=0
   now=$(date +%s)
   beat="$state/.last-watcher-beat"
   fm_guard_marker_read "$state" || true
 
   FM_GUARD_EVAL_SINCE=
-  [ "$FM_GUARD_MARKER_KEY" = "$key" ] && FM_GUARD_EVAL_SINCE=$FM_GUARD_MARKER_SINCE
+  if [ "$FM_GUARD_MARKER_KEY" = "$key" ]; then
+    FM_GUARD_EVAL_SINCE=$FM_GUARD_MARKER_SINCE
+    # A matching key that carries no usable start is the older bare-key marker.
+    # Without an anchor a beaconless outage would measure itself as zero-length
+    # forever and never leave rung 0, so claim once to persist the anchor.
+    [ -n "$FM_GUARD_EVAL_SINCE" ] || unanchored=1
+  fi
   [ -n "$FM_GUARD_EVAL_SINCE" ] || FM_GUARD_EVAL_SINCE=$now
 
   mtime=
@@ -168,7 +174,8 @@ fm_guard_stale_banner_evaluate() {
   fi
 
   FM_GUARD_EVAL_RUNG=$(fm_guard_stale_rung "$dur")
-  if [ "$FM_GUARD_MARKER_KEY" = "$key" ] && [ "$FM_GUARD_EVAL_RUNG" -le "$FM_GUARD_MARKER_RUNG" ]; then
+  if [ "$FM_GUARD_MARKER_KEY" = "$key" ] && [ "$unanchored" -eq 0 ] \
+    && [ "$FM_GUARD_EVAL_RUNG" -le "$FM_GUARD_MARKER_RUNG" ]; then
     FM_GUARD_EVAL_FULL=0
   else
     FM_GUARD_EVAL_FULL=1
