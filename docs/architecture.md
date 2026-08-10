@@ -29,6 +29,8 @@ No-change heartbeats are also benign.
 Every heartbeat tick, absorbed or surfaced, additionally runs `bin/fm-idle-sweep.sh`, which offers each of this home's finished tasks that still holds a worktree or runtime endpoint to `bin/fm-teardown.sh`.
 That sweep decides only which tasks to offer; teardown keeps sole ownership of the landed-work refusal, and the sweep never passes `--force`, so a task whose work has not landed is refused, backed off, and retried once its records move or its retry window elapses.
 Its outcomes go to the triage log rather than the wake stream, because reclaiming a task whose work already landed is not a captain-facing event, and each home's own watcher sweeps only that home's tasks.
+The backstop fleet-scan's verdict is read before that sweep runs, so a terminal status the per-wake path never surfaced still wakes firstmate on the very tick that reclaims the task and deletes its status record.
+One sweep-wide lock keeps two sweeps in a home from overlapping; a second one stands down quietly, and exclusion with a hand-run teardown of the same task stays with `bin/fm-teardown.sh`.
 Absorbed wakes advance their suppression markers, log to `state/.watch-triage.log`, and keep the watcher blocking without a queue record or LLM turn.
 After each drain, `fm-wake-drain.sh` runs the same liveness guard as the supervision scripts, so a lapsed watcher chain surfaces even on a turn that only drains and handles queued wakes.
 Routine watcher polling, supervision no-ops, elapsed waiting time, and absorbed benign wakes stay silent.

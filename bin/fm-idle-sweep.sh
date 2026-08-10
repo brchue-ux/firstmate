@@ -26,6 +26,23 @@
 # sweep existed. Attempting cleanup automatically is safe precisely because that
 # refusal already exists; the sweep exists to make the attempt, not the ruling.
 #
+# CONCURRENCY, AND EXACTLY WHAT IT DOES NOT COVER: because the watcher now starts
+# this sweep on a cadence rather than a human starting it, two of them can be in
+# flight at once - a slow one still running when the next heartbeat arrives, or a
+# hand-run one alongside the watcher's. A single sweep-wide lock
+# (state/.idle-sweep.lock, the same lock primitive and dead-holder handling the
+# watcher singleton and fm-spawn.sh use) makes that impossible: a run that finds
+# it held exits 0 in silence, since a sweep already running is not an error and
+# the watcher must never be made noisy or blocked by one.
+# That lock closes sweep-versus-sweep ONLY. It does NOT make this sweep exclusive
+# with a captain- or firstmate-initiated `fm-teardown.sh <id>` for the same task:
+# the two can still run at once, and if they do they can both pass teardown's
+# safety checks and both start reclaiming the same records. Closing that would
+# take a per-task lock inside fm-teardown.sh, which is deliberately out of scope
+# here. Neither can discard unlanded work - each runs teardown's full refusal -
+# so the exposure is a confusing half-torn-down task and duplicate output, not
+# lost work.
+#
 # Usage:
 #   fm-idle-sweep.sh [--dry-run] [--verbose] [--budget-secs <n>]
 #                    [--task-timeout-secs <n>] [--retry-secs <n>]
@@ -76,7 +93,8 @@
 #   "sweep: skipped: time budget exhausted after <n>s"
 #
 # Exit status:
-#   0  the sweep ran; individual tasks may have been skipped or refused
+#   0  the sweep ran; individual tasks may have been skipped or refused, or
+#      another sweep in this home already held the sweep-wide lock
 #   1  the arguments were invalid
 #   3  refused because this process looks like a no-mistakes gate agent
 #      (bin/fm-gate-refuse-lib.sh)
@@ -104,6 +122,10 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
+# Single-flight lock primitives (and their dead-holder recovery) have one owner:
+# bin/fm-wake-lib.sh, the same one the watcher singleton claims through.
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
 
 usage() {
   cat <<'EOF'
@@ -159,6 +181,32 @@ require_count "$RETRY_SECS" --retry-secs
 # own too; refusing here as well keeps the whole entrypoint out of that context
 # instead of surfacing a run of confusing per-task failures.
 fm_refuse_if_gate_agent
+
+# Scratch for one teardown's combined output; created once the sweep reaches the
+# loop, and removed alongside the lock on every exit path.
+ATTEMPT_OUT=
+SWEEP_LOCK="$STATE/.idle-sweep.lock"
+SWEEP_LOCK_HELD=0
+# shellcheck disable=SC2329 # Registered by the EXIT trap below.
+sweep_cleanup() {
+  [ -z "$ATTEMPT_OUT" ] || rm -f "$ATTEMPT_OUT"
+  if [ "$SWEEP_LOCK_HELD" -eq 1 ]; then
+    SWEEP_LOCK_HELD=0
+    fm_lock_release "$SWEEP_LOCK" || true
+  fi
+  return 0
+}
+trap sweep_cleanup EXIT
+trap 'exit 1' HUP INT TERM
+
+# Single-flight across this home's sweeps only; see CONCURRENCY in the header for
+# what that does and does not cover. Finding the lock held is the ordinary quiet
+# case - a sweep is already doing this work - so say nothing and succeed, because
+# the watcher calls this every heartbeat and must never be made noisy by it.
+if ! fm_lock_try_acquire "$SWEEP_LOCK"; then
+  exit 0
+fi
+SWEEP_LOCK_HELD=1
 
 TIMEOUT_CMD=
 command -v timeout >/dev/null 2>&1 && TIMEOUT_CMD=timeout
@@ -250,12 +298,11 @@ run_teardown() {  # <id> <output-file>
   fi
 }
 
-# Scratch for one teardown's combined output, removed on every exit path.
 ATTEMPT_OUT=$(mktemp "${TMPDIR:-/tmp}/fm-idle-sweep.XXXXXX") || {
+  ATTEMPT_OUT=
   echo "fm-idle-sweep.sh: cannot create scratch file" >&2
   exit 1
 }
-trap 'rm -f "$ATTEMPT_OUT"' EXIT
 
 for meta in "$STATE"/*.meta; do
   [ -e "$meta" ] || continue

@@ -667,12 +667,21 @@ heartbeat_scan_finds_actionable() {
 # is not a captain-facing event, and turning it into one would make routine
 # cleanup wake firstmate. Bounded and best-effort, so a sweep that fails or
 # overruns can never break the supervision cycle.
+#
+# --verbose is asked for so refusals arrive with their reason, but the routine
+# per-task "<id>: skipped: ..." lines are dropped here rather than logged: one
+# per in-flight task per heartbeat would evict the absorbed-wake records the
+# size-capped triage log exists to hold. The sweep-wide budget line is kept.
 idle_sweep_tick() {
   local out line
   out=$("$SCRIPT_DIR/fm-idle-sweep.sh" --verbose 2>&1) || true
   [ -n "$out" ] || return 0
   while IFS= read -r line; do
     [ -n "$line" ] || continue
+    case "$line" in
+      'sweep: skipped: '*) ;;
+      *': skipped: '*) continue ;;
+    esac
     triage_log "idle sweep: $line"
   done <<< "$out"
 }
@@ -1155,19 +1164,31 @@ EOF
   hb=$(( HEARTBEAT * (1 << streak) ))
   [ "$hb" -gt "$HEARTBEAT_MAX" ] && hb=$HEARTBEAT_MAX
   if [ "$(age_of "$STATE/.last-heartbeat")" -ge "$hb" ]; then
-    # Reclaim finished tasks first, before any branch below can wake() and exit
-    # the cycle, so the sweep is genuinely part of every heartbeat.
+    # Both verdicts are read BEFORE the sweep runs. A successful cleanup deletes
+    # the task's status record, which is the very evidence the fleet-scan reads,
+    # so a terminal status the per-wake path never surfaced would otherwise be
+    # reclaimed and absorbed in the same tick and never reach firstmate. The
+    # sweep still runs on EVERY heartbeat tick, surfaced or absorbed - a finished
+    # task emits no further wake of its own, so the absorbed tick is exactly when
+    # nothing else would notice it - and still contributes no wake reason of its
+    # own.
+    hb_afk=0
+    afk_present && hb_afk=1
+    hb_actionable=0
+    if [ "$hb_afk" -eq 0 ] && heartbeat_scan_finds_actionable; then
+      hb_actionable=1
+    fi
     idle_sweep_tick
     # Triage: in always-on mode a heartbeat is benign unless the cheap fleet-scan
-    # turns up a captain-relevant status the per-wake path missed. Absorb the
+    # turned up a captain-relevant status the per-wake path missed. Absorb the
     # no-change case (advance the schedule and back off exactly as wake() would,
     # without exiting); the away-mode daemon, when present, owns triage and wants
     # every heartbeat.
-    if afk_present; then
+    if [ "$hb_afk" -eq 1 ]; then
       fm_wake_append heartbeat heartbeat heartbeat || exit 1
       touch "$STATE/.last-heartbeat"
       wake "heartbeat"
-    elif heartbeat_scan_finds_actionable; then
+    elif [ "$hb_actionable" -eq 1 ]; then
       # Backstop: a captain-relevant status the per-wake path absorbed by mistake.
       # Enqueue first, then mark every captain-relevant status surfaced so the next
       # heartbeat does not re-fire them (enqueue-before-suppress preserved).

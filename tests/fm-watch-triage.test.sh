@@ -1680,6 +1680,54 @@ SH
   pass "every heartbeat attempts cleanup of a finished task, without waking firstmate to do it"
 }
 
+test_heartbeat_backstop_survives_a_sweep_of_the_same_task() {
+  local dir state fakebin out sig pid
+  dir=$(make_case heartbeat-sweep-backstop); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  # The same finished task as above, except its terminal status was NEVER
+  # surfaced (no .hb-surfaced-* marker), and this time the cleanup succeeds. With
+  # no window= recorded, the heartbeat backstop is the only path that can ever
+  # tell firstmate this task finished - and cleanup removes the very status
+  # record that backstop reads. Reclaiming it must therefore not swallow the
+  # wake: firstmate still has to hear about the task on the tick that reclaims it.
+  mkdir -p "$dir/wt"
+  fm_write_meta "$state/sweepwake.meta" \
+    "endpoint_task_id=sweepwake" \
+    "worktree=$dir/wt" \
+    "project=$dir/wt" \
+    "harness=claude" \
+    "kind=ship" \
+    "mode=no-mistakes"
+  printf 'done: PR https://example.test/pr/7 merged\n' > "$state/sweepwake.status"
+  sig=$(seen_sig "$state/sweepwake.status"); printf '%s' "$sig" > "$state/.seen-sweepwake_status"
+  # Stands in for a successful bin/fm-teardown.sh, which removes the task's
+  # records - the real behavior this ordering has to survive.
+  cat > "$fakebin/record-teardown" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$dir/teardown.calls"
+rm -f "$state/\$1.status" "$state/\$1.meta"
+exit 0
+SH
+  chmod +x "$fakebin/record-teardown"
+
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=1 \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_FAKE_CREW_STATE='state: done · source: status-log · done: PR merged' \
+    FM_IDLE_SWEEP_TEARDOWN_BIN="$fakebin/record-teardown" \
+    "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 60 \
+    || fail "the sweep swallowed the heartbeat backstop for a status firstmate was never told about: $(cat "$out")"
+  grep -Fx "heartbeat" "$out" >/dev/null \
+    || fail "the backstop did not exit with a heartbeat wake: $(cat "$out")"
+  [ -s "$state/.wake-queue" ] || fail "the backstop wake was not durably enqueued"
+  [ -s "$dir/teardown.calls" ] || fail "the same tick did not also attempt cleanup of the finished task"
+  [ ! -e "$state/sweepwake.status" ] \
+    || fail "the cleanup did not run to completion, so this proves nothing about the ordering"
+  pass "reclaiming a finished task never swallows the heartbeat backstop wake for it"
+}
+
 test_heartbeat_backstop_surfaces_unsurfaced_status() {
   local dir state fakebin out drain_out sig pid
   dir=$(make_case heartbeat-backstop); state="$dir/state"; fakebin="$dir/fakebin"
@@ -1831,6 +1879,7 @@ test_nonterminal_stale_repairs_missing_or_corrupt_timer
 test_triage_log_size_cap_accepts_spaced_wc_counts
 test_heartbeat_no_change_absorbed
 test_heartbeat_sweeps_a_finished_task_while_absorbing
+test_heartbeat_backstop_survives_a_sweep_of_the_same_task
 test_heartbeat_backstop_surfaces_unsurfaced_status
 test_beacon_stays_fresh_while_absorbing
 test_afk_present_reverts_watcher_to_one_shot

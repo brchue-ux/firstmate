@@ -22,6 +22,7 @@
 #   (i) status log moved after a refusal         -> offered again immediately
 #   (j) every invocation                         -> exactly the task id, no --force
 #   (k) --dry-run                                -> reports, invokes nothing
+#   (l) a sweep started while one is running     -> stands down quietly, exit 0
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -408,6 +409,47 @@ test_dry_run_changes_nothing() {
   pass "--dry-run reports the candidate and changes nothing"
 }
 
+test_second_sweep_does_not_overlap_the_first() {
+  local case_dir out rc pid i
+  case_dir=$(make_case single-flight)
+  write_meta "$case_dir"
+  install_recording_teardown "$case_dir"
+  wt_commit_file "$case_dir" fix.txt "the fix"
+  land_on_origin "$case_dir"
+  write_status "$case_dir" "done: PR https://example.test/pr/9 checks green"
+  # A cleanup that stays busy for a while, so the second sweep really does arrive
+  # while the first still has the task in hand - a slow sweep still running when
+  # the next heartbeat fires, or a hand-run sweep alongside the watcher's.
+  cat > "$case_dir/fakebin/record-teardown" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$case_dir/teardown.calls"
+sleep 3
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/record-teardown"
+
+  run_sweep_recording "$case_dir" --verbose > /dev/null 2>&1 &
+  pid=$!
+  i=0
+  while [ "$i" -lt 60 ]; do
+    [ -s "$case_dir/teardown.calls" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -s "$case_dir/teardown.calls" ] \
+    || { wait "$pid" 2>/dev/null || true; fail "single-flight: the first sweep never started a cleanup"; }
+
+  rc=0
+  out=$(run_sweep_recording "$case_dir" --verbose) || rc=$?
+  wait "$pid" 2>/dev/null || true
+
+  [ "$rc" -eq 0 ] || fail "single-flight: a sweep that found one already running failed with exit $rc"
+  [ -z "$out" ] || fail "single-flight: a sweep that found one already running was noisy: $out"
+  [ "$(teardown_call_count "$case_dir")" -eq 1 ] \
+    || fail "single-flight: two sweeps tore the same task down at once"
+  pass "a second sweep in the same home stands down quietly instead of overlapping the first"
+}
+
 test_quiet_by_default() {
   local case_dir out
   case_dir=$(make_case quiet-default)
@@ -435,4 +477,5 @@ test_new_evidence_reopens_a_backed_off_task
 test_elapsed_retry_window_reopens_a_backed_off_task
 test_teardown_is_never_forced
 test_dry_run_changes_nothing
+test_second_sweep_does_not_overlap_the_first
 test_quiet_by_default

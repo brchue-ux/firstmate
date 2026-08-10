@@ -109,7 +109,7 @@ state/               volatile runtime signals; gitignored
   x-poll.error x-poll.claim-error  generated X-mode relay and offer-claim diagnostic dedupe markers
   .wake-queue        durable queued wakes: epoch<TAB>seq<TAB>kind<TAB>key<TAB>payload
   .afk               durable away-mode flag; present = sub-supervisor may inject escalations (set by /afk, cleared on user return)
-  .watch.lock .wake-queue.lock watcher singleton and queue serialization locks
+  .watch.lock .wake-queue.lock .idle-sweep.lock   watcher singleton, queue serialization, and heartbeat-sweep single-flight locks
   .claude-autoarm.lock .claude-autoarm-epoch .turnend-claude-blocks   Claude Stop auto-arm single-flight, epoch, and guard-budget records; never touch
   .hash-* .count-* .stale-* .stale-since-* .missing-* .paused-* .wedge-escalations-* .seen-* .hb-surfaced-* .idle-sweep-* .last-* .heartbeat-streak   watcher internals; never touch
   .watch-triage.log  watcher's absorbed-wake debug log (size-capped); never relied on, safe to delete
@@ -356,7 +356,7 @@ Handle actionable wakes as follows:
 3. For `check:`, act on the named poll result, including merges and X-mode events.
 4. For `heartbeat:`, review the whole fleet from the structured fleet view, reconcile suspicious tasks and PR state, update the backlog, and never report an unchanged fleet as progress.
 
-Every heartbeat also attempts cleanup of this home's finished tasks automatically through `bin/fm-idle-sweep.sh`, so a task reporting `done:` or `failed:` that still holds a worktree or endpoint is one whose work has not landed yet.
+Every heartbeat also attempts cleanup of this home's finished tasks automatically through `bin/fm-idle-sweep.sh`, so a task reporting `done:` or `failed:` that still holds a worktree or endpoint is one the sweep has not yet been able to reclaim, most often because its work has not landed.
 When any wake reports a merged PR for a project cloned in this home, refresh that clone through the guarded fleet-sync path.
 When X-linked work reaches a milestone or terminal state, load `fmx-respond`; before terminal teardown, always post the final completion follow-up so the link clears even if earlier follow-ups were spent.
 
