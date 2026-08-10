@@ -52,6 +52,12 @@
 #                          running a check or removing poll artifacts
 #   heartbeat              fleet-scan backstop found an unsurfaced captain-relevant
 #                          status, unless afk is active
+#   heartbeat: reclaimed <id>[, <id>...]
+#                          the heartbeat's idle sweep actually reclaimed those
+#                          finished tasks; handled as an ordinary heartbeat
+# Every heartbeat tick also runs bin/fm-idle-sweep.sh to reclaim finished tasks
+# that still hold a pane or worktree. Only a completed reclaim reaches this
+# reason; skips and refusals stay in the triage log. See idle_sweep_tick.
 # For normal supervision, resume the session-start primary-harness protocol
 # after each printed reason. Direct duplicate invocations of this script still
 # no-op through the watcher singleton lock.
@@ -652,6 +658,45 @@ heartbeat_scan_finds_actionable() {
   return 1
 }
 
+# Heartbeat-cadence cleanup of finished tasks that are still holding a pane or a
+# worktree. bin/fm-idle-sweep.sh owns every eligibility decision, and
+# bin/fm-teardown.sh owns the landed-work refusal beneath it; the watcher
+# supplies only the cadence.
+#
+# It runs on EVERY heartbeat tick, including the absorbed ones, because a
+# finished task produces no further wake of its own - the absorbed tick is
+# exactly when nothing else is going to notice it. Bounded and best-effort, so a
+# sweep that fails or overruns can never break the supervision cycle.
+#
+# Only a completed reclaim reaches the wake stream, through HB_RECLAIMED: the
+# task's records are gone afterwards, so firstmate has to hear about it once to
+# move the backlog item to done and re-evaluate work that was blocked on it. A
+# tick that only skipped or refused stays exactly as quiet as an ordinary
+# absorbed heartbeat - routine cleanup attempts are not captain-facing, and
+# surfacing them would wake firstmate on every tick with an in-flight task.
+#
+# --verbose is asked for so refusals arrive with their reason, but the routine
+# per-task "<id>: skipped: ..." lines are dropped here rather than logged: one
+# per in-flight task per heartbeat would evict the absorbed-wake records the
+# size-capped triage log exists to hold. The sweep-wide budget line is kept.
+HB_RECLAIMED=
+idle_sweep_tick() {
+  local out line
+  HB_RECLAIMED=
+  out=$("$SCRIPT_DIR/fm-idle-sweep.sh" --verbose 2>&1) || true
+  [ -n "$out" ] || return 0
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    case "$line" in
+      'sweep: skipped: '*) ;;
+      *': skipped: '*) continue ;;
+      *': cleaned up')
+        HB_RECLAIMED="${HB_RECLAIMED:+$HB_RECLAIMED, }${line%': cleaned up'}" ;;
+    esac
+    triage_log "idle sweep: $line"
+  done <<< "$out"
+}
+
 # event_wait_or_sleep: the terminal wait of each supervision cycle. For a home
 # with push-capable windows (herdr), it replaces the blind `sleep POLL` with a
 # bounded wait on the backend's native transition stream, so a crew going
@@ -1130,23 +1175,42 @@ EOF
   hb=$(( HEARTBEAT * (1 << streak) ))
   [ "$hb" -gt "$HEARTBEAT_MAX" ] && hb=$HEARTBEAT_MAX
   if [ "$(age_of "$STATE/.last-heartbeat")" -ge "$hb" ]; then
+    # Both verdicts are read BEFORE the sweep runs. A successful cleanup deletes
+    # the task's status record, which is the very evidence the fleet-scan reads,
+    # so a terminal status the per-wake path never surfaced would otherwise be
+    # reclaimed and absorbed in the same tick and never reach firstmate. The
+    # sweep still runs on EVERY heartbeat tick, surfaced or absorbed - a finished
+    # task emits no further wake of its own, so the absorbed tick is exactly when
+    # nothing else would notice it.
+    hb_afk=0
+    afk_present && hb_afk=1
+    hb_actionable=0
+    if [ "$hb_afk" -eq 0 ] && heartbeat_scan_finds_actionable; then
+      hb_actionable=1
+    fi
+    idle_sweep_tick
+    # A reclaim is a third trigger for this one heartbeat wake, not a wake of its
+    # own: the reclaimed task's records no longer exist, so firstmate has to hear
+    # about it once to record completion and re-evaluate work it was blocking,
+    # and section 8's heartbeat handling already covers exactly that. It composes
+    # with the two branches below so a tick that reclaims AND has an afk or
+    # backstop wake still enqueues a single durable record.
+    hb_reason=heartbeat
+    [ -n "$HB_RECLAIMED" ] && hb_reason="heartbeat: reclaimed $HB_RECLAIMED"
     # Triage: in always-on mode a heartbeat is benign unless the cheap fleet-scan
-    # turns up a captain-relevant status the per-wake path missed. Absorb the
+    # turned up a captain-relevant status the per-wake path missed. Absorb the
     # no-change case (advance the schedule and back off exactly as wake() would,
     # without exiting); the away-mode daemon, when present, owns triage and wants
     # every heartbeat.
-    if afk_present; then
-      fm_wake_append heartbeat heartbeat heartbeat || exit 1
+    if [ "$hb_afk" -eq 1 ] || [ "$hb_actionable" -eq 1 ] || [ -n "$HB_RECLAIMED" ]; then
+      # Backstop, when hb_actionable: a captain-relevant status the per-wake path
+      # absorbed by mistake. Enqueue first, then mark every captain-relevant
+      # status surfaced so the next heartbeat does not re-fire them
+      # (enqueue-before-suppress preserved).
+      fm_wake_append heartbeat heartbeat "$hb_reason" || exit 1
       touch "$STATE/.last-heartbeat"
-      wake "heartbeat"
-    elif heartbeat_scan_finds_actionable; then
-      # Backstop: a captain-relevant status the per-wake path absorbed by mistake.
-      # Enqueue first, then mark every captain-relevant status surfaced so the next
-      # heartbeat does not re-fire them (enqueue-before-suppress preserved).
-      fm_wake_append heartbeat heartbeat heartbeat || exit 1
-      touch "$STATE/.last-heartbeat"
-      mark_all_captain_relevant_surfaced
-      wake "heartbeat"
+      [ "$hb_actionable" -eq 1 ] && mark_all_captain_relevant_surfaced
+      wake "$hb_reason"
     else
       touch "$STATE/.last-heartbeat"
       echo $(( $(cat "$STATE/.heartbeat-streak" 2>/dev/null || echo 0) + 1 )) > "$STATE/.heartbeat-streak"
