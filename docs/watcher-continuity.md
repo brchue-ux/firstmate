@@ -48,7 +48,7 @@ A claim held by this arm's own launcher is deliberately excluded: it says nothin
 This is what the Claude ordering above requires - the successor arms at the next Stop, so an attached arm that waited for one would report a certainty, not a race.
 That quiet clean-empty exit is a confirmed success on the Claude Stop-hook path specifically, which is the path that reads the arm's exit and output directly.
 Pi's and OpenCode's close handlers still classify a clean empty close of an arm child as a typed continuity failure, so an explained attached cycle is still reported as a supervision failure on those two primaries.
-That classification is unchanged from before this change rather than something introduced by it, and aligning those two adapters with this contract is separate work.
+That adapter-side classification is older than this arm-layer rule, and aligning those two adapters with it is separate work.
 
 `--restart` refuses to kill a watcher it can verify as healthy and attaches to it instead, reporting `watcher: restart declined pid=<N>`.
 Killing a healthy watcher costs a live supervision cycle and makes the arm that owned it report a typed failure, so an unconditional restart aimed at a working watcher manufactures the alarm it was meant to repair.
