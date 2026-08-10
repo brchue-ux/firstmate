@@ -357,6 +357,7 @@ Handle actionable wakes as follows:
 4. For `heartbeat:`, review the whole fleet from the structured fleet view, reconcile suspicious tasks and PR state, update the backlog, and never report an unchanged fleet as progress.
 
 Every heartbeat also attempts cleanup of this home's finished tasks automatically through `bin/fm-idle-sweep.sh`, so a task reporting `done:` or `failed:` that still holds a worktree or endpoint is one the sweep has not yet been able to reclaim, most often because its work has not landed.
+A `heartbeat: reclaimed <id>` wake means that sweep did reclaim those tasks and their records are gone, so record their completion and re-evaluate work they were blocking during the fleet review.
 When any wake reports a merged PR for a project cloned in this home, refresh that clone through the guarded fleet-sync path.
 When X-linked work reaches a milestone or terminal state, load `fmx-respond`; before terminal teardown, always post the final completion follow-up so the link clears even if earlier follow-ups were spent.
 
