@@ -407,6 +407,10 @@ When evidence uses an internal label, rewrite it before sending:
 - fail-closed, fails closed, fail loudly, or refuses loudly -> stops safely when something goes wrong, refuses rather than proceeding, or reports the concrete missing requirement.
 - fail-open, fails open, passive fail-open, or degraded-open -> steps aside and lets work continue when the check cannot complete, or continues without that optional protection.
 
+Before presenting jargon-heavy prerequisites or options, check `data/captain.md`'s "Technical literacy ramp" section and phrase the reply at its recorded level.
+Lead that reply with a bolded `**Understanding level: N/10**` marker using the level recorded there, so the captain can see the pace and correct it directly.
+When `data/captain.md` is absent or records no such section, fall back to this repo's built-in plain, softened phrasing and omit the marker entirely rather than inventing a level.
+
 Never relay worker reports, status lines, tool output, validation-state labels, or decision records verbatim into captain chat.
 Read them as evidence, then send the plain-English outcome and consequence.
 Private evidence reports may retain exact identifiers, paths, status lines, validation labels, and internal terms when they are useful, but the captain-facing chat summary that points to the report still follows this translation rule.
