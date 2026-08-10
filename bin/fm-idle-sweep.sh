@@ -33,7 +33,10 @@
 # (state/.idle-sweep.lock, the same lock primitive and dead-holder handling the
 # watcher singleton and fm-spawn.sh use) makes that impossible: a run that finds
 # it held exits 0 in silence, since a sweep already running is not an error and
-# the watcher must never be made noisy or blocked by one.
+# the watcher must never be made noisy or blocked by one. --dry-run is exempt
+# from that lock, because it changes nothing at all - no teardown, no backoff
+# record, not even the orphan-marker cleanup below - so an operator can always
+# get an answer out of it, including while the watcher's sweep is mid-flight.
 # That lock closes sweep-versus-sweep ONLY. It does NOT make this sweep exclusive
 # with a captain- or firstmate-initiated `fm-teardown.sh <id>` for the same task:
 # the two can still run at once, and if they do they can both pass teardown's
@@ -94,7 +97,8 @@
 #
 # Exit status:
 #   0  the sweep ran; individual tasks may have been skipped or refused, or
-#      another sweep in this home already held the sweep-wide lock
+#      another sweep in this home already held the sweep-wide lock (--dry-run
+#      never stands down that way)
 #   1  the arguments were invalid
 #   3  refused because this process looks like a no-mistakes gate agent
 #      (bin/fm-gate-refuse-lib.sh)
@@ -203,10 +207,12 @@ trap 'exit 1' HUP INT TERM
 # what that does and does not cover. Finding the lock held is the ordinary quiet
 # case - a sweep is already doing this work - so say nothing and succeed, because
 # the watcher calls this every heartbeat and must never be made noisy by it.
-if ! fm_lock_try_acquire "$SWEEP_LOCK"; then
-  exit 0
+# --dry-run has nothing to exclude, so it never takes the lock and stays
+# answerable while a real sweep runs.
+if [ "$DRY_RUN" -eq 0 ]; then
+  fm_lock_try_acquire "$SWEEP_LOCK" || exit 0
+  SWEEP_LOCK_HELD=1
 fi
-SWEEP_LOCK_HELD=1
 
 TIMEOUT_CMD=
 command -v timeout >/dev/null 2>&1 && TIMEOUT_CMD=timeout
@@ -368,11 +374,14 @@ done
 
 # Drop backoff records for tasks that are gone, so a home that has run for months
 # does not accumulate one dead marker per task ever swept or torn down by hand.
-for marker in "$STATE"/.idle-sweep-*; do
-  [ -f "$marker" ] || continue
-  marker_id=$(basename "$marker")
-  marker_id=${marker_id#.idle-sweep-}
-  [ -e "$STATE/$marker_id.meta" ] || rm -f "$marker"
-done
+# Skipped under --dry-run, which reports and changes nothing.
+if [ "$DRY_RUN" -eq 0 ]; then
+  for marker in "$STATE"/.idle-sweep-*; do
+    [ -f "$marker" ] || continue
+    marker_id=$(basename "$marker")
+    marker_id=${marker_id#.idle-sweep-}
+    [ -e "$STATE/$marker_id.meta" ] || rm -f "$marker"
+  done
+fi
 
 exit 0

@@ -23,6 +23,7 @@
 #   (j) every invocation                         -> exactly the task id, no --force
 #   (k) --dry-run                                -> reports, invokes nothing
 #   (l) a sweep started while one is running     -> stands down quietly, exit 0
+#   (m) --dry-run started while one is running   -> still reports, still inert
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -450,6 +451,48 @@ SH
   pass "a second sweep in the same home stands down quietly instead of overlapping the first"
 }
 
+test_dry_run_still_answers_while_a_sweep_holds_the_lock() {
+  local case_dir out rc pid i
+  case_dir=$(make_case dry-run-unblocked)
+  write_meta "$case_dir"
+  install_recording_teardown "$case_dir"
+  wt_commit_file "$case_dir" fix.txt "the fix"
+  land_on_origin "$case_dir"
+  write_status "$case_dir" "done: PR https://example.test/pr/9 checks green"
+  cat > "$case_dir/fakebin/record-teardown" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$case_dir/teardown.calls"
+sleep 3
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/record-teardown"
+
+  run_sweep_recording "$case_dir" --verbose > /dev/null 2>&1 &
+  pid=$!
+  i=0
+  while [ "$i" -lt 60 ]; do
+    [ -s "$case_dir/teardown.calls" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -s "$case_dir/teardown.calls" ] \
+    || { wait "$pid" 2>/dev/null || true; fail "dry-run-unblocked: the holding sweep never started a cleanup"; }
+
+  # --retry-secs 0 so the holding sweep's own backoff record is not what keeps
+  # this quiet; the only thing that could is the lock it is holding.
+  rc=0
+  out=$(run_sweep_recording "$case_dir" --dry-run --retry-secs 0 --verbose) || rc=$?
+  wait "$pid" 2>/dev/null || true
+
+  [ "$rc" -eq 0 ] || fail "dry-run-unblocked: --dry-run failed with exit $rc while a sweep was running"
+  assert_contains "$out" "$TASK: would clean up" \
+    "dry-run-unblocked: --dry-run went silent instead of reporting its candidate"
+  [ "$(teardown_call_count "$case_dir")" -eq 1 ] \
+    || fail "dry-run-unblocked: --dry-run invoked cleanup of its own"
+  assert_absent "$case_dir/state/.idle-sweep-$TASK" "dry-run-unblocked: --dry-run wrote a backoff record"
+  pass "--dry-run still answers, and still changes nothing, while a real sweep is running"
+}
+
 test_quiet_by_default() {
   local case_dir out
   case_dir=$(make_case quiet-default)
@@ -478,4 +521,5 @@ test_elapsed_retry_window_reopens_a_backed_off_task
 test_teardown_is_never_forced
 test_dry_run_changes_nothing
 test_second_sweep_does_not_overlap_the_first
+test_dry_run_still_answers_while_a_sweep_holds_the_lock
 test_quiet_by_default
