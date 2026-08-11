@@ -13,6 +13,7 @@
 #                 "FLEET_SYNC: <repo>: skipped|recovered|STUCK: <detail>",
 #                 "PR_CHECK_MIGRATION: <private remediation>",
 #                 "SCRATCH_SWEEP: <name|temp root>: skipped: <reason>",
+#                 "TMP_USAGE: <temp root>: warn|high|critical|unknown: <detail>",
 #                 "TANGLE: <remediation>",
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
 #                 "NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>",
@@ -85,6 +86,11 @@
 #          matching, age, and in-use rules. Successful reclamation prints one
 #          BOOTSTRAP_INFO count; a SCRATCH_SWEEP line means a stale directory was
 #          deliberately left in place and says why. An empty sweep is silent.
+#          The temp-usage check then reports how full that shared temp root
+#          still is once reclamation is done, because a near-full temp root makes
+#          later commands fail silently rather than visibly; bin/fm-tmp-usage.sh
+#          owns the measurement and thresholds, and a healthy root is silent. It
+#          only measures, so it runs in detect-only sessions too.
 #          Fleet sync fetches, fast-forwards safe default-branch states, reports
 #          recovered and STUCK clone drift, and prunes gone local branches; it is
 #          bounded by FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT when it is a non-empty
@@ -206,6 +212,22 @@ scratch_sweep() {
   if [ "$removed" -gt 0 ]; then
     echo "BOOTSTRAP_INFO: reclaimed $removed stale scratch dir(s) from ${FM_TMP_SWEEP_ROOT:-${TMPDIR:-/tmp}}"
   fi
+}
+
+tmp_usage_check() {
+  # Read-only companion to scratch_sweep, so a session that starts on a temp
+  # root already close to full is told before it dispatches anything, instead of
+  # discovering it as commands failing with no output. Deliberately runs AFTER
+  # the sweep so the reported number is what remains once this fleet's own
+  # reclaimable scratch is gone: reporting pre-sweep pressure would send the
+  # captain after space bootstrap was about to free anyway. Detect-only sessions
+  # still run it - measuring writes nothing, and a full temp root is just as
+  # dangerous to a session that holds no lock.
+  [ -x "$FM_ROOT/bin/fm-tmp-usage.sh" ] || return 0
+  local out
+  out=$("$FM_ROOT/bin/fm-tmp-usage.sh" 2>/dev/null || true)
+  [ -n "$out" ] || return 0
+  echo "TMP_USAGE: $out"
 }
 
 fleet_sync() {
@@ -1006,6 +1028,9 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   # write into has room before they need it.
   scratch_sweep
 fi
+# Report what is left in the temp root after any reclamation above. Not gated on
+# the lock: it only measures.
+tmp_usage_check
 
 if [ "$BACKEND_VALID" -eq 0 ]; then
   echo "BACKEND_INVALID: $BACKEND (known: $FM_BACKEND_KNOWN)"

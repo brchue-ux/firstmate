@@ -5,6 +5,11 @@
 # First, always warn if the firstmate primary checkout (FM_ROOT) is on a named
 # non-default branch, because that means firstmate-on-itself work landed in the
 # primary instead of an isolated worktree.
+# Second, always warn when the shared temp filesystem is filling up, because a
+# full temp root makes this session's own shell fail silently long before
+# anything names free space as the cause. bin/fm-tmp-usage.sh owns that
+# measurement and its severity; this file owns only the loudness, escalating
+# from one line to a re-claimed banner at each higher severity.
 # Then, if any task is in flight (a state/<id>.meta exists) and the watcher's
 # liveness beacon (state/.last-watcher-beat, touched every poll cycle) is
 # missing or older than FM_GUARD_GRACE seconds, prints a loud, clearly delimited
@@ -23,8 +28,10 @@
 # deduplicated hardest.
 #
 # Episode state lives only under state/.guard-watcher-stale-banner (volatile,
-# bounded, one line: episode key, episode start, claimed rung). Independent
-# alarms (queued wakes, worktree tangle) are never suppressed by that dedup.
+# bounded, one line: episode key, episode start, claimed rung), and the
+# temp-pressure episode under state/.guard-tmp-usage-banner (one line: the
+# claimed severity rung). Independent alarms (queued wakes, worktree tangle,
+# temp pressure) are never suppressed by another alarm's dedup.
 # Normal wake handling (watcher briefly down between a wake and the next
 # supervision resume) stays inside the grace window and stays silent. Always
 # exits 0: the guard warns, it never blocks.
@@ -261,6 +268,92 @@ if [ -n "$tangle_branch" ]; then
     fi
     printf '●%s\n' "$trule"
   } >&2
+fi
+
+# Shared-temp-filesystem alarm, also independent of in-flight tasks and checked
+# before the watcher alarm's early exit: /tmp is typically a small RAM-backed
+# filesystem shared by every home on the host, and when it fills, this session's
+# own shell starts failing silently with no output - which reads as a broken
+# agent rather than a full filesystem. bin/fm-tmp-usage.sh owns the measurement
+# and the severity; this owns only how loud each severity is.
+#
+# Loudness is keyed on SEVERITY, for the same reason the watcher banner keys on
+# outage duration: a filesystem that keeps filling must get LOUDER, so each
+# higher severity re-claims the full banner and the state that most needs
+# attention is never the one deduplicated hardest. A drop back to healthy clears
+# the episode so a later climb re-arms.
+#
+# The guard never reclaims anything itself. bin/fm-tmp-sweep.sh is the single
+# owner of which scratch is safe to remove, session start already runs it, and
+# it deliberately refuses everything that is not recognizably this fleet's own
+# orphaned scratch. Deleting on this path would both duplicate that destructive
+# predicate on a hot path and risk the consumers that dominated the incident -
+# live session scratchpads mid-build - so a human decides about those.
+TMP_USAGE_MARKER="$STATE/.guard-tmp-usage-banner"
+
+# Recorded severity rung for the current episode, 0 when none is recorded.
+fm_guard_tmp_marker_rung() {
+  local recorded
+  recorded=$(cat "$TMP_USAGE_MARKER" 2>/dev/null || true)
+  recorded=${recorded%%$'\n'*}
+  case "$recorded" in ''|*[!0-9]*) recorded=0 ;; esac
+  printf '%s' "$recorded"
+}
+
+if [ -x "$SCRIPT_DIR/fm-tmp-usage.sh" ]; then
+  tmp_line=$("$SCRIPT_DIR/fm-tmp-usage.sh" 2>/dev/null)
+  tmp_rc=$?
+  case "$tmp_rc" in
+    10) tmp_rung=1 ;;
+    11) tmp_rung=2 ;;
+    12) tmp_rung=3 ;;
+    *) tmp_rung=0 ;;
+  esac
+
+  if [ "$tmp_rc" -eq 3 ]; then
+    # Unmeasurable is not healthy: staying silent here would be indistinguishable
+    # from a healthy filesystem, which is exactly how the condition went unnoticed.
+    printf 'WARNING: temp filesystem check could not measure the temp root (%s) - treat free space as unknown, not healthy.\n' \
+      "${tmp_line:-no detail}" >&2
+  elif [ "$tmp_rung" -eq 0 ]; then
+    [ "$READ_ONLY" -eq 1 ] || rm -f "$TMP_USAGE_MARKER" 2>/dev/null || true
+  elif [ "$tmp_rung" -eq 1 ]; then
+    printf 'WARNING: temp filesystem filling up (%s) - reclaim orphaned scratch with bin/fm-tmp-sweep.sh before fanning out heavy work.\n' \
+      "$tmp_line" >&2
+  else
+    tmp_claimed=$(fm_guard_tmp_marker_rung)
+    if [ "$tmp_rung" -gt "$tmp_claimed" ]; then
+      # Bounded write: one line, overwritten, never appended across episodes.
+      # A read-only session records nothing and therefore stays at full volume,
+      # which is the safe direction to err.
+      [ "$READ_ONLY" -eq 1 ] || printf '%s\n' "$tmp_rung" > "$TMP_USAGE_MARKER" 2>/dev/null || true
+      urule='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
+      {
+        printf '●%s\n' "$urule"
+        if [ "$tmp_rung" -ge 3 ]; then
+          printf '●  TEMP FILESYSTEM CRITICALLY FULL - COMMANDS ARE ABOUT TO FAIL SILENTLY\n'
+        else
+          printf '●  TEMP FILESYSTEM NEARLY FULL\n'
+        fi
+        printf '●  %s\n' "$tmp_line"
+        printf '●  This is the small shared filesystem every home on this host writes scratch into.\n'
+        printf '●  When it fills, commands do not error clearly - they return empty failures, which looks like a broken agent.\n'
+        if [ "$READ_ONLY" -eq 1 ]; then
+          printf '●  This read-only session should report the pressure, not reclaim space.\n'
+        else
+          printf "●  Reclaim this fleet's own orphaned scratch first:\n"
+          printf '●      %s/bin/fm-tmp-sweep.sh\n' "$FM_ROOT"
+          printf '●  Whatever that refuses is NOT fleet scratch (live session scratchpads mid-build); a human decides on those - never delete them automatically.\n'
+          printf '●  Do not resize the temp filesystem to make this go away; it spends the same RAM the memory ceiling protects.\n'
+        fi
+        printf '●  %s\n' "$CONTINUE_LINE"
+        printf '●%s\n' "$urule"
+      } >&2
+    else
+      printf 'WARNING: temp filesystem still under pressure (%s) - full banner already printed at this severity; it re-prints if it climbs further.\n' \
+        "$tmp_line" >&2
+    fi
+  fi
 fi
 
 # Compute in-flight count and watcher-beacon freshness via the shared
