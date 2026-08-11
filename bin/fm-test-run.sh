@@ -976,6 +976,13 @@ families_for_changed_path() {
     bin/fm-bearings-snapshot.sh|bin/fm-fleet-snapshot.sh|bin/fm-fleet-view.sh)
       printf '%s\n' snapshot-bearings
       ;;
+    bin/fm-backlog-parse-lib.sh)
+      # Sourced by fm-fleet-snapshot.sh and fm-fleet-work-index.sh. Tests drive
+      # those executables and never name the library, so the bin/* basename scan
+      # below cannot reach it; map it to its consumers' suites explicitly.
+      printf '%s\n' snapshot-bearings
+      printf '%s\n' "__script__:fm-fleet-work-index.test.sh"
+      ;;
     bin/fm-install-herdr.sh|bin/fm-install-treehouse.sh|bin/fm-herdr-ci-cleanup.sh)
       printf '%s\n' pure-contract-unit
       # Pin or cleanup changes also select the real-Herdr family so the required
