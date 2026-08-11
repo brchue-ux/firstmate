@@ -163,8 +163,20 @@ fi
 df_line=$(printf '%s\n' "$df_out" | awk 'NR > 1 && NF >= 5 { last = $0 } END { print last }')
 [ -n "$df_line" ] || unknown "df produced no usable line for $ROOT_DIR"
 
-# shellcheck disable=SC2034 # fs/mount are named for readability of the field order.
-read -r fs total_kb used_kb avail_kb capacity _rest <<<"$df_line"
+# Split positionally rather than with a here-string. Bash only stopped
+# materializing here-strings as a temp file under $TMPDIR in 5.1, and this repo
+# is also run under the system bash, which on macOS is 3.2 - so a here-string
+# here would silently give the check the one dependency it must never have: a
+# writable temp root. Globbing is off for the split so a df field can never be
+# expanded against the filesystem.
+set -f
+# shellcheck disable=SC2086 # deliberate word split of df -P's positional fields.
+set -- $df_line
+set +f
+total_kb=${2:-}
+used_kb=${3:-}
+avail_kb=${4:-}
+capacity=${5:-}
 
 case "$total_kb" in ''|*[!0-9]*) unknown "df reported no size for $ROOT_DIR" ;; esac
 case "$avail_kb" in ''|*[!0-9]*) avail_kb= ;; esac

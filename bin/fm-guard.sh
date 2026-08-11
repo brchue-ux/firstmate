@@ -280,8 +280,12 @@ fi
 # Loudness is keyed on SEVERITY, for the same reason the watcher banner keys on
 # outage duration: a filesystem that keeps filling must get LOUDER, so each
 # higher severity re-claims the full banner and the state that most needs
-# attention is never the one deduplicated hardest. A drop back to healthy clears
-# the episode so a later climb re-arms.
+# attention is never the one deduplicated hardest. Any DROP in severity re-arms
+# by lowering the recorded rung to the measured one, not only a full return to
+# healthy: after a sweep frees some space the usual path is a partial drop and
+# then a refill, and a real re-climb to critical going quiet is exactly the
+# failure this check exists to prevent. Occasional re-banners while usage flaps
+# around a threshold are the accepted cost of that.
 #
 # The guard never reclaims anything itself. bin/fm-tmp-sweep.sh is the single
 # owner of which scratch is safe to remove, session start already runs it, and
@@ -300,33 +304,53 @@ fm_guard_tmp_marker_rung() {
   printf '%s' "$recorded"
 }
 
+# Record (or clear) the episode's claimed rung. A read-only session never
+# writes the marker; it still READS one another session wrote, so it can be
+# suppressed to the reminder by an episode it did not claim.
+fm_guard_tmp_record_rung() {  # <rung>
+  [ "$READ_ONLY" -eq 1 ] && return 0
+  if [ "$1" -eq 0 ]; then
+    rm -f "$TMP_USAGE_MARKER" 2>/dev/null || true
+  else
+    # Bounded write: one line, overwritten, never appended across episodes.
+    printf '%s\n' "$1" > "$TMP_USAGE_MARKER" 2>/dev/null || true
+  fi
+  return 0
+}
+
 if [ -x "$SCRIPT_DIR/fm-tmp-usage.sh" ]; then
   tmp_line=$("$SCRIPT_DIR/fm-tmp-usage.sh" 2>/dev/null)
   tmp_rc=$?
+  # Only the statuses the check documents are a measurement. Every other status
+  # - a `die` on bad thresholds, a crash, a signal - is unmeasurable, not
+  # healthy: mapping it to rung 0 would print nothing AND drop the episode
+  # marker, silently de-escalating an outage in progress. That indistinguishable
+  # silence is the exact failure this alarm exists to prevent.
   case "$tmp_rc" in
+    0) tmp_rung=0 ;;
     10) tmp_rung=1 ;;
     11) tmp_rung=2 ;;
     12) tmp_rung=3 ;;
-    *) tmp_rung=0 ;;
+    *) tmp_rung=-1 ;;
   esac
 
-  if [ "$tmp_rc" -eq 3 ]; then
-    # Unmeasurable is not healthy: staying silent here would be indistinguishable
-    # from a healthy filesystem, which is exactly how the condition went unnoticed.
+  if [ "$tmp_rung" -lt 0 ]; then
     printf 'WARNING: temp filesystem check could not measure the temp root (%s) - treat free space as unknown, not healthy.\n' \
-      "${tmp_line:-no detail}" >&2
-  elif [ "$tmp_rung" -eq 0 ]; then
-    [ "$READ_ONLY" -eq 1 ] || rm -f "$TMP_USAGE_MARKER" 2>/dev/null || true
-  elif [ "$tmp_rung" -eq 1 ]; then
-    printf 'WARNING: temp filesystem filling up (%s) - reclaim orphaned scratch with bin/fm-tmp-sweep.sh before fanning out heavy work.\n' \
-      "$tmp_line" >&2
+      "${tmp_line:-check exited $tmp_rc with no detail}" >&2
   else
     tmp_claimed=$(fm_guard_tmp_marker_rung)
-    if [ "$tmp_rung" -gt "$tmp_claimed" ]; then
-      # Bounded write: one line, overwritten, never appended across episodes.
-      # A read-only session records nothing and therefore stays at full volume,
-      # which is the safe direction to err.
-      [ "$READ_ONLY" -eq 1 ] || printf '%s\n' "$tmp_rung" > "$TMP_USAGE_MARKER" 2>/dev/null || true
+    if [ "$tmp_rung" -lt "$tmp_claimed" ]; then
+      fm_guard_tmp_record_rung "$tmp_rung"
+      tmp_claimed=$tmp_rung
+    fi
+
+    if [ "$tmp_rung" -eq 0 ]; then
+      : # Measured and healthy: silence here means measured, never unchecked.
+    elif [ "$tmp_rung" -eq 1 ]; then
+      printf 'WARNING: temp filesystem filling up (%s) - reclaim orphaned scratch with bin/fm-tmp-sweep.sh before fanning out heavy work.\n' \
+        "$tmp_line" >&2
+    elif [ "$tmp_rung" -gt "$tmp_claimed" ]; then
+      fm_guard_tmp_record_rung "$tmp_rung"
       urule='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
       {
         printf '●%s\n' "$urule"
@@ -350,7 +374,7 @@ if [ -x "$SCRIPT_DIR/fm-tmp-usage.sh" ]; then
         printf '●%s\n' "$urule"
       } >&2
     else
-      printf 'WARNING: temp filesystem still under pressure (%s) - full banner already printed at this severity; it re-prints if it climbs further.\n' \
+      printf 'WARNING: temp filesystem still under pressure (%s) - full banner already printed at this severity; it re-prints on any climb above it, including a climb back after the pressure eases.\n' \
         "$tmp_line" >&2
     fi
   fi

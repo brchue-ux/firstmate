@@ -224,8 +224,16 @@ tmp_usage_check() {
   # still run it - measuring writes nothing, and a full temp root is just as
   # dangerous to a session that holds no lock.
   [ -x "$FM_ROOT/bin/fm-tmp-usage.sh" ] || return 0
-  local out
-  out=$("$FM_ROOT/bin/fm-tmp-usage.sh" 2>/dev/null || true)
+  local out rc=0
+  out=$("$FM_ROOT/bin/fm-tmp-usage.sh" 2>/dev/null) || rc=$?
+  # Only the statuses the check documents are a measurement. Anything else - a
+  # `die` on bad thresholds, a crash, a signal - has said nothing on the stdout
+  # this reads, and silence in this digest means measured-and-healthy, so it is
+  # reported as unknown instead of vanishing.
+  case "$rc" in
+    0|10|11|12) ;;
+    *) [ -n "$out" ] || out="${FM_TMP_USAGE_ROOT:-${TMPDIR:-/tmp}}: unknown: temp-usage check exited $rc without a measurement" ;;
+  esac
   [ -n "$out" ] || return 0
   echo "TMP_USAGE: $out"
 }

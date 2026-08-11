@@ -920,8 +920,15 @@ families_for_changed_path() {
       printf '%s\n' backend-dispatch
       printf '%s\n' real-herdr-gated
       ;;
+    bin/fm-guard.sh)
+      printf '%s\n' watcher-wake-lock
+      # The guard also owns the loudness ladder for temp-filesystem pressure,
+      # whose coverage lives in a session-bootstrap-family suite. Select that
+      # suite by name so a guard change cannot skip it.
+      printf '%s\n' "__script__:fm-tmp-usage.test.sh"
+      ;;
     bin/fm-watch*|bin/fm-wake*|\
-    bin/fm-classify-lib.sh|bin/fm-daemon*|bin/fm-turnend-guard*|bin/fm-guard.sh)
+    bin/fm-classify-lib.sh|bin/fm-daemon*|bin/fm-turnend-guard*)
       printf '%s\n' watcher-wake-lock
       ;;
     bin/fm-afk*)

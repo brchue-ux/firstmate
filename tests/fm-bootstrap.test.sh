@@ -441,6 +441,16 @@ test_tmp_usage_is_reported_after_reclamation() {
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
   assert_contains "$out" "TMP_USAGE: $case_dir/does-not-exist: unknown:" \
     "a temp root that cannot be measured is reported, never treated as healthy"
+
+  # A check that refuses its own configuration says so on stderr and exits 1, so
+  # it contributes nothing to this stdout digest. Silence here means
+  # measured-and-healthy, so an unexpected status has to surface as unknown
+  # rather than disappearing into that silence.
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$fake_root" \
+    FM_TMP_USAGE_ROOT="$case_dir" FM_TMP_USAGE_WARN=abc \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" "TMP_USAGE: $case_dir: unknown:" \
+    "a check that exits without a measurement is reported as unknown, not as silence"
   pass "bootstrap reports remaining temp-root pressure, locked or not, and stays silent when there is room"
 }
 

@@ -158,6 +158,32 @@ after=$(find "$rodir" | sort)
 [ "$before" = "$after" ] || fail "the check wrote into the root it measured: $after"
 pass "measures a root it cannot write to, and leaves nothing behind"
 
+# The case above only proves the check does not write into the root it MEASURES.
+# The stronger requirement is that it needs no writable temp directory at all,
+# because on a full temp root every temp write fails - and the shell itself can
+# be the one writing. Older bashes (the system /bin/bash on macOS is 3.2)
+# materialise here-strings and here-documents as files under $TMPDIR, so a
+# construct like that inside the check would take the check out under exactly the
+# condition it exists to detect. Running it with $TMPDIR unwritable, under both
+# this suite's bash and the system bash, is what proves it uses none.
+notmp="$TMP_ROOT/no-writable-tmpdir"
+mkdir -p "$notmp"
+chmod 500 "$notmp"
+for shell in bash /bin/bash; do
+  command -v "$shell" >/dev/null 2>&1 || continue
+  out=$(env -u FM_TMP_USAGE_ROOT -u FM_TMP_USAGE_WARN -u FM_TMP_USAGE_HIGH \
+    -u FM_TMP_USAGE_CRITICAL TMPDIR="$notmp" \
+    "$shell" "$CHECK" --root "$TMP_ROOT" --verbose 2>&1)
+  rc=$?
+  [ "$rc" -eq 0 ] || { chmod 700 "$notmp"; fail "the check needs a writable TMPDIR under $shell (exit $rc): $out"; }
+  case "$out" in
+    "$TMP_ROOT: ok:"*) ;;
+    *) chmod 700 "$notmp"; fail "the check misreported under $shell with an unwritable TMPDIR: $out" ;;
+  esac
+done
+chmod 700 "$notmp"
+pass "measures with no writable temp directory of its own, under this bash and the system bash"
+
 # --- an unmeasurable root is unknown, never healthy --------------------------
 
 out=$(run_check --root "$TMP_ROOT/does-not-exist")
@@ -276,6 +302,38 @@ out=$(run_guard "$real_pct" "$real_pct" 100)
 assert_contains "$out" "TEMP FILESYSTEM NEARLY FULL" \
   "a later climb after recovery claims the banner again"
 pass "guard re-arms after the pressure clears"
+
+# The path a successful sweep actually produces: pressure eases part of the way
+# and then returns. A partial drop has to re-arm just like a full recovery, or
+# the climb back to the worst state is the one deduplicated into a reminder.
+out=$(run_guard "$real_pct" "$real_pct" "$real_pct")
+assert_contains "$out" "TEMP FILESYSTEM CRITICALLY FULL" "the episode reaches its worst severity"
+
+out=$(run_guard "$real_pct" 100 100)
+assert_contains "$out" "temp filesystem filling up" "a partial drop reports the lower severity"
+assert_not_contains "$out" "●" "a partial drop is not itself a banner"
+
+out=$(run_guard "$real_pct" "$real_pct" "$real_pct")
+assert_contains "$out" "TEMP FILESYSTEM CRITICALLY FULL" \
+  "climbing back after a partial drop re-claims the banner instead of going quiet"
+pass "guard re-arms on any drop, so a refill after a partial sweep is loud again"
+
+# A check that cannot run at all must not read as a measured, healthy root, and
+# must not silently end an episode that is still in progress.
+out=$(run_guard "$real_pct" "$real_pct" "$real_pct")
+assert_contains "$out" "still under pressure" "the critical episode is still claimed"
+out=$(env FM_ROOT_OVERRIDE="$GUARD_ROOT" FM_HOME="$GUARD_HOME" \
+  FM_TMP_USAGE_ROOT="$TMP_ROOT" FM_TMP_USAGE_WARN=abc \
+  "$ROOT/bin/fm-guard.sh" 2>&1)
+assert_contains "$out" "could not measure" \
+  "a check that exits on bad configuration reads as unmeasurable, not healthy"
+assert_not_contains "$out" "still under pressure" "an unmeasurable run reports no severity"
+[ "$(cat "$GUARD_MARKER")" = "3" ] \
+  || fail "an unmeasurable run must not de-escalate the episode already in progress"
+out=$(run_guard "$real_pct" "$real_pct" "$real_pct")
+assert_contains "$out" "still under pressure" \
+  "the episode survives an unmeasurable run rather than re-banner-ing from scratch"
+pass "guard treats an unexpected check status as unknown and keeps the episode"
 
 # A read-only session must still be told, and must record nothing.
 rm -f "$GUARD_MARKER"
