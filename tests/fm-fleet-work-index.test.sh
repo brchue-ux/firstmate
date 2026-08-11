@@ -358,7 +358,7 @@ EOF
   pass "an absent registry still indexes this home and is not a skip"
 }
 
-test_unreadable_registry_skips_only_that_subtree() {
+test_unreadable_registry_is_named_against_its_own_home() {
   local main sub out json
   if [ "$(id -u)" -eq 0 ]; then
     echo "skip: running as root, file permissions do not deny reads"
@@ -391,29 +391,45 @@ EOF
   assert_contains "$out" "badreg-main" "this home's work vanished over a child's unreadable registry"
   assert_contains "$out" "badreg-sub" \
     "the home's own items were dropped when only its registry was unreadable"
-  assert_contains "$out" "reglost" "the home with an unreadable registry was not named as skipped"
   assert_contains "$out" "could not be enumerated" \
     "the unenumerable subtree was not explained in the human view"
+  assert_contains "$out" "$(cd "$sub" && pwd -P)/data/secondmates.md" \
+    "the human view did not name the registry path it actually inspected"
+  # The home was indexed, so it must not be listed as a home nothing is known
+  # about; the note belongs to its own group instead.
+  printf '%s' "$out" | awk '/^## Skipped homes /{f=1} f' | grep -q 'reglost' \
+    && fail "an indexed home was listed under the Skipped homes heading"
+  printf '%s' "$out" | awk '/^## reglost /{f=1;next} /^## /{f=0} f' \
+    | grep -q 'could not be enumerated' \
+    || fail "the unenumerable subtree was not attached to its own home's group"
 
   json=$(run_index "$main" --json) || fail "--json aborted on an unreadable registry"
-  [ "$(printf '%s' "$json" | jq -r '.skipped[] | select(.reason | test("enumerated")) | .mate')" = reglost ] \
-    || fail "the unenumerable subtree was not named against its home in --json"
-  [ "$(printf '%s' "$json" | jq -r '.skipped[] | select(.reason | test("enumerated")) | .registry')" \
+  [ "$(printf '%s' "$json" | jq '[.homes[] | select(.mate == "reglost")] | length')" = 1 ] \
+    || fail "the home with the unreadable registry appeared more than once in homes[]"
+  [ "$(printf '%s' "$json" | jq -r '.homes[] | select(.mate == "reglost") | .skipped')" = false ] \
+    || fail "an indexed home was marked skipped over its unreadable registry"
+  [ "$(printf '%s' "$json" | jq -r '.homes[] | select(.mate == "reglost") | .subtree_reason | test("secondmates could not be enumerated")')" = true ] \
+    || fail "the unenumerable subtree was not carried on the home's own record"
+  [ "$(printf '%s' "$json" | jq -r '.homes[] | select(.mate == "reglost") | .registry')" \
     = "$(cd "$sub" && pwd -P)/data/secondmates.md" ] \
-    || fail "the skip record did not carry the registry path it actually inspected"
-  [ "$(printf '%s' "$json" | jq -r '.skipped[] | select(.reason | test("enumerated")) | .backlog')" = null ] \
-    || fail "the subtree skip claimed a backlog path it is not about"
+    || fail "the record did not carry the registry path it actually inspected"
+  [ "$(printf '%s' "$json" | jq '[.skipped[] | select(.mate == "reglost")] | length')" = 0 ] \
+    || fail "an indexed home was also reported in skipped[]"
+  [ "$(printf '%s' "$json" | jq -r '.totals.homes')" = 2 ] \
+    || fail "a two-home fleet with one unreadable registry did not total two homes"
   [ "$(printf '%s' "$json" | jq -r '.totals.homes_read')" = 2 ] \
-    || fail "the home with the unreadable registry stopped being indexed itself"
+    || fail "the home with the unreadable registry stopped counting as read"
+  [ "$(printf '%s' "$json" | jq -r '.totals.homes_skipped')" = 0 ] \
+    || fail "an indexed home was counted as a skipped home"
   [ "$(printf '%s' "$json" | jq '[.items[] | select(.id == "badreg-sub")] | length')" = 1 ] \
     || fail "the home's own open item was lost with its registry"
 
   chmod 644 "$sub/data/secondmates.md"
-  pass "an unreadable registry skips only that unenumerable subtree, by name"
+  pass "an unreadable registry is named against its own home, which stays one read home"
 }
 
 test_unreadable_registry_in_this_home_is_reported() {
-  local main json
+  local main out json
   if [ "$(id -u)" -eq 0 ]; then
     echo "skip: running as root, file permissions do not deny reads"
     return 0
@@ -428,10 +444,19 @@ EOF
   register "$main" unnameable "$TMP_ROOT/mate-unnameable"
   chmod 000 "$main/data/secondmates.md"
 
+  out=$(run_index "$main") || fail "the human view aborted on this home's own unreadable registry"
+  assert_contains "$out" "could not be enumerated" \
+    "an unreadable registry here read as a healthy single-home fleet"
+  assert_contains "$out" "ownbadreg" "this home's own work was lost with its registry"
+
   json=$(run_index "$main" --json) || fail "--json aborted on this home's own unreadable registry"
-  [ "$(printf '%s' "$json" | jq -r '.totals.homes_skipped')" = 1 ] \
-    || fail "an unreadable registry here read as a healthy single-home fleet"
-  [ "$(printf '%s' "$json" | jq -r '.skipped[] | select(.reason | test("enumerated")) | .registry')" \
+  [ "$(printf '%s' "$json" | jq -r '.totals.homes')" = 1 ] \
+    || fail "this home was counted twice over its own unreadable registry"
+  [ "$(printf '%s' "$json" | jq -r '.totals.homes_skipped')" = 0 ] \
+    || fail "this home was reported as skipped although it was indexed"
+  [ "$(printf '%s' "$json" | jq -r '.homes[0].subtree_reason | test("secondmates could not be enumerated")')" = true ] \
+    || fail "this home's unenumerable subtree was not carried on its own record"
+  [ "$(printf '%s' "$json" | jq -r '.homes[0].registry')" \
     = "$(cd "$main" && pwd -P)/data/secondmates.md" ] \
     || fail "this home's unreadable registry was not reported with the path inspected"
   [ "$(printf '%s' "$json" | jq '[.items[] | select(.id == "ownbadreg")] | length')" = 1 ] \
@@ -663,7 +688,7 @@ test_grandchild_without_backlog_is_skipped_by_name
 test_registry_cycle_terminates_with_each_home_once
 test_free_form_rows_are_counted_in_the_human_heading
 test_registry_entry_without_a_home_names_no_fabricated_path
-test_unreadable_registry_skips_only_that_subtree
+test_unreadable_registry_is_named_against_its_own_home
 test_unreadable_registry_in_this_home_is_reported
 
 echo "ALL TESTS PASSED"
