@@ -2,7 +2,7 @@
 name: bootstrap-diagnostics
 description: >-
   Agent-only handling playbook for session-start bootstrap diagnostics.
-  Use whenever the session-start digest's bootstrap section prints an actionable diagnostic line - MISSING, MISSING_MANUAL, BACKEND_INVALID, NEEDS_GH_AUTH, TANGLE, STARTUP_MEMORY_BUDGET, CREW_DISPATCH invalid, FLEET_SYNC, PR_CHECK_MIGRATION, SCRATCH_SWEEP, SECONDMATE_SYNC, SECONDMATE_LIVENESS, NUDGE_SECONDMATES, or FMX - or when a standalone bin/fm-bootstrap.sh run prints one of those lines.
+  Use whenever the session-start digest's bootstrap section prints an actionable diagnostic line - MISSING, MISSING_MANUAL, BACKEND_INVALID, NEEDS_GH_AUTH, TANGLE, STARTUP_MEMORY_BUDGET, CREW_DISPATCH invalid, FLEET_SYNC, PR_CHECK_MIGRATION, SCRATCH_SWEEP, TMP_USAGE, SECONDMATE_SYNC, SECONDMATE_LIVENESS, NUDGE_SECONDMATES, or FMX - or when a standalone bin/fm-bootstrap.sh run prints one of those lines.
   A silent bootstrap section, or a BOOTSTRAP_INFO fact, means no skill load.
 user-invocable: false
 metadata:
@@ -49,6 +49,14 @@ When any diagnostic needs captain attention, report the plain consequence and re
 - `SCRATCH_SWEEP: <temp root>: skipped: <reason>` - the sweep could not run to completion for the whole root: no open-handle check was available (install `lsof`, or check why procfs or the temp root is unreadable), the sweep's time budget ran out with candidates left, or a firstmate home's records could not be read so the sweep refused before examining anything.
   A budget line is self-healing across sessions and needs attention only if the deferred count keeps growing; a missing open-handle check disables reclamation entirely and does need fixing.
   An unreadable-records line means nothing at all was reclaimed this session, so never report a completed sweep after one: repair the records the reason names (a home's task records under `state/`, or the home directory or secondmate registry that decides which homes are read) rather than clearing the temp root by hand, because a live task's recorded scratch is exactly what could not be ruled out.
+- `TMP_USAGE: <temp root>: warn|high|critical: <n>% full (<free> free of <total>, ...)` - the shared temp filesystem is filling up, measured after this session's scratch reclamation, so the reported number is what is actually left.
+  On most hosts that root is a small RAM-backed filesystem, not a slice of the main disk, and it is shared by every home and tool on the machine.
+  When it fills, nothing reports a full filesystem: temp writes fail, commands return empty failures, and the session reads as a broken agent instead (this fleet's recorded shell-breakage signature).
+  Reclaim this fleet's own orphaned scratch with `bin/fm-tmp-sweep.sh` first.
+  Whatever that refuses is not fleet-owned scratch - live session scratchpads mid-build are the usual biggest consumers - so escalate those to the captain rather than removing anything yourself, and treat `critical` as a blocker before dispatching more work.
+  Resizing the temp filesystem is never the local fix: it spends the same RAM the memory ceiling protects, so it is the captain's call.
+- `TMP_USAGE: <temp root>: unknown: <reason>` - free space on the temp root could not be measured at all.
+  Treat it as unknown rather than healthy, because silence and health are indistinguishable here, and that is exactly how the condition goes unnoticed; check the named root exists and is readable before dispatching heavy work.
 - `SECONDMATE_SYNC: secondmate <id>: skipped: <reason>` - the local-HEAD secondmate sync left a live secondmate home on its existing checkout because the home was dirty, diverged, unsafe, on the wrong branch, missing the primary target commit, or otherwise not fast-forwardable, or because inherited local-material propagation failed; bootstrap continued, but inspect the reason because the secondmate's tracked instructions, inherited settings, or shared captain preferences may be stale after a primary update.
 - `SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed after <cause>: <reason>` - the session-start liveness sweep owes that secondmate a launch and could not deliver it.
   Fleet startup launches the first mate and nothing else, so the sweep only ever owes a launch to a dead or missing secondmate whose own durable records show pending work (`secondmate-provisioning` "Recovery" owns that test).

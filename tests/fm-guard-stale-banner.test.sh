@@ -33,9 +33,15 @@ case_root() {
   printf '%s/root\n' "$1"
 }
 
+# The guard also alarms on shared-temp-filesystem pressure, measured against the
+# real host temp root. These cases are about the watcher banner and assert on the
+# guard's whole output, so that independent alarm is pinned quiet here; without
+# it the suite would fail on any host whose temp root happens to be 80% full,
+# which is precisely the condition the temp alarm exists to report.
 run_guard_case() {
   local dir=$1
-  FM_ROOT_OVERRIDE="$(case_root "$dir")" \
+  FM_TMP_USAGE_WARN=100 FM_TMP_USAGE_HIGH=100 FM_TMP_USAGE_CRITICAL=100 \
+    FM_ROOT_OVERRIDE="$(case_root "$dir")" \
     FM_HOME="$(case_home "$dir")" \
     FM_GUARD_GRACE=999 \
     "$ROOT/bin/fm-guard.sh" 2>&1
@@ -43,7 +49,8 @@ run_guard_case() {
 
 run_guard_case_read_only() {
   local dir=$1
-  FM_ROOT_OVERRIDE="$(case_root "$dir")" \
+  FM_TMP_USAGE_WARN=100 FM_TMP_USAGE_HIGH=100 FM_TMP_USAGE_CRITICAL=100 \
+    FM_ROOT_OVERRIDE="$(case_root "$dir")" \
     FM_HOME="$(case_home "$dir")" \
     FM_GUARD_GRACE=999 \
     FM_GUARD_READ_ONLY=1 \
@@ -54,7 +61,8 @@ run_guard_case_read_only() {
 # duration the guard reports is exactly the beacon's age.
 run_guard_case_ladder() {
   local dir=$1 ladder=$2 repeat=$3
-  FM_ROOT_OVERRIDE="$(case_root "$dir")" \
+  FM_TMP_USAGE_WARN=100 FM_TMP_USAGE_HIGH=100 FM_TMP_USAGE_CRITICAL=100 \
+    FM_ROOT_OVERRIDE="$(case_root "$dir")" \
     FM_HOME="$(case_home "$dir")" \
     FM_GUARD_GRACE=0 \
     FM_GUARD_ESCALATE_LADDER="$ladder" \

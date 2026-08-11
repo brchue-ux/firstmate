@@ -64,7 +64,11 @@ ROWS
 
 run_guard() {
   # Scope the guard to a temp repo as the primary checkout; state lives under it.
-  FM_ROOT_OVERRIDE="$1" FM_HOME="$1" "$ROOT/bin/fm-guard.sh" 2>&1
+  # The guard's independent temp-filesystem alarm measures the real host temp
+  # root, so pin its thresholds out of reach: this case is about the tangle
+  # banner and must not change verdict with how full the host's /tmp happens to be.
+  FM_TMP_USAGE_WARN=100 FM_TMP_USAGE_HIGH=100 FM_TMP_USAGE_CRITICAL=100 \
+    FM_ROOT_OVERRIDE="$1" FM_HOME="$1" "$ROOT/bin/fm-guard.sh" 2>&1
 }
 
 test_guard_banner() {

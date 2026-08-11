@@ -389,6 +389,71 @@ test_scratch_sweep_is_a_locked_mutating_sweep() {
   pass "bootstrap reclaims stale temp-root scratch only when locked, and silently when there is none"
 }
 
+# Reclaiming scratch answers "is there anything of ours to free"; it does not
+# answer "is there room left". A session that starts on a temp root already
+# close to full has to be told before it dispatches anything, because the
+# failure mode downstream is commands returning nothing rather than an error
+# naming free space. The check only measures, so unlike the sweep it is not
+# gated on the session lock.
+test_tmp_usage_is_reported_after_reclamation() {
+  local case_dir fakebin fake_root out
+  case_dir="$TMP_ROOT/tmp-usage"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  fake_root="$case_dir/fake-root"
+  mkdir -p "$fake_root/bin"
+  cp "$ROOT/bin/fm-tmp-usage.sh" "$fake_root/bin/fm-tmp-usage.sh"
+
+  # Thresholds are moved around the fixture root's real usage so the reported
+  # pressure comes from a real measurement of a real filesystem.
+  local real_pct
+  real_pct=$(df -Pk "$case_dir" | awk 'NR > 1 && NF >= 5 { last = $5 } END { sub(/%/, "", last); print last }')
+  case "$real_pct" in
+    ''|*[!0-9]*) fail "could not read a real capacity for $case_dir" ;;
+  esac
+  [ "$real_pct" -ge 1 ] && [ "$real_pct" -lt 100 ] \
+    || fail "the fixture filesystem is at ${real_pct}%; this case cannot force a severity on it"
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$fake_root" \
+    FM_TMP_USAGE_ROOT="$case_dir" FM_TMP_USAGE_WARN="$real_pct" \
+    FM_TMP_USAGE_HIGH="$real_pct" FM_TMP_USAGE_CRITICAL=100 \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" "TMP_USAGE: $case_dir: high:" \
+    "a near-full temp root is an actionable session-start diagnostic"
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$fake_root" \
+    FM_TMP_USAGE_ROOT="$case_dir" FM_TMP_USAGE_WARN="$real_pct" \
+    FM_TMP_USAGE_HIGH="$real_pct" FM_TMP_USAGE_CRITICAL=100 \
+    FM_BOOTSTRAP_DETECT_ONLY=1 \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" "TMP_USAGE: $case_dir: high:" \
+    "a lock-refused session is just as exposed to a full temp root, so it is told too"
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$fake_root" \
+    FM_TMP_USAGE_ROOT="$case_dir" FM_TMP_USAGE_WARN=100 \
+    FM_TMP_USAGE_HIGH=100 FM_TMP_USAGE_CRITICAL=100 \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "a temp root with room must leave bootstrap silent, got: $out"
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$fake_root" \
+    FM_TMP_USAGE_ROOT="$case_dir/does-not-exist" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" "TMP_USAGE: $case_dir/does-not-exist: unknown:" \
+    "a temp root that cannot be measured is reported, never treated as healthy"
+
+  # A check that refuses its own configuration says so on stderr and exits 1, so
+  # it contributes nothing to this stdout digest. Silence here means
+  # measured-and-healthy, so an unexpected status has to surface as unknown
+  # rather than disappearing into that silence.
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$fake_root" \
+    FM_TMP_USAGE_ROOT="$case_dir" FM_TMP_USAGE_WARN=abc \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" "TMP_USAGE: $case_dir: unknown:" \
+    "a check that exits without a measurement is reported as unknown, not as silence"
+  pass "bootstrap reports remaining temp-root pressure, locked or not, and stays silent when there is room"
+}
+
 test_orca_backend_gates_orca_tool_only_when_selected() {
   local case_dir fakebin out missing_orca
   missing_orca="MISSING: orca (install: brew install orca  # or the platform's package manager)"
@@ -834,6 +899,7 @@ ROWS
 
 test_bootstrap_reporting
 test_scratch_sweep_is_a_locked_mutating_sweep
+test_tmp_usage_is_reported_after_reclamation
 test_no_mistakes_min_version
 test_git_is_required_with_supported_install_instruction
 test_orca_backend_gates_orca_tool_only_when_selected
