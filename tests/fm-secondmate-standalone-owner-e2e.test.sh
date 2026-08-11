@@ -7,13 +7,17 @@
 # post-metadata publish step, and the proof has to be the token herdr itself
 # reports back, not anything the publisher printed.
 #
-# Mirrors tests/fm-backend-herdr-workspace-per-home-e2e.test.sh's
-# isolated-session convention: a private throwaway HERDR_SESSION (never the
-# captain's default), scratch FM_HOME(s), and scratch local-only repositories.
-#
-# Safety (2026-07-02 incident, see tests/herdr-test-safety.sh): cleanup uses
-# ONLY herdr_safe_stop_and_delete, never a bare/inline-prefixed `herdr server
-# stop`.
+# Herdr isolation: every lifecycle call and every Herdr query this test makes
+# for itself goes through bin/fm-herdr-lab.sh - `name` for the session,
+# `provision` for the server, `run` for each query, `teardown` for cleanup -
+# which appends the required trailing --session, re-checks refuse-default
+# immediately before each destructive call, and verifies the live default
+# session is unchanged afterward. This file never invokes `herdr` directly.
+# The one Herdr caller here that is not routed through the helper is
+# fm-spawn.sh itself, which is the code under test: its adapter always appends
+# its own trailing --session (bin/backends/herdr.sh's fm_backend_herdr_cli),
+# and HERDR_SESSION below is what points it at this lab session rather than the
+# captain's default one.
 #
 # Covers:
 #   - a secondmate home that is a STANDALONE CLONE (its own git dir) is spawned
@@ -34,29 +38,44 @@ set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-fail() { printf 'not ok - %s\n' "$1" >&2; cleanup_all; exit 1; }
+fail() { printf 'not ok - %s\n' "$1" >&2; exit 1; }
 pass() { printf 'ok - %s\n' "$1"; }
 
 command -v herdr >/dev/null 2>&1 || { echo "skip: herdr not found"; exit 0; }
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the herdr adapter)"; exit 0; }
 command -v git >/dev/null 2>&1 || { echo "skip: git not found (required to build the checkouts under test)"; exit 0; }
 
+# Sourced for FM_GATE_REFUSE_BYPASS, which every real-herdr test in this suite
+# needs; the lab contract itself is exercised through the helper SCRIPT below.
 # shellcheck source=tests/herdr-test-safety.sh
 . "$ROOT/tests/herdr-test-safety.sh"
 
+HERDR_LAB_HELPER="$ROOT/bin/fm-herdr-lab.sh"
+HERDR_LAB_SESSION=$("$HERDR_LAB_HELPER" name secondmate-standalone-owner-tag) \
+  || { echo "skip: could not generate a lab session name"; exit 0; }
+export HERDR_SESSION="$HERDR_LAB_SESSION"
+
 TMP_ROOT=$(mktemp -d "$(cd "${TMPDIR:-/tmp}" && pwd -P)/fm-sm-owner-e2e.XXXXXX")
-SESSION="fm-lab-sm-owner-e2e-$$"
-export HERDR_SESSION="$SESSION"
+
+# Idempotent: fail() exits and lets this trap do the cleanup, so teardown runs
+# exactly once even on an early failure.
+CLEANED=0
 cleanup_all() {
-  herdr_safe_stop_and_delete "$SESSION"
+  [ "$CLEANED" -eq 0 ] || return 0
+  CLEANED=1
+  "$HERDR_LAB_HELPER" teardown "$HERDR_LAB_SESSION" >/dev/null 2>&1 || true
   rm -rf "$TMP_ROOT"
 }
+# Armed BEFORE provisioning, so a session created by a provision that then
+# fails partway is still torn down.
 trap cleanup_all EXIT
-fm_herdr_lab_prepare "$SESSION" || fail "could not prepare isolated Herdr lab session"
 
-# shellcheck source=/dev/null
-. "$ROOT/bin/fm-backend.sh"
-fm_backend_source herdr || fail "fm_backend_source herdr failed"
+"$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION" \
+  || fail "could not provision the isolated Herdr lab session '$HERDR_LAB_SESSION'"
+
+# Every Herdr call this test makes for itself. The helper appends the trailing
+# --session and refuses a caller-supplied one.
+lab() { "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" "$@"; }
 
 git_quiet() { git -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' "$@"; }
 
@@ -118,7 +137,7 @@ meta_field() {  # <id> <key>
 }
 
 workspace_owner_token() {  # <workspace-id> -> the owner token value, or empty
-  herdr workspace list --session "$SESSION" 2>/dev/null \
+  lab workspace list 2>/dev/null \
     | jq -r --arg id "$1" '.result.workspaces[]? | select(.workspace_id == $id) | .tokens.owner // empty'
 }
 
@@ -140,6 +159,7 @@ pass "real herdr E2E: a real spawn tags a standalone-clone secondmate's workspac
 
 spawn_secondmate e2elinked "$LINKED_HOME"
 LINKED_WS=$(meta_field e2elinked herdr_workspace_id)
+LINKED_PANE=$(meta_field e2elinked herdr_pane_id)
 [ -n "$LINKED_WS" ] || fail "e2elinked meta recorded no herdr workspace"
 [ "$LINKED_WS" != "$STAND_WS" ] || fail "the two secondmates must not share one workspace"
 pass "real herdr E2E: the primary spawns a linked-worktree secondmate into its own workspace"
@@ -150,15 +170,26 @@ LINKED_OWNER=$(workspace_owner_token "$LINKED_WS")
 pass "real herdr E2E: a linked-worktree secondmate's workspace is untouched, carrying no owner token"
 
 # --- 3. the tag converges on every relaunch --------------------------------
-# Clear the token the way an operator or a herdr-side reset would, drop the
-# task's durable record, and relaunch the SAME secondmate home. A one-time
-# hand-applied fact would stay cleared; a spawn-time publish comes back.
+# Clear the token the way an expiry or a herdr-side reset would, drop the
+# task's durable record, and relaunch the SAME secondmate home into the SAME
+# workspace. A one-time hand-applied fact would stay cleared; a spawn-time
+# publish comes back.
+#
+# The relaunch has to find the workspace still there, and closing a herdr
+# workspace's last tab deletes the workspace itself (see
+# fm_backend_herdr_workspace_ensure's notes). Hold it open with an ordinary
+# scratch tab - test scaffolding standing in for the real case, where the home
+# has other task tabs - so this exercises ADOPTING an existing space rather
+# than trivially tagging a brand-new one. Its label must not collide with the
+# task tab's, which fm_backend_herdr_create_task refuses to duplicate.
+HOLDER_TAB=$(lab tab create --workspace "$STAND_WS" --cwd "$TMP_ROOT" --label e2e-holder --no-focus 2>/dev/null \
+  | jq -r '.result.tab.tab_id // empty')
+[ -n "$HOLDER_TAB" ] || fail "could not open a holder tab to keep workspace $STAND_WS alive across the relaunch"
 
-herdr workspace report-metadata "$STAND_WS" --source firstmate --clear-token owner \
-  --session "$SESSION" >/dev/null 2>&1 || true
+lab workspace report-metadata "$STAND_WS" --source firstmate --clear-token owner >/dev/null 2>&1 || true
 [ -z "$(workspace_owner_token "$STAND_WS")" ] || fail "the owner token should be gone after an explicit clear"
 
-fm_backend_herdr_kill "$SESSION:$STAND_PANE" || true
+lab pane close "$STAND_PANE" >/dev/null 2>&1 || true
 rm -f "$PRIMARY_HOME/state/e2estand.meta"
 
 spawn_secondmate e2estand "$STAND_HOME"
@@ -167,11 +198,12 @@ RESPAWN_WS=$(meta_field e2estand herdr_workspace_id)
   || fail "the relaunched secondmate should adopt its own existing workspace $STAND_WS, got '$RESPAWN_WS'"
 RESPAWN_OWNER=$(workspace_owner_token "$STAND_WS")
 [ "$RESPAWN_OWNER" = firstmate ] \
-  || fail "relaunching a standalone-clone secondmate must republish owner=firstmate, got '${RESPAWN_OWNER:-<none>}'"
-pass "real herdr E2E: the owner tag is republished on every relaunch, not applied once by hand"
+  || fail "relaunching a standalone-clone secondmate must republish owner=firstmate into its existing workspace, got '${RESPAWN_OWNER:-<none>}'"
+pass "real herdr E2E: the owner tag is republished into the same workspace on relaunch, not applied once by hand"
 
-fm_backend_herdr_kill "$SESSION:$(meta_field e2estand herdr_pane_id)" || true
-fm_backend_herdr_kill "$SESSION:$(meta_field e2elinked herdr_pane_id)" || true
+lab tab close "$HOLDER_TAB" >/dev/null 2>&1 || true
+lab pane close "$(meta_field e2estand herdr_pane_id)" >/dev/null 2>&1 || true
+lab pane close "$LINKED_PANE" >/dev/null 2>&1 || true
 
 cleanup_all
 trap - EXIT
