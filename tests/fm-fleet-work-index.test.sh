@@ -382,7 +382,182 @@ test_help_and_bad_flag() {
   out=$(run_index "$main" --nonsense 2>&1) || rc=$?
   [ "$rc" -eq 2 ] || fail "an unknown flag did not exit 2 (got $rc)"
 
-  pass "--help prints usage and an unknown flag is refused"
+  rc=0
+  out=$(run_index "$main" --json --nonsense 2>&1) || rc=$?
+  [ "$rc" -eq 2 ] || fail "a typo'd second flag was accepted instead of refused (got $rc)"
+
+  rc=0
+  out=$(run_index "$main" --json extra 2>&1) || rc=$?
+  [ "$rc" -eq 2 ] || fail "a trailing argument was silently discarded (got $rc)"
+
+  pass "--help prints usage, and an unknown or extra argument is refused"
+}
+
+test_grandchild_homes_are_indexed() {
+  local main child grandchild out json
+  main=$(new_home main-deep)
+  child=$(new_home mate-child)
+  grandchild=$(new_home mate-grandchild)
+
+  cat > "$main/data/backlog.md" <<'EOF'
+## In flight
+## Queued
+- [ ] deep-main - main item (repo: firstmate) (since 2026-07-01)
+## Done
+EOF
+  cat > "$child/data/backlog.md" <<'EOF'
+## In flight
+## Queued
+- [ ] deep-child - child item (repo: c) (since 2026-07-02)
+## Done
+EOF
+  cat > "$grandchild/data/backlog.md" <<'EOF'
+## In flight
+- [ ] deep-grandchild - grandchild item (repo: g) (since 2026-07-03)
+## Queued
+## Done
+EOF
+
+  register "$main" childmate "$child"
+  register "$child" grandmate "$grandchild"
+
+  out=$(run_index "$main") || fail "run failed on a two-level home tree"
+  assert_contains "$out" "deep-grandchild" \
+    "a secondmate's own secondmate's work was missing from the index"
+  assert_contains "$out" "grandmate" "the grandchild home had no group of its own"
+
+  json=$(run_index "$main" --json) || fail "--json failed on a two-level home tree"
+  [ "$(printf '%s' "$json" | jq -r '.totals.homes_read')" = 3 ] \
+    || fail "the grandchild home was not counted among the homes read"
+  [ "$(printf '%s' "$json" | jq -r '.items[] | select(.id == "deep-grandchild") | .mate')" = grandmate ] \
+    || fail "the grandchild's item was not attributed to the grandchild mate"
+  [ "$(printf '%s' "$json" | jq -r '.items[] | select(.id == "deep-grandchild") | .home')" \
+    = "$(cd "$grandchild" && pwd -P)" ] \
+    || fail "the grandchild's item was not attributed to the grandchild home"
+
+  pass "a grandchild home's open work is indexed like any other home's"
+}
+
+test_grandchild_without_backlog_is_skipped_by_name() {
+  local main child grandchild out json
+  main=$(new_home main-deep-skip)
+  child=$(new_home mate-deep-ok)
+  grandchild=$(new_home mate-deep-bare) # exists, but never gets a backlog
+
+  cat > "$main/data/backlog.md" <<'EOF'
+## In flight
+## Queued
+- [ ] deepskip-main - main item (repo: firstmate) (since 2026-07-01)
+## Done
+EOF
+  cat > "$child/data/backlog.md" <<'EOF'
+## In flight
+## Queued
+- [ ] deepskip-child - child item (repo: c) (since 2026-07-02)
+## Done
+EOF
+
+  register "$main" okmate "$child"
+  register "$child" baremate "$grandchild"
+
+  out=$(run_index "$main") || fail "a bare grandchild home aborted the run"
+  assert_contains "$out" "deepskip-child" "the child home dropped out over its bare grandchild"
+  assert_contains "$out" "baremate" "the grandchild with no backlog was not named as skipped"
+
+  json=$(run_index "$main" --json) || fail "--json aborted on a bare grandchild home"
+  [ "$(printf '%s' "$json" | jq -r '.skipped[] | select(.mate == "baremate") | .reason')" \
+    = "no backlog file" ] \
+    || fail "the grandchild with no backlog was absent rather than skipped by name"
+
+  pass "a grandchild with no backlog is skipped by name, never silently absent"
+}
+
+test_registry_cycle_terminates_with_each_home_once() {
+  local main other json count
+  main=$(new_home main-cycle)
+  other=$(new_home mate-cycle)
+
+  cat > "$main/data/backlog.md" <<'EOF'
+## In flight
+## Queued
+- [ ] cycle-main - main item (repo: firstmate) (since 2026-07-01)
+## Done
+EOF
+  cat > "$other/data/backlog.md" <<'EOF'
+## In flight
+## Queued
+- [ ] cycle-other - other item (repo: o) (since 2026-07-02)
+## Done
+EOF
+
+  # A registers B and B registers A: the walk must stop, not spin.
+  register "$main" cyclemate "$other"
+  register "$other" backmate "$main"
+
+  json=$(run_index "$main" --json) || fail "a registry cycle did not terminate cleanly"
+  [ "$(printf '%s' "$json" | jq -r '.totals.homes_read')" = 2 ] \
+    || fail "a cycle indexed a home more than once"
+  [ "$(printf '%s' "$json" | jq -r '.totals.items')" = 2 ] \
+    || fail "a cycle double-counted open items"
+  count=$(printf '%s' "$json" | jq '[.items[] | select(.id == "cycle-main")] | length')
+  [ "$count" = 1 ] || fail "this home's item appeared $count times through the cycle"
+  [ "$(printf '%s' "$json" | jq -r '.skipped[] | select(.mate == "backmate") | .reason')" \
+    = "home already indexed under another registry id" ] \
+    || fail "the repeat visit was not reported as already indexed"
+
+  pass "a registry cycle terminates with every home indexed exactly once"
+}
+
+test_free_form_rows_are_counted_in_the_human_heading() {
+  local main quiet out
+  main=$(new_home main-freeform)
+  quiet=$(new_home mate-freeform)
+
+  cat > "$main/data/backlog.md" <<'EOF'
+## In flight
+- [ ] ff-main - a structured main item (repo: firstmate) (since 2026-07-01)
+## Queued
+## Done
+EOF
+  cat > "$quiet/data/backlog.md" <<'EOF'
+## In flight
+Still thinking about the storage rewrite, nothing filed yet.
+## Queued
+Maybe revisit the cache someday.
+## Done
+EOF
+  register "$main" prosemate "$quiet"
+
+  out=$(run_index "$main") || fail "run failed on a free-form fixture"
+  assert_contains "$out" "0 open items, 2 free-form rows not counted" \
+    "free-form rows under In flight/Queued were invisible in the human view"
+  printf '%s' "$out" | grep -q '^## main - 1 open item$' \
+    || fail "a home with no free-form rows gained the clause anyway"
+
+  pass "free-form rows are named in the human heading, and only when present"
+}
+
+test_registry_entry_without_a_home_names_no_fabricated_path() {
+  local main out json
+  main=$(new_home main-nopath)
+  cat > "$main/data/backlog.md" <<'EOF'
+## In flight
+## Queued
+- [ ] nopath-kept - still indexed (repo: firstmate) (since 2026-07-01)
+## Done
+EOF
+  printf -- '- pathless - a mate with no recorded home\n' >> "$main/data/secondmates.md"
+
+  out=$(run_index "$main") || fail "run failed on a registry entry with no home"
+  assert_contains "$out" "pathless" "the homeless registry entry was not named as skipped"
+  assert_not_contains "$out" "/data/backlog.md" \
+    "a fabricated filesystem-root backlog path was printed for a home that has none"
+
+  json=$(run_index "$main" --json) || fail "--json failed on a registry entry with no home"
+  [ "$(printf '%s' "$json" | jq -r '.skipped[] | select(.mate == "pathless") | .backlog')" = null ] \
+    || fail "--json carried a fabricated backlog path for a home that has none"
+
+  pass "a registry entry with no home names no fabricated backlog path"
 }
 
 test_indexes_main_home_and_every_registered_mate
@@ -395,5 +570,10 @@ test_never_writes_to_any_home
 test_no_registered_mates_still_indexes_this_home
 test_seeded_home_labels_its_own_group_by_name
 test_help_and_bad_flag
+test_grandchild_homes_are_indexed
+test_grandchild_without_backlog_is_skipped_by_name
+test_registry_cycle_terminates_with_each_home_once
+test_free_form_rows_are_counted_in_the_human_heading
+test_registry_entry_without_a_home_names_no_fabricated_path
 
 echo "ALL TESTS PASSED"

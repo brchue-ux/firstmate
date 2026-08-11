@@ -3,9 +3,17 @@
 #
 # Routed work lives in the owning home's own backlog (AGENTS.md section 10), so
 # no single backlog shows the fleet's real workload. This command reads this
-# home's data/backlog.md plus the data/backlog.md of every home registered in
+# home's data/backlog.md plus the data/backlog.md of every home reachable from
 # data/secondmates.md, and prints one list of open items: id, title, state,
 # owning mate, and age.
+#
+# Discovery is TRANSITIVE, because a secondmate home can itself have spawned
+# secondmates and their work is just as invisible from here. Each home found in
+# a registry is asked for its own data/secondmates.md, and every home found that
+# way is indexed exactly like any other. A home with no registry simply has no
+# secondmates and is not a skip. Each resolved physical path is visited at most
+# once, so a registry cycle terminates on its own and the repeat visit is
+# reported as already indexed rather than walked again.
 #
 # Usage:
 #   fm-fleet-work-index.sh            grouped human view
@@ -16,8 +24,8 @@
 # takes the session lock, never drains wakes, and never writes into a secondmate
 # home: it opens other homes' files for reading and nothing else.
 #
-# Homes are resolved from the registry, never from a hardcoded path list, so a
-# home added or moved in data/secondmates.md is picked up with no change here.
+# Homes are resolved from the registries, never from a hardcoded path list, so a
+# home added or moved in a data/secondmates.md is picked up with no change here.
 # This home's own group is labelled "main", or by its identity marker when the
 # index is run from inside a seeded secondmate home.
 #
@@ -81,13 +89,20 @@ usage() {
   cat <<'EOF'
 usage: fm-fleet-work-index.sh [--json]
 
-Prints every open backlog item across this home and every home registered in
+Prints every open backlog item across this home and every home reachable from
 data/secondmates.md, grouped by owning mate and sorted by state then age.
+Discovery is transitive: each home found is asked for its own registry too, so
+a secondmate's own secondmates are indexed as well, each home visited once.
 Read-only: no home's backlog is ever modified. A home with no readable backlog
 is skipped by name, never dropped silently.
 
   --json   emit the fm-fleet-work-index.v1 object instead of the human view
 EOF
+}
+
+[ "$#" -le 1 ] || {
+  usage >&2
+  exit 2
 }
 
 case "${1:-}" in
@@ -114,9 +129,21 @@ NOW_EPOCH=$(date -u +%s)
 # Registry ids, in registry order. The line shape is "- <id> - <description>
 # (home: ...; scope: ...; ...)"; only the leading id token is taken here, and
 # secondmate_registry_field owns pulling fields back out of that same line.
-registry_ids() {
-  [ -f "$REGISTRY" ] || return 0
-  sed -n 's/^- \([A-Za-z0-9][A-Za-z0-9._-]*\) - .*/\1/p' "$REGISTRY"
+registry_ids() { # <registry-path>
+  [ -f "$1" ] && [ -r "$1" ] || return 0
+  sed -n 's/^- \([A-Za-z0-9][A-Za-z0-9._-]*\) - .*/\1/p' "$1"
+}
+
+# One registry's entries as "<id><tab><home>" rows, home empty when the entry
+# records none. A home that has no registry has no secondmates, which is the
+# ordinary case and not a skip, so an absent file yields no rows and no record.
+registry_rows() { # <registry-path>
+  local reg=$1 id home
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    home=$(secondmate_registry_field "$reg" "$id" home 2>/dev/null || true)
+    printf '%s\t%s\n' "$id" "$home"
+  done < <(registry_ids "$reg")
 }
 
 # One home's open items as a JSON object:
@@ -124,8 +151,10 @@ registry_ids() {
 # A home that cannot be read yields skipped=true with a reason and no items,
 # which is a normal result here, never an error.
 home_index_json() { # <mate> <home-dir> [<skip-reason>]
-  local mate=$1 home=$2 preskip=${3:-} backlog raw
-  backlog="$home/data/backlog.md"
+  local mate=$1 home=$2 preskip=${3:-} backlog="" raw
+  # No home means no backlog path exists to name. Deriving one anyway would
+  # print a fabricated filesystem-root path the captain could go looking for.
+  [ -z "$home" ] || backlog="$home/data/backlog.md"
 
   if [ -n "$preskip" ]; then
     home_skip_json "$mate" "$home" "$backlog" "$preskip"
@@ -193,48 +222,63 @@ home_index_json() { # <mate> <home-dir> [<skip-reason>]
        items: $items}'
 }
 
-home_skip_json() { # <mate> <home-dir> <backlog-path> <reason>
+home_skip_json() { # <mate> <home-dir> <backlog-path-or-empty> <reason>
   jq -n \
     --arg mate "$1" \
     --arg home "$2" \
     --arg backlog "$3" \
     --arg reason "$4" \
-    '{mate:$mate,home:$home,backlog:$backlog,skipped:true,reason:$reason,
-      unstructured:0,items:[]}'
+    '{mate:$mate,home:$home,
+      backlog:(if $backlog == "" then null else $backlog end),
+      skipped:true,reason:$reason,unstructured:0,items:[]}'
 }
 
+# Walk every home reachable from this home's registry, breadth first, emitting
+# one record per home. Each home that resolves to a path not yet visited is
+# asked for its own registry, so a secondmate's secondmates are indexed too.
+# The visited-path set is what terminates the walk: a cycle reaches an
+# already-visited path, which is reported as already indexed and not descended.
 collect_homes_json() {
-  local id home reason seen=" " resolved
+  local id home reason seen=" " resolved frontier next
   home_index_json "$SELF_MATE" "$SELF_HOME"
   seen="$seen$SELF_HOME "
+  frontier=$(registry_rows "$REGISTRY")
 
-  while IFS= read -r id; do
-    [ -n "$id" ] || continue
-    reason=""
-    home=$(secondmate_registry_field "$REGISTRY" "$id" home 2>/dev/null || true)
-    if [ -z "$home" ]; then
-      reason="registry entry records no home"
-    else
-      case "$home" in
-        /*) : ;;
-        *) reason="registry home path is not absolute" ;;
-      esac
-    fi
-    if [ -z "$reason" ]; then
-      if resolved=$(cd "$home" 2>/dev/null && pwd -P); then
-        home=$resolved
+  while [ -n "$frontier" ]; do
+    next=""
+    while IFS=$'\t' read -r id home; do
+      [ -n "$id" ] || continue
+      reason=""
+      if [ -z "$home" ]; then
+        reason="registry entry records no home"
       else
-        reason="home directory not found"
+        case "$home" in
+          /*) : ;;
+          *) reason="registry home path is not absolute" ;;
+        esac
       fi
-    fi
-    if [ -z "$reason" ]; then
-      case "$seen" in
-        *" $home "*) reason="home already indexed under another registry id" ;;
-        *) seen="$seen$home " ;;
-      esac
-    fi
-    home_index_json "$id" "$home" "$reason"
-  done < <(registry_ids)
+      if [ -z "$reason" ]; then
+        if resolved=$(cd "$home" 2>/dev/null && pwd -P); then
+          home=$resolved
+        else
+          reason="home directory not found"
+        fi
+      fi
+      if [ -z "$reason" ]; then
+        case "$seen" in
+          *" $home "*) reason="home already indexed under another registry id" ;;
+          *) seen="$seen$home " ;;
+        esac
+      fi
+      home_index_json "$id" "$home" "$reason"
+      # Only a freshly resolved home is descended into: re-reading a registry
+      # already walked is what would make a cycle loop forever.
+      if [ -z "$reason" ]; then
+        next="$next$(registry_rows "$home/data/secondmates.md")"$'\n'
+      fi
+    done <<< "$frontier"
+    frontier=$(printf '%s' "$next" | sed '/^$/d')
+  done
 }
 
 # Assemble the whole index. Homes keep this home first, then most open work
@@ -291,7 +335,13 @@ render_human() { # <index-json>
        # Grouped by home path, not by label: two homes could carry the same
        # name, and an item must appear under exactly one group.
        + ([ .homes[] | select(.skipped | not) | .home as $h | .mate as $mate
-            | ["## \($mate) - " + plural(([$index.items[] | select(.home == $h)] | length); "open item"),
+            # Free-form lines sitting under In flight/Queued are not open items
+            # (decision 3), but they are work someone wrote down, so the count
+            # is named here rather than leaving the section reading as empty.
+            | (if .unstructured > 0
+               then ", " + plural(.unstructured; "free-form row") + " not counted"
+               else "" end) as $freeform
+            | ["## \($mate) - " + plural(([$index.items[] | select(.home == $h)] | length); "open item") + $freeform,
                ""]
               + ([ $index.items[] | select(.home == $h)
                    | "  \(state_label)  \(age | . + (" " * (5 - length)))  \(.id) - \(.title | trunc($title_cap))" ]
@@ -300,7 +350,9 @@ render_human() { # <index-json>
           | add // [])
        + (if (.totals.homes_skipped) > 0
           then ["## Skipped homes (not indexed, nothing assumed about their work)", ""]
-               + [ .skipped[] | "  \(.mate) - \(.reason) (\(.backlog))" ]
+               + [ .skipped[]
+                   | "  \(.mate) - \(.reason)"
+                     + (if .backlog == null then "" else " (\(.backlog))" end) ]
                + [""]
           else [] end)
       )

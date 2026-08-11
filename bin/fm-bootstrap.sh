@@ -515,7 +515,7 @@ secondmate_home_has_pending_work() {
   # missing secondmate is worth the startup token cost of relaunching only
   # when its OWN durable records show it would actually do something this
   # session. This is a presence test, not the structured backlog schema
-  # tasks-axi and bin/fm-fleet-snapshot.sh's backlog_json own: any non-blank
+  # tasks-axi and bin/fm-backlog-parse-lib.sh's backlog_json own: any non-blank
   # line under the home's "## Queued" or "## In flight" backlog section, or
   # any *.meta file left under home state/ by a task that secondmate
   # dispatched and never tore down, counts as pending work.
