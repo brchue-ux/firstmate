@@ -11,9 +11,12 @@
 # secondmates and their work is just as invisible from here. Each home found in
 # a registry is asked for its own data/secondmates.md, and every home found that
 # way is indexed exactly like any other. A home with no registry simply has no
-# secondmates and is not a skip. Each resolved physical path is visited at most
-# once, so a registry cycle terminates on its own and the repeat visit is
-# reported as already indexed rather than walked again.
+# secondmates and is not a skip. A registry that EXISTS but cannot be read is a
+# different condition: the homes it would have named cannot be enumerated at
+# all, so that subtree is reported as skipped against the home whose registry it
+# is, rather than passing as a childless home. Each resolved physical path is
+# visited at most once, so a registry cycle terminates on its own and the repeat
+# visit is reported as already indexed rather than walked again.
 #
 # Usage:
 #   fm-fleet-work-index.sh            grouped human view
@@ -31,7 +34,9 @@
 #
 # One unreadable home never fails the run. A home whose backlog is absent,
 # unreadable, or unparseable is skipped, reported by name in a Skipped section
-# (--json: skipped=true with a reason), and every other home is still indexed.
+# (--json: skipped=true with a reason), and every other home is still indexed. A
+# home whose registry is unreadable is still indexed from its own backlog; only
+# its unenumerable secondmates are reported as skipped against its name.
 # Silence is never how a home leaves this index.
 #
 # Open means a structured backlog row under `## In flight` or `## Queued` whose
@@ -81,6 +86,9 @@ if [ -s "$FM_HOME/$SUB_HOME_MARKER" ]; then
   SELF_MATE=$(tr -d '[:space:]' < "$FM_HOME/$SUB_HOME_MARKER" 2>/dev/null || true)
   [ -n "$SELF_MATE" ] || SELF_MATE=main
 fi
+# Worded so it cannot be read as the home's own backlog being unreadable: what
+# failed is the enumeration of that home's secondmates, not its own work.
+UNENUMERABLE_REASON="secondmate registry is unreadable, so this home's secondmates could not be enumerated"
 TITLE_CAP=200
 REASON_CAP=200
 HUMAN_TITLE_CAP=96
@@ -94,7 +102,8 @@ data/secondmates.md, grouped by owning mate and sorted by state then age.
 Discovery is transitive: each home found is asked for its own registry too, so
 a secondmate's own secondmates are indexed as well, each home visited once.
 Read-only: no home's backlog is ever modified. A home with no readable backlog
-is skipped by name, never dropped silently.
+is skipped by name, and so are the secondmates of a home whose own registry
+exists but cannot be read; nothing is ever dropped silently.
 
   --json   emit the fm-fleet-work-index.v1 object instead of the human view
 EOF
@@ -134,9 +143,23 @@ registry_ids() { # <registry-path>
   sed -n 's/^- \([A-Za-z0-9][A-Za-z0-9._-]*\) - .*/\1/p' "$1"
 }
 
+# Absent and unreadable are different answers about a home's secondmates, and
+# collapsing them would let a whole subtree disappear with nothing said. Absent
+# means the home has no secondmates, which is ordinary. Unreadable means its
+# secondmates exist as far as anyone here knows but cannot be named at all.
+registry_state() { # <registry-path> -> absent|readable|unreadable
+  if [ ! -e "$1" ]; then
+    printf 'absent\n'
+  elif [ -f "$1" ] && [ -r "$1" ]; then
+    printf 'readable\n'
+  else
+    printf 'unreadable\n'
+  fi
+}
+
 # One registry's entries as "<id><tab><home>" rows, home empty when the entry
-# records none. A home that has no registry has no secondmates, which is the
-# ordinary case and not a skip, so an absent file yields no rows and no record.
+# records none. Only ever called for a registry that registry_state called
+# readable, so an empty result here means the file genuinely names no homes.
 registry_rows() { # <registry-path>
   local reg=$1 id home
   while IFS= read -r id; do
@@ -147,29 +170,32 @@ registry_rows() { # <registry-path>
 }
 
 # One home's open items as a JSON object:
-#   {mate, home, backlog, skipped, reason, unstructured, items[]}
+#   {mate, home, backlog, registry, skipped, reason, unstructured, items[]}
 # A home that cannot be read yields skipped=true with a reason and no items,
-# which is a normal result here, never an error.
+# which is a normal result here, never an error. Every path a record carries is
+# a path this run actually inspected; a path that does not exist stays null
+# rather than being synthesized into something a reader could go looking for.
 home_index_json() { # <mate> <home-dir> [<skip-reason>]
-  local mate=$1 home=$2 preskip=${3:-} backlog="" raw
-  # No home means no backlog path exists to name. Deriving one anyway would
-  # print a fabricated filesystem-root path the captain could go looking for.
-  [ -z "$home" ] || backlog="$home/data/backlog.md"
+  local mate=$1 home=$2 preskip=${3:-} backlog="" registry="" raw
+  if [ -n "$home" ]; then
+    backlog="$home/data/backlog.md"
+    [ -e "$home/data/secondmates.md" ] && registry="$home/data/secondmates.md"
+  fi
 
   if [ -n "$preskip" ]; then
-    home_skip_json "$mate" "$home" "$backlog" "$preskip"
+    home_skip_json "$mate" "$home" "$backlog" "$preskip" "$registry"
     return 0
   fi
   if [ ! -e "$backlog" ]; then
-    home_skip_json "$mate" "$home" "$backlog" "no backlog file"
+    home_skip_json "$mate" "$home" "$backlog" "no backlog file" "$registry"
     return 0
   fi
   if [ ! -f "$backlog" ] || [ ! -r "$backlog" ]; then
-    home_skip_json "$mate" "$home" "$backlog" "backlog file is not readable"
+    home_skip_json "$mate" "$home" "$backlog" "backlog file is not readable" "$registry"
     return 0
   fi
   if ! raw=$(backlog_json "$backlog" 2>/dev/null) || [ -z "$raw" ]; then
-    home_skip_json "$mate" "$home" "$backlog" "backlog could not be parsed"
+    home_skip_json "$mate" "$home" "$backlog" "backlog could not be parsed" "$registry"
     return 0
   fi
 
@@ -177,6 +203,7 @@ home_index_json() { # <mate> <home-dir> [<skip-reason>]
     --arg mate "$mate" \
     --arg home "$home" \
     --arg backlog "$backlog" \
+    --arg registry "$registry" \
     --argjson now "$NOW_EPOCH" \
     --argjson title_cap "$TITLE_CAP" \
     --argjson reason_cap "$REASON_CAP" '
@@ -216,21 +243,32 @@ home_index_json() { # <mate> <home-dir> [<skip-reason>]
     | {mate: $mate,
        home: $home,
        backlog: $backlog,
+       registry: (if $registry == "" then null else $registry end),
        skipped: false,
        reason: null,
        unstructured: $unstructured,
        items: $items}'
 }
 
-home_skip_json() { # <mate> <home-dir> <backlog-path-or-empty> <reason>
+home_skip_json() { # <mate> <home-dir> <backlog-path-or-empty> <reason> [<registry-path-or-empty>]
   jq -n \
     --arg mate "$1" \
     --arg home "$2" \
     --arg backlog "$3" \
     --arg reason "$4" \
+    --arg registry "${5:-}" \
     '{mate:$mate,home:$home,
       backlog:(if $backlog == "" then null else $backlog end),
+      registry:(if $registry == "" then null else $registry end),
       skipped:true,reason:$reason,unstructured:0,items:[]}'
+}
+
+# The subtree a home's unreadable registry would have named. The home itself is
+# indexed normally from its own backlog; what is skipped here is only the set of
+# secondmates that could not be enumerated, named against the home it belongs to
+# and carrying the registry path that was actually inspected.
+registry_skip_json() { # <mate> <home-dir> <registry-path>
+  home_skip_json "$1" "$2" "" "$UNENUMERABLE_REASON" "$3"
 }
 
 # Walk every home reachable from this home's registry, breadth first, emitting
@@ -239,10 +277,14 @@ home_skip_json() { # <mate> <home-dir> <backlog-path-or-empty> <reason>
 # The visited-path set is what terminates the walk: a cycle reaches an
 # already-visited path, which is reported as already indexed and not descended.
 collect_homes_json() {
-  local id home reason seen=" " resolved frontier next
+  local id home reason seen=" " resolved frontier next childreg
   home_index_json "$SELF_MATE" "$SELF_HOME"
   seen="$seen$SELF_HOME "
-  frontier=$(registry_rows "$REGISTRY")
+  frontier=""
+  case "$(registry_state "$REGISTRY")" in
+    readable) frontier=$(registry_rows "$REGISTRY") ;;
+    unreadable) registry_skip_json "$SELF_MATE" "$SELF_HOME" "$REGISTRY" ;;
+  esac
 
   while [ -n "$frontier" ]; do
     next=""
@@ -274,7 +316,11 @@ collect_homes_json() {
       # Only a freshly resolved home is descended into: re-reading a registry
       # already walked is what would make a cycle loop forever.
       if [ -z "$reason" ]; then
-        next="$next$(registry_rows "$home/data/secondmates.md")"$'\n'
+        childreg="$home/data/secondmates.md"
+        case "$(registry_state "$childreg")" in
+          readable) next="$next$(registry_rows "$childreg")"$'\n' ;;
+          unreadable) registry_skip_json "$id" "$home" "$childreg" ;;
+        esac
       fi
     done <<< "$frontier"
     frontier=$(printf '%s' "$next" | sed '/^$/d')
@@ -311,7 +357,7 @@ index_json() {
                 in_flight: ([$items[] | select(.state == "in_flight")] | length),
                 queued: ([$items[] | select(.state == "queued")] | length)},
        homes: ($homes | map(del(.items)) + ($skipped | map(del(.items)))),
-       skipped: ($skipped | map({mate, home, backlog, reason})),
+       skipped: ($skipped | map({mate, home, backlog, registry, reason})),
        items: $items}'
 }
 
@@ -351,8 +397,11 @@ render_human() { # <index-json>
        + (if (.totals.homes_skipped) > 0
           then ["## Skipped homes (not indexed, nothing assumed about their work)", ""]
                + [ .skipped[]
+                   # The path shown is whichever file the skip is about, and is
+                   # omitted when the skip is about no file at all.
+                   | (.backlog // .registry) as $path
                    | "  \(.mate) - \(.reason)"
-                     + (if .backlog == null then "" else " (\(.backlog))" end) ]
+                     + (if $path == null then "" else " (\($path))" end) ]
                + [""]
           else [] end)
       )

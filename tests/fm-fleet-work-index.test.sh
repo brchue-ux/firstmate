@@ -350,7 +350,95 @@ EOF
   out=$(run_index "$main") || fail "run failed with no registry present"
   assert_contains "$out" "lonely" "this home's work vanished when no mates were registered"
 
-  pass "an absent registry still indexes this home"
+  local json
+  json=$(run_index "$main" --json) || fail "--json failed with no registry present"
+  [ "$(printf '%s' "$json" | jq -r '.totals.homes_skipped')" = 0 ] \
+    || fail "an ordinary childless home was reported as a skip"
+
+  pass "an absent registry still indexes this home and is not a skip"
+}
+
+test_unreadable_registry_skips_only_that_subtree() {
+  local main sub out json
+  if [ "$(id -u)" -eq 0 ]; then
+    echo "skip: running as root, file permissions do not deny reads"
+    return 0
+  fi
+  main=$(new_home main-badreg)
+  sub=$(new_home mate-badreg)
+
+  cat > "$main/data/backlog.md" <<'EOF'
+## In flight
+## Queued
+- [ ] badreg-main - main item (repo: firstmate) (since 2026-07-01)
+## Done
+EOF
+  cat > "$sub/data/backlog.md" <<'EOF'
+## In flight
+## Queued
+- [ ] badreg-sub - the child's own item (repo: s) (since 2026-07-02)
+## Done
+EOF
+
+  register "$main" reglost "$sub"
+  # The child's own registry exists but cannot be read, so whatever homes it
+  # names cannot be enumerated. Its own backlog is a separate, readable file.
+  printf -- '- hidden - a grandchild nobody can name (home: %s; scope: h; projects: h; added 2026-07-09)\n' \
+    "$TMP_ROOT/unknowable" > "$sub/data/secondmates.md"
+  chmod 000 "$sub/data/secondmates.md"
+
+  out=$(run_index "$main") || fail "an unreadable registry aborted the whole run"
+  assert_contains "$out" "badreg-main" "this home's work vanished over a child's unreadable registry"
+  assert_contains "$out" "badreg-sub" \
+    "the home's own items were dropped when only its registry was unreadable"
+  assert_contains "$out" "reglost" "the home with an unreadable registry was not named as skipped"
+  assert_contains "$out" "could not be enumerated" \
+    "the unenumerable subtree was not explained in the human view"
+
+  json=$(run_index "$main" --json) || fail "--json aborted on an unreadable registry"
+  [ "$(printf '%s' "$json" | jq -r '.skipped[] | select(.reason | test("enumerated")) | .mate')" = reglost ] \
+    || fail "the unenumerable subtree was not named against its home in --json"
+  [ "$(printf '%s' "$json" | jq -r '.skipped[] | select(.reason | test("enumerated")) | .registry')" \
+    = "$(cd "$sub" && pwd -P)/data/secondmates.md" ] \
+    || fail "the skip record did not carry the registry path it actually inspected"
+  [ "$(printf '%s' "$json" | jq -r '.skipped[] | select(.reason | test("enumerated")) | .backlog')" = null ] \
+    || fail "the subtree skip claimed a backlog path it is not about"
+  [ "$(printf '%s' "$json" | jq -r '.totals.homes_read')" = 2 ] \
+    || fail "the home with the unreadable registry stopped being indexed itself"
+  [ "$(printf '%s' "$json" | jq '[.items[] | select(.id == "badreg-sub")] | length')" = 1 ] \
+    || fail "the home's own open item was lost with its registry"
+
+  chmod 644 "$sub/data/secondmates.md"
+  pass "an unreadable registry skips only that unenumerable subtree, by name"
+}
+
+test_unreadable_registry_in_this_home_is_reported() {
+  local main json
+  if [ "$(id -u)" -eq 0 ]; then
+    echo "skip: running as root, file permissions do not deny reads"
+    return 0
+  fi
+  main=$(new_home main-ownbadreg)
+  cat > "$main/data/backlog.md" <<'EOF'
+## In flight
+## Queued
+- [ ] ownbadreg - this home still reports its own work (repo: firstmate) (since 2026-07-01)
+## Done
+EOF
+  register "$main" unnameable "$TMP_ROOT/mate-unnameable"
+  chmod 000 "$main/data/secondmates.md"
+
+  json=$(run_index "$main" --json) || fail "--json aborted on this home's own unreadable registry"
+  [ "$(printf '%s' "$json" | jq -r '.totals.homes_skipped')" = 1 ] \
+    || fail "an unreadable registry here read as a healthy single-home fleet"
+  [ "$(printf '%s' "$json" | jq -r '.skipped[] | select(.reason | test("enumerated")) | .registry')" \
+    = "$(cd "$main" && pwd -P)/data/secondmates.md" ] \
+    || fail "this home's unreadable registry was not reported with the path inspected"
+  [ "$(printf '%s' "$json" | jq '[.items[] | select(.id == "ownbadreg")] | length')" = 1 ] \
+    || fail "this home's own work was lost with its registry"
+
+  chmod 644 "$main/data/secondmates.md"
+  pass "this home's own unreadable registry is reported instead of reading as childless"
 }
 
 test_seeded_home_labels_its_own_group_by_name() {
@@ -575,5 +663,7 @@ test_grandchild_without_backlog_is_skipped_by_name
 test_registry_cycle_terminates_with_each_home_once
 test_free_form_rows_are_counted_in_the_human_heading
 test_registry_entry_without_a_home_names_no_fabricated_path
+test_unreadable_registry_skips_only_that_subtree
+test_unreadable_registry_in_this_home_is_reported
 
 echo "ALL TESTS PASSED"
