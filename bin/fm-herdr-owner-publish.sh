@@ -95,22 +95,41 @@ fi
 #                 checkout shares another checkout's repository and herdr can
 #                 already derive its parentage. Never tagged.
 #   standalone  - its own repository (git dir and git common dir are the same
-#                 canonical path), or not a work tree at all. Either way there
-#                 is no shared-repository signal for herdr to group on, which
-#                 is exactly the gap this script fills. Tagged.
-#   undecidable - git is missing, or git answered but its reported paths cannot
-#                 be resolved on disk. Never tagged: leaving the sidebar as it
-#                 is today is always safe, whereas tagging a checkout that
-#                 might be a linked worktree would disturb the free-parentage
-#                 path that already works.
+#                 canonical path), or git positively answered that this is not
+#                 a repository at all. Either way there is no shared-repository
+#                 signal for herdr to group on, which is exactly the gap this
+#                 script fills. Tagged.
+#   undecidable - git is missing, git declined to answer at all (dubious
+#                 ownership, an unreadable or unsupported repository, any other
+#                 tool-level refusal), or git answered but its reported paths
+#                 cannot be resolved on disk. Never tagged: leaving the sidebar
+#                 as it is today is always safe, whereas tagging a checkout
+#                 that might be a linked worktree would disturb the
+#                 free-parentage path that already works.
+#
+# Note the asymmetry between the last two: a non-zero `git rev-parse` is NOT by
+# itself evidence of anything, because git exits 128 both for "there is no
+# repository here" (an answer this script acts on) and for "there is one and I
+# refuse to look at it" (no answer at all). Only the message git prints tells
+# them apart, so the probe below reads git's stderr rather than its status.
 checkout_linked_worktree_state() {  # <dir>
-  local dir=$1 git_dir common_dir abs_git_dir abs_common_dir
+  local dir=$1 probe rc git_dir common_dir abs_git_dir abs_common_dir
   command -v git >/dev/null 2>&1 || { printf 'undecidable'; return 0; }
   [ -d "$dir" ] || { printf 'undecidable'; return 0; }
-  # A `git -C` failure here means git ran and reported that <dir> is not inside
-  # a work tree, which is a real answer, not a tool failure: a checkout that is
-  # not a repository has no shared repository for herdr to group on.
-  git_dir=$(git -C "$dir" rev-parse --git-dir 2>/dev/null) || { printf 'standalone'; return 0; }
+  # Ask git a positive question first and keep what it says on failure. LC_ALL=C
+  # pins the message to git's untranslated wording so the two failure meanings
+  # stay distinguishable under any locale (gettext ignores LANGUAGE under C).
+  probe=$(LC_ALL=C git -C "$dir" rev-parse --is-inside-work-tree 2>&1)
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    case $probe in
+      *'not a git repository'*|*'not a working tree'*) printf 'standalone'; return 0 ;;
+      *) printf 'undecidable'; return 0 ;;
+    esac
+  fi
+  # From here git has proved it can read this checkout, so any further failure
+  # is an anomaly rather than an answer.
+  git_dir=$(git -C "$dir" rev-parse --git-dir 2>/dev/null) || { printf 'undecidable'; return 0; }
   # --git-common-dir predates every git this repo supports (2.5+) and is the
   # only field that distinguishes a linked worktree; if it is unavailable or
   # empty the classification is not merely unknown, it is unmade.
@@ -118,9 +137,12 @@ checkout_linked_worktree_state() {  # <dir>
   [ -n "$git_dir" ] && [ -n "$common_dir" ] || { printf 'undecidable'; return 0; }
   # Both values may be printed relative to <dir>; canonicalize each through the
   # filesystem so a relative ".git" and an absolute "/.../.git" for the same
-  # directory compare equal rather than differing as strings.
-  abs_git_dir=$(cd "$dir" && cd "$git_dir" 2>/dev/null && pwd -P) || { printf 'undecidable'; return 0; }
-  abs_common_dir=$(cd "$dir" && cd "$common_dir" 2>/dev/null && pwd -P) || { printf 'undecidable'; return 0; }
+  # directory compare equal rather than differing as strings. Every cd is
+  # silenced and CDPATH-proofed: this script is a silent no-op on every
+  # classification path, and a set CDPATH must never echo a search hit into the
+  # captured path.
+  abs_git_dir=$(CDPATH='' cd -- "$dir" 2>/dev/null && CDPATH='' cd -- "$git_dir" 2>/dev/null && pwd -P) || { printf 'undecidable'; return 0; }
+  abs_common_dir=$(CDPATH='' cd -- "$dir" 2>/dev/null && CDPATH='' cd -- "$common_dir" 2>/dev/null && pwd -P) || { printf 'undecidable'; return 0; }
   [ -n "$abs_git_dir" ] && [ -n "$abs_common_dir" ] || { printf 'undecidable'; return 0; }
   if [ "$abs_git_dir" = "$abs_common_dir" ]; then
     printf 'standalone'

@@ -18,6 +18,9 @@
 #   (b) linked-worktree secondmate -> no herdr call at all, exit 0
 #   (c) a secondmate home that is not a git repo at all -> tagged, since it
 #       gives herdr no shared-repository signal either
+#   (c2) a LINKED-WORKTREE home whose repository git refuses to read at all
+#       (a tool-level refusal, not "no repository here") -> undecidable, so no
+#       herdr call: a refusal must never be mistaken for a standalone clone
 #   (d) the owner value follows this home's own workspace label, so a
 #       secondmate-shaped publishing home tags with its own label rather than
 #       a hard-coded "firstmate"
@@ -167,6 +170,36 @@ test_non_repo_home_is_tagged() {
   assert_grep '--token owner=firstmate' "$case_dir/herdr.log" \
     "non-repo-home: a home that is not a repository has no shared-repository signal either, so it must still be tagged"
   pass "fm-herdr-owner-publish tags a secondmate home that is not a git repository at all"
+}
+
+# A linked-worktree home whose repository git declines to open at all. git exits
+# non-zero exactly as it does for "not a git repository", but it is refusing,
+# not answering, and the home really is a linked worktree - so treating the
+# refusal as a verdict would tag the one shape that must never be touched.
+# Raising core.repositoryformatversion is a genuine tool-level refusal that
+# every git version produces, standing in for the real-world one (dubious
+# ownership on a home seeded under another uid), which needs a second uid.
+test_git_refusing_to_read_a_linked_worktree_is_never_tagged() {
+  local case_dir probe
+  case_dir=$(make_case git-refusal)
+  make_standalone_repo "$case_dir/upstream"
+  make_linked_worktree "$case_dir/upstream" "$case_dir/sm-home" sm-branch
+  [ -f "$case_dir/sm-home/.git" ] || fail "git-refusal: fixture is not a linked worktree"
+  git_quiet -C "$case_dir/upstream" config core.repositoryformatversion 99
+
+  # The fixture is only meaningful if git actually refuses; assert that first so
+  # a future git that happily reads it turns into a failure, not a false pass.
+  set +e
+  probe=$(LC_ALL=C git -C "$case_dir/sm-home" rev-parse --is-inside-work-tree 2>&1)
+  set -e
+  case $probe in
+    *'not a git repository'*|*'not a working tree'*|true|false)
+      fail "git-refusal: fixture did not produce a tool-level refusal, git said: $probe" ;;
+  esac
+
+  expect_silent_noop "$case_dir" git-refusal \
+    "git-refusal: when git declines to read the home's repository the checkout is undecidable, and a linked-worktree home must not be tagged on a guess"
+  pass "fm-herdr-owner-publish makes no herdr call when git refuses to classify the secondmate's home"
 }
 
 test_owner_value_follows_this_homes_own_label() {
@@ -326,6 +359,7 @@ test_cli_failure_never_fails_the_publisher() {
 test_standalone_clone_is_tagged_without_a_ttl
 test_linked_worktree_is_left_completely_alone
 test_non_repo_home_is_tagged
+test_git_refusing_to_read_a_linked_worktree_is_never_tagged
 test_owner_value_follows_this_homes_own_label
 test_ordinary_crewmate_is_never_tagged
 test_non_herdr_secondmate_is_a_noop
