@@ -279,6 +279,28 @@ FM_AFK_PI_HERDR_E2E=1 HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
 Observed guarantees: pending composer input refused injection and raised one alert; idle Pi accepted one marked escalation; the return gate refused ordinary work while a live blocker remained; resolving the blocker allowed the return flow.
 The dedicated Herdr daemon workspace topology is covered by `tests/fm-afk-launch.test.sh` and preserves the captain tab's pane count.
 
+### Standalone-clone secondmate ownership
+
+The spawn-time owner tag is owned by:
+
+```sh
+HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
+  tests/fm-secondmate-standalone-owner-e2e.test.sh
+```
+
+Observed output:
+
+```text
+ok - real herdr E2E: the primary spawns a standalone-clone secondmate on the herdr backend
+ok - real herdr E2E: a real spawn tags a standalone-clone secondmate's workspace with owner=firstmate
+ok - real herdr E2E: the primary spawns a linked-worktree secondmate into its own workspace
+ok - real herdr E2E: a linked-worktree secondmate's workspace is untouched, carrying no owner token
+ok - real herdr E2E: the owner tag is republished into the same workspace on relaunch, not applied once by hand
+```
+
+Observed guarantee: a real `--secondmate` spawn of a standalone-clone home produced `owner=firstmate` on that home's workspace as read back from Herdr's own `workspace list`; a linked-worktree home spawned the same way carried no owner token at all, leaving the free-parentage path untouched; and after the token was explicitly cleared, relaunching the same home republished it into the same existing workspace held open by a scratch tab, so the placement converges on every launch instead of being a one-time hand-applied fact.
+All lifecycle calls ran through `bin/fm-herdr-lab.sh` under a non-default `fm-lab-` session, and the default-session tripwire found the live default session unchanged afterward.
+
 ## Zellij
 
 The current compatibility floor and latest verification are Zellij 0.44.0 with `jq` on macOS aarch64.

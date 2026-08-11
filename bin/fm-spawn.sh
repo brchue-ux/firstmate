@@ -38,6 +38,11 @@
 #   authority, and every ambiguous recovery stays on the flat fallback after
 #   duplicate-agent risk is independently absent. Treehouse allocation and task
 #   metadata are unchanged.
+#   After writing task metadata, a herdr --secondmate spawn hands that task to
+#   bin/fm-herdr-owner-publish.sh, which tags the secondmate's workspace so
+#   herdr can nest a standalone-clone home under this one and leaves a
+#   linked-worktree home untouched. That script owns the whole contract; the
+#   publish is a decoration that never affects the spawn's outcome.
 #   A clean projected create or exact resume makes one bounded attempt to hold
 #   the one session-scoped presentation-order lock (keyed by named session plus
 #   canonical socket, outside any home's state/) through launch handoff. Lock
@@ -1519,6 +1524,20 @@ META_WINDOW=$T
   fi
 } > "$STATE/$ID.meta"
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
+
+# Herdr nests a secondmate's space under this home's own space by matching the
+# repository the two checkouts share, which a secondmate home that is a linked
+# worktree provides for free. A secondmate home that is its own standalone
+# clone provides no such signal, so it needs one durable metadata token
+# published for it - see bin/fm-herdr-owner-publish.sh, which owns the
+# standalone-vs-linked test, the token, and the deliberate absence of a TTL.
+# Publishing from here rather than once by hand is what makes it converge on
+# every spawn and respawn. The script is a decoration that never fails; the
+# `|| true` is defense in depth for the same reason fm-pr-merge.sh and
+# fm-teardown.sh guard their own herdr publishes.
+if [ "$KIND" = secondmate ] && [ "$BACKEND" = herdr ]; then
+  "$SCRIPT_DIR/fm-herdr-owner-publish.sh" "$ID" || true
+fi
 
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")

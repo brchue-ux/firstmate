@@ -53,6 +53,14 @@ Existing task operations use recorded endpoint ids and do not move a live task w
 The per-home workspace is reused while it has task tabs.
 Closing its last tab can remove the workspace, and the next spawn recreates it.
 
+## Standalone-clone secondmate ownership
+
+Herdr groups workspaces by the repository their checkout belongs to, so a secondmate home that is a linked worktree of the primary's repo is already shown under the primary with no help from Firstmate.
+A secondmate home created as its own standalone clone shares no repository with the primary and would otherwise be shown as a second root.
+Every `--secondmate` spawn on this backend therefore publishes the durable workspace token `owner=<the spawning home's own workspace label>` for a standalone-clone home only, so the placement converges on every launch and respawn rather than needing a one-time manual fix.
+A linked-worktree home receives no publish of any kind.
+`bin/fm-herdr-owner-publish.sh` owns that test, the token, and why it deliberately carries no expiry.
+
 ## Optional presentation spaces
 
 Create local gitignored `config/herdr-presentation-spaces` to request a disposable one-task workspace for each new crewmate or scout.
@@ -278,6 +286,8 @@ tests/fm-backend-herdr-presentation-e2e.test.sh
 tests/fm-backend-herdr-eventwait-smoke.test.sh
 tests/fm-herdr-session-cleanup.test.sh
 tests/fm-herdr-session-cleanup-e2e.test.sh
+tests/fm-herdr-owner-publish.test.sh
+tests/fm-secondmate-standalone-owner-e2e.test.sh
 tests/fm-afk-inject-herdr-e2e.test.sh
 tests/fm-afk-pi-herdr-return-e2e.test.sh
 ```
