@@ -7,6 +7,7 @@
 #          Silent = all good.
 #          Lines: "MISSING: <tool> (install: <command>)",
 #                 "MISSING_MANUAL: <tool> (instructions: <url>)", "NEEDS_GH_AUTH",
+#                 "NO_MISTAKES_OUTDATED: v<installed> -> v<available> available (run: no-mistakes update)",
 #                 "BACKEND_INVALID: <name> (known: <names>)",
 #                 "STARTUP_MEMORY_BUDGET: invalid config/startup-memory-budget - <reason>",
 #                 "CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>",
@@ -64,7 +65,17 @@
 #          treehouse is also MISSING when its installed version lacks
 #          "treehouse get --lease" support.
 #          no-mistakes is also MISSING when its installed version is older than
-#          1.31.2.
+#          1.31.2. That floor is a capability gate, not a currency check: it only
+#          asserts the CLI surface crewmate validation briefs depend on, so any
+#          build at or above it passes forever and staleness alone is invisible
+#          to it. NO_MISTAKES_OUTDATED is the separate currency signal, and it
+#          reuses no-mistakes' own "A new version of no-mistakes is available:
+#          v<installed> -> v<available>" banner rather than querying a forge, so
+#          it stays honest about whichever release channel no-mistakes itself
+#          resolves. The banner is a cached advisory owned by no-mistakes, so
+#          detection is best-effort: no banner means no line. A build below the
+#          floor reports MISSING only, because MISSING already means upgrade and
+#          a second line would be noise. Detection never updates anything.
 #          tasks-axi and quota-axi are required bootstrap tools (same class as
 #          lavish-axi). tasks-axi is also version and feature gated (0.1.1+
 #          with update --archive-body and mv [<id>...]); an installed but
@@ -741,6 +752,25 @@ no_mistakes_compatible() {
   [ "$patch" -ge "$NO_MISTAKES_MIN_PATCH" ]
 }
 
+# Staleness is a different question from the compatibility floor above, and the
+# floor cannot answer it: a home seven minor versions behind still clears a fixed
+# minimum silently, forever. no-mistakes already advertises its own upgrade path
+# on invocation ("A new version of no-mistakes is available: v1.41.2 -> v1.48.0"),
+# so this reads that banner instead of re-implementing release lookup, which keeps
+# the answer tied to whatever channel, mirror, or auth no-mistakes itself resolves
+# "latest" against. The banner is an advisory no-mistakes may print on either
+# stream and refreshes from its own cache, so both streams are captured and an
+# absent banner simply yields no output. Prints "<installed> <available>" without
+# "v" prefixes when a newer release is advertised, and nothing otherwise.
+no_mistakes_advertised_upgrade() {
+  local output
+  command -v no-mistakes >/dev/null 2>&1 || return 1
+  output=$(no-mistakes --version 2>&1) || return 1
+  printf '%s\n' "$output" \
+    | sed -nE 's/.*A new version of no-mistakes is available:[[:space:]]*v?([0-9]+\.[0-9]+\.[0-9]+)[[:space:]]*->[[:space:]]*v?([0-9]+\.[0-9]+\.[0-9]+).*/\1 \2/p' \
+    | head -n 1
+}
+
 x_mode_write_if_changed() {
   local dest=$1 content=$2 mode=$3 parent tmp parent_device current_mode
   parent=${dest%/*}
@@ -1057,8 +1087,18 @@ if fm_backend_list_contains "$TOOLS" treehouse \
   && command -v treehouse >/dev/null 2>&1 && ! treehouse_supports_lease; then
   echo "MISSING: treehouse (install: $(install_cmd treehouse))"
 fi
-if command -v no-mistakes >/dev/null 2>&1 && ! no_mistakes_compatible; then
-  echo "MISSING: no-mistakes (install: $(install_cmd no-mistakes))"
+if command -v no-mistakes >/dev/null 2>&1; then
+  if ! no_mistakes_compatible; then
+    # MISSING already means "upgrade this", so the staleness line is suppressed
+    # here rather than stacking a second upgrade report on the same install.
+    echo "MISSING: no-mistakes (install: $(install_cmd no-mistakes))"
+  else
+    nm_upgrade=$(no_mistakes_advertised_upgrade || true)
+    if [ -n "$nm_upgrade" ]; then
+      IFS=' ' read -r nm_installed nm_available <<< "$nm_upgrade"
+      echo "NO_MISTAKES_OUTDATED: v$nm_installed -> v$nm_available available (run: no-mistakes update)"
+    fi
+  fi
 fi
 if command -v tasks-axi >/dev/null 2>&1 && ! fm_tasks_axi_compatible; then
   echo "MISSING: tasks-axi (install: $(install_cmd tasks-axi))"

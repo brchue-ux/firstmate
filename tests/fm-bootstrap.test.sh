@@ -11,7 +11,8 @@
 # tasks-axi update advertises --archive-body, whether its mv help advertises
 # multi-ID moves, whether quota-axi is on PATH,
 # whether the local backend config opts out of tasks-axi backlog mutations, and
-# which no-mistakes version is on PATH.
+# which no-mistakes version is on PATH, and whether that no-mistakes advertises
+# a newer release (and on which stream).
 # Dedicated fleet-sync cases pin the computed bootstrap timeout, explicit
 # override, blank-env defaulting, partial-output relay, and pre-launch timeout
 # scan.
@@ -64,6 +65,16 @@ SH
 #!/usr/bin/env bash
 if [ "${1:-}" = --version ]; then
   printf '%s\n' "${FM_FAKE_NO_MISTAKES_VERSION:-no-mistakes version v1.31.2 (fake) 2026-06-27T00:02:18Z}"
+  # The real CLI appends its upgrade advisory after the version line. Which
+  # stream carries it is an implementation detail of no-mistakes, so the fake
+  # can put it on either one and the cases pin that bootstrap reads both.
+  if [ -n "${FM_FAKE_NO_MISTAKES_BANNER:-}" ]; then
+    if [ "${FM_FAKE_NO_MISTAKES_BANNER_STREAM:-stderr}" = stdout ]; then
+      printf '\n%s\n' "$FM_FAKE_NO_MISTAKES_BANNER"
+    else
+      printf '\n%s\n' "$FM_FAKE_NO_MISTAKES_BANNER" >&2
+    fi
+  fi
   exit 0
 fi
 exit 0
@@ -320,6 +331,42 @@ older no-mistakes patch reports an upgrade^no-mistakes version v1.31.1 (fake)^mi
 unparseable no-mistakes version reports an upgrade^no-mistakes development build^missing
 ROWS
   pass "bootstrap enforces no-mistakes minimum version"
+}
+
+# The compatibility floor above and this staleness check answer different
+# questions, so they are pinned separately: the floor asserts a CLI capability
+# and passes forever once cleared, while staleness reuses no-mistakes' own
+# upgrade banner to say the install is behind the current release. An empty
+# banner field means the fake advertises no upgrade at all.
+test_no_mistakes_staleness_is_reported_beyond_the_floor() {
+  local label version banner stream expected case_dir fakebin out missing n
+  missing='MISSING: no-mistakes (install: curl -fsSL https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.sh | sh)'
+  n=0
+  while IFS='^' read -r label version banner stream expected; do
+    [ -n "$label" ] || continue
+    n=$((n + 1))
+    case_dir="$TMP_ROOT/no-mistakes-stale-$n"
+    mkdir -p "$case_dir/home/config"
+    printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+    fakebin=$(make_fake_toolchain "$case_dir")
+    add_tasks_axi "$fakebin" "0.1.1"
+    out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+      FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_NO_MISTAKES_VERSION="$version" \
+      FM_FAKE_NO_MISTAKES_BANNER="$banner" FM_FAKE_NO_MISTAKES_BANNER_STREAM="$stream" \
+      "$ROOT/bin/fm-bootstrap.sh")
+    case "$expected" in
+      empty) [ -z "$out" ] || fail "$label: expected silence, got: $out" ;;
+      missing) [ "$out" = "$missing" ] || fail "$label: expected only '$missing', got: $out" ;;
+      *) [ "$out" = "$expected" ] || fail "$label: expected '$expected', got: $out" ;;
+    esac
+  done <<'ROWS'
+a current install advertising no upgrade stays silent^no-mistakes version v1.48.0 (fake)^^^empty
+an advertised upgrade above the floor is reported^no-mistakes version v1.41.2 (fake)^A new version of no-mistakes is available: v1.41.2 -> v1.48.0^stderr^NO_MISTAKES_OUTDATED: v1.41.2 -> v1.48.0 available (run: no-mistakes update)
+an advertised upgrade on stdout is reported the same way^no-mistakes version v1.41.2 (fake)^A new version of no-mistakes is available: v1.41.2 -> v1.48.0^stdout^NO_MISTAKES_OUTDATED: v1.41.2 -> v1.48.0 available (run: no-mistakes update)
+an install below the floor reports only the floor^no-mistakes version v1.31.1 (fake)^A new version of no-mistakes is available: v1.31.1 -> v1.48.0^stderr^missing
+unrelated banner output is not an upgrade advertisement^no-mistakes version v1.48.0 (fake)^no-mistakes notice: read the changelog at 1.48.0 for details^stderr^empty
+ROWS
+  pass "bootstrap reports no-mistakes staleness separately from its compatibility floor"
 }
 
 test_git_is_required_with_supported_install_instruction() {
@@ -901,6 +948,7 @@ test_bootstrap_reporting
 test_scratch_sweep_is_a_locked_mutating_sweep
 test_tmp_usage_is_reported_after_reclamation
 test_no_mistakes_min_version
+test_no_mistakes_staleness_is_reported_beyond_the_floor
 test_git_is_required_with_supported_install_instruction
 test_orca_backend_gates_orca_tool_only_when_selected
 test_session_provider_backends_do_not_require_tmux
