@@ -7,7 +7,7 @@
 #          Silent = all good.
 #          Lines: "MISSING: <tool> (install: <command>)",
 #                 "MISSING_MANUAL: <tool> (instructions: <url>)", "NEEDS_GH_AUTH",
-#                 "NO_MISTAKES_OUTDATED: v<installed> -> v<available> available (run: no-mistakes update)",
+#                 "NO_MISTAKES_OUTDATED: v<installed> -> v<available> available (run: no-mistakes update -y)",
 #                 "BACKEND_INVALID: <name> (known: <names>)",
 #                 "STARTUP_MEMORY_BUDGET: invalid config/startup-memory-budget - <reason>",
 #                 "CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>",
@@ -1096,7 +1096,7 @@ if command -v no-mistakes >/dev/null 2>&1; then
     nm_upgrade=$(no_mistakes_advertised_upgrade || true)
     if [ -n "$nm_upgrade" ]; then
       IFS=' ' read -r nm_installed nm_available <<< "$nm_upgrade"
-      echo "NO_MISTAKES_OUTDATED: v$nm_installed -> v$nm_available available (run: no-mistakes update)"
+      echo "NO_MISTAKES_OUTDATED: v$nm_installed -> v$nm_available available (run: no-mistakes update -y)"
     fi
   fi
 fi

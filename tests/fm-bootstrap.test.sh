@@ -361,8 +361,8 @@ test_no_mistakes_staleness_is_reported_beyond_the_floor() {
     esac
   done <<'ROWS'
 a current install advertising no upgrade stays silent^no-mistakes version v1.48.0 (fake)^^^empty
-an advertised upgrade above the floor is reported^no-mistakes version v1.41.2 (fake)^A new version of no-mistakes is available: v1.41.2 -> v1.48.0^stderr^NO_MISTAKES_OUTDATED: v1.41.2 -> v1.48.0 available (run: no-mistakes update)
-an advertised upgrade on stdout is reported the same way^no-mistakes version v1.41.2 (fake)^A new version of no-mistakes is available: v1.41.2 -> v1.48.0^stdout^NO_MISTAKES_OUTDATED: v1.41.2 -> v1.48.0 available (run: no-mistakes update)
+an advertised upgrade above the floor is reported^no-mistakes version v1.41.2 (fake)^A new version of no-mistakes is available: v1.41.2 -> v1.48.0^stderr^NO_MISTAKES_OUTDATED: v1.41.2 -> v1.48.0 available (run: no-mistakes update -y)
+an advertised upgrade on stdout is reported the same way^no-mistakes version v1.41.2 (fake)^A new version of no-mistakes is available: v1.41.2 -> v1.48.0^stdout^NO_MISTAKES_OUTDATED: v1.41.2 -> v1.48.0 available (run: no-mistakes update -y)
 an install below the floor reports only the floor^no-mistakes version v1.31.1 (fake)^A new version of no-mistakes is available: v1.31.1 -> v1.48.0^stderr^missing
 unrelated banner output is not an upgrade advertisement^no-mistakes version v1.48.0 (fake)^no-mistakes notice: read the changelog at 1.48.0 for details^stderr^empty
 ROWS
