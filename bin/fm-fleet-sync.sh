@@ -1,18 +1,26 @@
 #!/usr/bin/env bash
 # Refresh project clones: fast-forward the checked-out local default branch to
-# origin/<default> when safe, and prune local branches whose upstream tracking
+# <base>/<default> when safe, and prune local branches whose upstream tracking
 # branch is gone (the remote branch was deleted, i.e. its PR merged) and that no
 # worktree still needs.
+# <base> is the project's base remote from the data/projects.md registry
+# (bin/fm-project-mode.sh owns the "base=<remote>" syntax) and defaults to
+# "origin", so a project without one behaves exactly as before. A project whose
+# origin is an upstream it never pushes to - a fork-line clone - records its fork
+# as the base, and every step here (fetch, default-branch probe, fast-forward,
+# and the "N commits behind" STUCK measurement) uses that remote instead. When
+# the base is not origin, origin is fetched too, best effort, so upstream stays
+# readable for comparison.
 # Self-heals the one unambiguously safe drift: a clean, detached HEAD that holds
-# no unique commits (it is an ancestor of origin/<default>) and whose <default>
+# no unique commits (it is an ancestor of <base>/<default>) and whose <default>
 # branch is free to check out is re-attached and then fast-forwarded ("recovered:").
 # Every other off-default state - a non-default named branch, a detached HEAD with
 # unique commits, a dirty tree, or a diverged default - may hold real work, so it
 # is left untouched and reported as a quantified, loud "STUCK: ... N commits behind
 # ... - needs attention" warning rather than a quiet drift. Nothing is ever forced,
 # stashed, or discarded.
-# Still skips (benignly) local-only/no-origin projects, missing remotes/branches,
-# and fetch failures.
+# Still skips (benignly) local-only projects, a clone with no base remote,
+# missing remotes/branches, and fetch failures.
 # Pruning never deletes the checked-out branch or a branch that still has a
 # worktree, so it cannot discard unlanded work; set FM_FLEET_PRUNE=0 to disable it.
 # When the fetch fails on an orphaned .git/packed-refs.lock (left by a ref rewrite
@@ -113,9 +121,9 @@ resolve_project_arg() {
 
 default_branch() {
   local ref branch
-  ref=$(git -C "$PROJ" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
+  ref=$(git -C "$PROJ" symbolic-ref --quiet --short "refs/remotes/$BASE_REMOTE/HEAD" 2>/dev/null || true)
   if [ -n "$ref" ]; then
-    echo "${ref#origin/}"
+    echo "${ref#"$BASE_REMOTE"/}"
     return 0
   fi
   for branch in main master; do
@@ -152,7 +160,7 @@ packed_refs_lock_path() {
   esac
 }
 
-# Run `git -C "$PROJ" fetch origin --prune --quiet`, tolerating an orphaned
+# Run `git -C "$PROJ" fetch "$BASE_REMOTE" --prune --quiet`, tolerating an orphaned
 # packed-refs.lock left by a killed ref rewrite. Sets FETCH_OUTPUT to the git
 # command's combined output and returns its exit status. On the packed-refs.lock
 # signature ONLY: retry up to FLEET_SYNC_PACKED_REFS_LOCK_RETRIES times (a
@@ -165,7 +173,7 @@ packed_refs_lock_path() {
 # a session-start refresh (which discards fleet-sync stderr) still surfaces it.
 fetch_with_packed_refs_lock_guard() {
   local rc attempt=0 lock lock_desc
-  FETCH_OUTPUT=$(git -C "$PROJ" fetch origin --prune --quiet 2>&1); rc=$?
+  FETCH_OUTPUT=$(git -C "$PROJ" fetch "$BASE_REMOTE" --prune --quiet 2>&1); rc=$?
   [ "$rc" -eq 0 ] && return 0
   is_packed_refs_lock_error "$FETCH_OUTPUT" || return "$rc"
 
@@ -175,7 +183,7 @@ fetch_with_packed_refs_lock_guard() {
     attempt=$(( attempt + 1 ))
     echo "$label: fetch blocked by packed-refs lock ($lock_desc); waiting ${FLEET_SYNC_PACKED_REFS_LOCK_RETRY_WAIT_SECS}s and retrying ($attempt/${FLEET_SYNC_PACKED_REFS_LOCK_RETRIES}) (owning process may be exiting)" >&2
     sleep "$FLEET_SYNC_PACKED_REFS_LOCK_RETRY_WAIT_SECS"
-    FETCH_OUTPUT=$(git -C "$PROJ" fetch origin --prune --quiet 2>&1); rc=$?
+    FETCH_OUTPUT=$(git -C "$PROJ" fetch "$BASE_REMOTE" --prune --quiet 2>&1); rc=$?
     if [ "$rc" -eq 0 ]; then
       echo "$label: fetch succeeded on retry; packed-refs lock cleared on its own" >&2
       # One stdout summary so a session-start refresh (which discards fleet-sync
@@ -199,7 +207,7 @@ fetch_with_packed_refs_lock_guard() {
         return "$rc"
       fi
       echo "$label: removed provably-stale packed-refs lock $lock (age >= ${FLEET_SYNC_PACKED_REFS_LOCK_AGE_SECS}s, no live holder) and retrying fetch" >&2
-      FETCH_OUTPUT=$(git -C "$PROJ" fetch origin --prune --quiet 2>&1); rc=$?
+      FETCH_OUTPUT=$(git -C "$PROJ" fetch "$BASE_REMOTE" --prune --quiet 2>&1); rc=$?
       if [ "$rc" -eq 0 ]; then
         echo "$label: fetch succeeded after stale packed-refs lock cleanup" >&2
         echo "$label: recovered: removed a stale packed-refs lock (no live holder)"
@@ -285,8 +293,10 @@ stuck_state() {
 }
 
 # Loud, quantified report for a clone we deliberately leave untouched. Includes
-# how far behind origin/<default> it is, so a chronically-stuck clone is visibly
-# distinct from a benign one-off skip.
+# how far behind <base>/<default> it is, so a chronically-stuck clone is visibly
+# distinct from a benign one-off skip. Measuring against the clone's own base
+# remote is what keeps the number meaningful for a fork-line clone, whose
+# distance to origin/<default> can never reach zero.
 report_stuck() {
   local state=$1 behind
   behind=$(git -C "$PROJ" rev-list --count "HEAD..$BASE" 2>/dev/null) || behind="?"
@@ -305,14 +315,19 @@ sync_project() {
     echo "$label: skipped: not a git repo"
     return 0
   fi
-  mode_line=$("$FM_ROOT/bin/fm-project-mode.sh" "$label" 2>/dev/null || echo "no-mistakes off")
-  mode=${mode_line%% *}
+  mode_line=$("$FM_ROOT/bin/fm-project-mode.sh" "$label" 2>/dev/null || echo "no-mistakes off origin")
+  # The registry's base remote is the clone's real working line; "origin" for
+  # every project that does not record one. bin/fm-project-mode.sh validates it.
+  read -r mode _ BASE_REMOTE <<EOF
+$mode_line
+EOF
+  [ -n "$BASE_REMOTE" ] || BASE_REMOTE=origin
   if [ "$mode" = "local-only" ]; then
     echo "$label: skipped: local-only project"
     return 0
   fi
-  if ! git -C "$PROJ" remote get-url origin >/dev/null 2>&1; then
-    echo "$label: skipped: no origin remote"
+  if ! git -C "$PROJ" remote get-url "$BASE_REMOTE" >/dev/null 2>&1; then
+    echo "$label: skipped: no $BASE_REMOTE remote"
     return 0
   fi
 
@@ -325,13 +340,22 @@ sync_project() {
     return 0
   fi
 
+  # Upstream stays readable for comparison when it is not the base: a fork-line
+  # clone still wants origin's refs on disk, but an unreachable upstream must
+  # never block the base sync, so this is best effort and quiet on stdout.
+  if [ "$BASE_REMOTE" != origin ] && git -C "$PROJ" remote get-url origin >/dev/null 2>&1; then
+    if ! git -C "$PROJ" fetch origin --prune --quiet >/dev/null 2>&1; then
+      echo "$label: upstream origin fetch failed; continuing on base remote $BASE_REMOTE" >&2
+    fi
+  fi
+
   prune_gone_branches || true
 
   DEFAULT=$(default_branch) || {
     echo "$label: skipped: cannot determine default branch"
     return 0
   }
-  BASE="origin/$DEFAULT"
+  BASE="$BASE_REMOTE/$DEFAULT"
   if ! git -C "$PROJ" rev-parse --verify --quiet "$BASE^{commit}" >/dev/null; then
     echo "$label: skipped: $BASE does not exist"
     return 0
