@@ -2,7 +2,7 @@
 
 This document is the authoritative human-readable contract for the cd-guard PreToolUse seatbelt.
 `bin/fm-cd-command-policy.mjs` is the single decision owner.
-`bin/fm-cd-pretool-check.sh` is the stable harness transport, primary-checkout scope, and output renderer.
+`bin/fm-cd-pretool-check.sh` is the stable harness transport, primary-session scope, and output renderer.
 The tracked harness adapters forward command text without classifying it.
 
 It is the third member of a family of primary-session guards that share the same cross-harness hook machinery:
@@ -19,19 +19,26 @@ This guard is not a general sandbox.
 It classifies shell command positions only; it never evaluates, expands, sources, or runs any byte of the submitted command.
 Its threat model is agent mistakes, the same as the watcher-arm seatbelt: an accidental bare `cd projects/foo`, not a deliberately obfuscated bypass.
 
-## Scope: plain firstmate checkouts only
+## Scope: primary firstmate sessions only
 
-The guard fires only in a plain firstmate checkout where git-dir equals git-common-dir.
+The guard fires only in a primary firstmate session - the main home, or a secondmate's own home.
 It is a silent no-op (exit 0, no output) everywhere else, so it never interferes with a crewmate or scout that legitimately works inside its own project or firstmate task worktree.
 
-`bin/fm-cd-pretool-check.sh` owns its checkout detection; the turn-end guard's marker-aware scope is a separate contract (`docs/turnend-guard.md`).
-A plain, non-worktree checkout has `git rev-parse --git-dir` equal to `git rev-parse --git-common-dir`.
-A crewmate or scout task worktree - the shape `bin/fm-spawn.sh` always hands out - is a linked git worktree where the two differ, so the guard is inert there.
-The checkout must also carry `AGENTS.md` and `bin/`, and any failure to confirm the primary is treated as inert, never as a block.
+`bin/fm-cd-pretool-check.sh` delegates that decision to `fm_primary_scope_matches` in `bin/fm-primary-scope-lib.sh`, the single owner of "is this a guarded primary" shared with the turn-end guard ([`turnend-guard.md`](turnend-guard.md)), the subagent seatbelt ([`subagent-guard.md`](subagent-guard.md)), and the session-start nudge ([`sessionstart-nudge.md`](sessionstart-nudge.md)).
+That predicate owns the full rule, including what makes a `.fm-secondmate-home` marker valid; the consequences specific to this guard are:
 
-The cd-guard does not inspect `.fm-secondmate-home`.
-It therefore applies in a git-cloned secondmate home where git-dir equals git-common-dir, but remains inert in a treehouse-leased secondmate home that is itself a linked worktree.
-Secondmate child crew and scout worktrees are likewise inert under the linked-worktree test.
+- A secondmate home carrying a valid marker is force-included, whether treehouse leased it as a linked worktree or it is a git-cloned plain checkout.
+  A secondmate runs its own primary firstmate session and is where the fleet's project work actually happens, so it needs this seatbelt at least as much as the main home does.
+- An unmarked root is guarded only when it is a plain checkout whose `git rev-parse --git-dir` equals `git rev-parse --git-common-dir`.
+  A crewmate or scout task worktree - the shape `bin/fm-spawn.sh` always hands out, including a secondmate's own children - is a linked git worktree where the two differ and no marker is present, so the guard stays inert there.
+- The root must carry `AGENTS.md` and `bin/`, and the effective home must carry its state directory (`FM_STATE_OVERRIDE`, else `FM_HOME/state`).
+  `FM_HOME` resolves through `bin/fm-home-anchor-lib.sh` ([`configuration.md`](configuration.md#fm_home)); when that resolution refuses because it cannot say which home this session belongs to, the guard exits 0 rather than judging a command against another home.
+
+Any failure to confirm the primary is treated as inert, never as a block.
+
+The marker force-include is load-bearing, not decorative.
+A raw git-dir test alone leaves this guard silently inert in every treehouse-leased secondmate home while guarding only the main home, which `AGENTS.md` hard rule 1 already forbids from writing to a project at all - protection exactly inverted against the risk.
+The leased-secondmate fixture under [Automated validation](#automated-validation) is the regression test for that inversion.
 
 ## Block vs allow
 
@@ -82,11 +89,11 @@ It does not permit `cd /home/project`, because an absolute-path `cd` remains a p
 - OpenCode sends the exact command string through `--command <exact string>`.
 - Pi and pi-signed send the exact command string through `--command <exact string>`.
 
-Processing order is cheapest-first: a strict-superset prefilter, then the primary-checkout scope, then the Node policy owner.
+Processing order is cheapest-first: a strict-superset prefilter, then the primary-session scope, then the Node policy owner.
 The prefilter removes ordinary single quotes, double quotes, backslashes, carriage returns, and newlines before fast-allowing any command that carries no `cd`, `pushd`, or `popd` substring and no quoting-decoder marker (`$'` ANSI-C or `$"` locale), so quoted or escaped command-word fragments delegate to the policy while most commands never pay for the git scoping calls or the Node process.
 The quoting-decoder marker set is coupled to the classifier's decoder set in `bin/fm-arm-command-policy.mjs`: adding any new quote or expansion form the classifier decodes requires extending the prefilter marker set in the same change, or it stops being a strict superset.
 
-Empty stdin, unparseable JSON, missing `jq` on the stdin path, missing Node, a missing policy owner, or an invalid policy response all fail open with exit 0 and no output.
+Empty stdin, unparseable JSON, missing `jq` on the stdin path, a missing shared scope library, an unresolvable `FM_HOME`, missing Node, a missing policy owner, or an invalid policy response all fail open with exit 0 and no output.
 A broken hook must never deny every shell tool call.
 
 ## Output contract
@@ -125,7 +132,11 @@ Every shell variable reference in the Grok hook command carries an inline defaul
 
 `tests/fm-cd-pretool-check.test.sh` owns the acceptance matrix.
 Every block and allow case runs through Codex-shaped stdin, Claude-shaped stdin, Grok-shaped stdin, OpenCode-shaped CLI, and Pi-shaped CLI entry forms.
-The suite also proves the end-to-end cwd-leak regression (a firstmate-owned backlog write leaking into a project clone, then denied at the exact command), the checkout scoping (fires in a git-cloned secondmate fixture, inert in a crewmate/scout linked worktree, inert outside a firstmate checkout, inert outside a git repo), the fail-open transport behavior, the prefilter fast path, the policy CLI output contract, and the per-harness wiring.
+The suite also proves the end-to-end cwd-leak regression (a firstmate-owned backlog write leaking into a project clone, then denied at the exact command), the primary-session scoping, the fail-open transport behavior, the prefilter fast path, the policy CLI output contract, and the per-harness wiring.
+
+The scoping fixtures are the regression record for the leased-secondmate inversion above.
+Two of them are linked git worktrees that differ only by the marker: a treehouse-leased secondmate home carrying a valid `.fm-secondmate-home`, which must fire, and a crewmate/scout task worktree carrying none, which must stay inert.
+The suite also covers the git-cloned secondmate home (fires), a checkout without `AGENTS.md`, a directory outside any git repo, a home with no state directory, and a deployment missing a shared scope library (all inert and silent).
 
 Run:
 
@@ -137,6 +148,19 @@ node --check bin/fm-arm-command-policy.mjs
 tests/fm-cd-pretool-check.test.sh
 tests/fm-arm-pretool-check.test.sh
 ```
+
+## Live validation record, 2026-08-13 (leased-secondmate scope)
+
+Evidence that widening the scope to marked secondmate homes turns the guard on where it was inert without blocking legitimate work.
+The checker was run directly against real homes with `FM_ROOT_OVERRIDE` and `FM_HOME` pointing at each home; the guard only reads and prints, so no home was modified and no harness was launched.
+
+- Every registered secondmate home in `data/secondmates.md` reported `ACTIVE` (exit 2 on `cd projects/x`): 16 treehouse-leased linked worktrees plus one git-cloned plain home.
+  Against the pre-change checker the same leased fixture exits 0.
+- The main home still reports `ACTIVE`, and a crewmate task worktree of this repo still reports inert with both streams empty.
+- In a real leased secondmate home (`homeauto`, a linked worktree whose git-dir is under the parent repo's `.git/worktrees/`), 17 documented safe forms were allowed with empty output - `git -C <clone> status`, `git -C <clone> log`, `(cd <clone> && git status)`, `bash -c 'cd <clone> && ls'`, `env -C <clone> make build`, `make -C <clone> test`, `ls <clone>`, an absolute-path `cat`, `tasks-axi list`, `bin/fm-crew-state.sh <id>`, `echo "cd <clone>"`, `grep -rn "cd " docs/`, `find . -execdir cd {} \;`, `cd <clone> &`, `command -v cd`, `cdk deploy`, `git checkout main`.
+  The three incident shapes were denied with the `[persistent-cd]` code: `cd <clone>`, `cd <clone> && mkdir newdir`, and `pushd <clone>`.
+
+Not covered by this record: no harness was driven end to end in a secondmate home, so the per-harness deny rendering in that topology still rests on the 2026-07-11 harness record below plus `tests/fm-cd-pretool-check.test.sh`, which runs every case through all five entry forms.
 
 ## Live validation record, 2026-07-11
 
