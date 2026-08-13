@@ -30,7 +30,15 @@ printf ' <%s>' "$@" >> "${FM_RUNTIME_LOG:?}"
 printf '\n' >> "${FM_RUNTIME_LOG:?}"
 exit 0
 SH
-  chmod +x "$TMP_ROOT/$dir/fakebin/tmux" "$TMP_ROOT/$dir/fakebin/treehouse"
+  cat > "$TMP_ROOT/$dir/fakebin/chrome-devtools-axi" <<'SH'
+#!/usr/bin/env bash
+printf 'chrome-devtools-axi session=<%s>' "${CHROME_DEVTOOLS_AXI_SESSION-UNSET}" >> "${FM_RUNTIME_LOG:?}"
+printf ' <%s>' "$@" >> "${FM_RUNTIME_LOG:?}"
+printf '\n' >> "${FM_RUNTIME_LOG:?}"
+exit 0
+SH
+  chmod +x "$TMP_ROOT/$dir/fakebin/tmux" "$TMP_ROOT/$dir/fakebin/treehouse" \
+    "$TMP_ROOT/$dir/fakebin/chrome-devtools-axi"
   printf '%s\n' "$TMP_ROOT/$dir"
 }
 
@@ -184,6 +192,39 @@ test_recorded_process_identity_cleanup_is_exact() {
   pass "process cleanup: creation-time PID identity removes only the exact child and preserves the control child"
 }
 
+# The chrome-devtools-axi bridge detaches itself from the pane at startup, so
+# closing the endpoint and returning the worktree both miss it and it keeps a
+# headless Chrome tree resident. Cleanup stops the session the brief pinned to
+# this task - and only that one, because a bare stop would take down the default
+# session, which belongs to whatever sibling home is using it right now.
+test_browser_session_cleanup_is_scoped_to_the_task() {
+  local dir id=browser-task other=browser-other invocations
+  dir=$(make_case browser-session)
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/nonexistent-worktree" "project=$dir/nonexistent-project" \
+    "kind=scout" "mode=no-mistakes"
+  # A second task's records, present throughout, so a blanket stop would be
+  # visible as an extra invocation rather than inferred from absence.
+  fm_write_meta "$dir/home/state/$other.meta" \
+    "window=firstmate:fm-$other" "endpoint_task_id=$other" \
+    "worktree=$dir/nonexistent-worktree" "project=$dir/nonexistent-project" \
+    "kind=scout" "mode=no-mistakes"
+
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "scoped browser cleanup teardown failed: $(cat "$dir/stderr")"
+
+  grep -Fqx "chrome-devtools-axi session=<fm-$id> <stop>" "$dir/runtime.log" \
+    || fail "cleanup did not stop the task's own browser session: $(cat "$dir/runtime.log")"
+  invocations=$(grep -c '^chrome-devtools-axi ' "$dir/runtime.log")
+  [ "$invocations" -eq 1 ] \
+    || fail "cleanup made $invocations browser calls, expected exactly one: $(cat "$dir/runtime.log")"
+  grep '^chrome-devtools-axi ' "$dir/runtime.log" | grep -qv "session=<fm-$id>" \
+    && fail "cleanup ran a browser command outside this task's session: $(cat "$dir/runtime.log")"
+  assert_present "$dir/home/state/$other.meta" "cleanup disturbed an unrelated task's records"
+  pass "fm-teardown: cleanup stops exactly the task's own pinned browser session and no other"
+}
+
 isolated_tmux_window_exists() {  # <dir> <socket> <session> <window>
   ( cd "$1" && "$REAL_TMUX" -S "$2" list-windows -t "$3" -F '#{window_name}' 2>/dev/null ) \
     | grep -Fqx "$4"
@@ -272,4 +313,5 @@ test_invalid_endpoint_records_refuse_before_mutation
 test_supported_backend_endpoint_records_validate
 test_tmux_empty_target_refuses_without_invocation
 test_recorded_process_identity_cleanup_is_exact
+test_browser_session_cleanup_is_scoped_to_the_task
 test_isolated_tmux_invalid_and_valid_cleanup

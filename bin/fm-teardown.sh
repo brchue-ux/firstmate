@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Tear down a finished task: return the treehouse worktree, release the Orca
 # worktree, or retire a secondmate home; kill the recorded runtime endpoint,
+# stop the task's own pinned browser session (see stop_task_browser_session -
+# scoped to fm-<task-id>, never a blanket stop),
 # clear volatile state, refresh/prune the project's clone for PR-based ship
 # tasks, then print a backlog-refresh reminder for ship and scout teardowns
 # (a secondmate teardown prints none, since secondmates are not backlog items).
@@ -886,6 +888,34 @@ safe_rm_rf() {
   rm -rf -- "$target"
 }
 
+# Best-effort stop of the browser session bin/fm-brief.sh pins to a task.
+# chrome-devtools-axi's bridge calls setsid() at startup, so it sits in neither
+# the endpoint's process group nor its session: closing the pane, returning the
+# worktree, and removing the worktree's files all miss it, and it keeps a
+# headless Chrome tree resident afterwards. Its own `stop` is the only thing
+# that ends it.
+#
+# SCOPED BY SESSION NAME ONLY. A bare `chrome-devtools-axi stop` would stop the
+# default session, which is a sibling home's live browser - the same class of
+# mistake AGENTS.md section 8 forbids for `pkill -f bin/fm-watch.sh`. The name
+# comes from the task id, so this can only ever reach the session this task's
+# own brief told it to use.
+#
+# Failure is never fatal: the tool may not be installed, the task may never have
+# opened a browser, and a bridge that is already gone is the outcome we wanted.
+# It is time-bounded because a wedged bridge must not wedge cleanup.
+stop_task_browser_session() {
+  local task_id=$1
+  [ -n "$task_id" ] || return 0
+  command -v chrome-devtools-axi >/dev/null 2>&1 || return 0
+  if command -v timeout >/dev/null 2>&1; then
+    CHROME_DEVTOOLS_AXI_SESSION="fm-$task_id" timeout 20 chrome-devtools-axi stop >/dev/null 2>&1 || true
+  else
+    CHROME_DEVTOOLS_AXI_SESSION="fm-$task_id" chrome-devtools-axi stop >/dev/null 2>&1 || true
+  fi
+  return 0
+}
+
 safe_rm_rf_child_worktree() {
   local target=$1 project=$2
   validate_child_worktree_for_removal "$target" "$project" >/dev/null || return 1
@@ -1007,6 +1037,7 @@ cleanup_firstmate_home_children() {
         fm_backend_kill "$child_backend" "$child_t" "$(meta_value "$child_meta" zellij_tab_id)" "fm-$child_id" 2>/dev/null || true
       fi
     fi
+    stop_task_browser_session "$child_id"
     if [ "$child_kind" = secondmate ]; then
       child_home=$(meta_value "$child_meta" home)
       [ -n "$child_home" ] || child_home=$child_wt
@@ -1214,6 +1245,10 @@ if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
 elif [ "$BACKEND" != orca ]; then
   fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
 fi
+# Alongside the endpoint kill above, and unconditional because the Orca branch
+# closes its terminal earlier: a detached browser bridge outlives every one of
+# those paths.
+stop_task_browser_session "$ID"
 if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
   if [ "$(fm_backend_herdr_pane_agent_state "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_PANE")" = dead ]; then
     rm -f "$HERDR_PRESENTATION_JOURNAL"

@@ -43,6 +43,14 @@ export FM_GATE_REFUSE_BYPASS=1
 # launch line so it cannot follow a crewmate out of the suite.
 export FM_HOME_BINDING=test-harness
 
+# Hermetic browser-bridge sweep. bin/fm-browser-sweep.sh reads the developer's
+# real chrome-devtools-axi state root by default, so without this any browser
+# session of their own left idle past the window would print a BROWSER_SWEEP
+# line into every suite that asserts bootstrap silence - a failure caused by the
+# host, not the change under test. Pointed at a path that cannot exist; the
+# sweep's own suite sets its fixture root explicitly.
+export FM_BROWSER_SWEEP_ROOT=/nonexistent/fm-test-no-browser-state
+
 # Resolve the repo root from this library's own location. Consumed by sourcing
 # test files, not by this library, so it reads as "unused" here.
 # shellcheck disable=SC2034

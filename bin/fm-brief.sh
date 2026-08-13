@@ -56,6 +56,13 @@
 # hears from firstmate. The preamble deliberately only frames that envelope:
 # bin/fm-operational-input.sh owns the wire format and must not be restated here.
 # tests/fm-brief.test.sh asserts both facts against generated briefs.
+# Every crewmate scaffold pins the task's browser session to
+# CHROME_DEVTOOLS_AXI_SESSION=fm-<task-id> and requires the worker to stop it
+# before reporting a terminal state. The chrome-devtools-axi bridge detaches
+# itself from the pane, so it survives teardown's kills and holds a headless
+# Chrome tree open indefinitely; the session name is the only handle left, and
+# pinning it is what lets bin/fm-teardown.sh stop this task's browser and no
+# other. bin/fm-browser-sweep.sh is the backstop for workers that never report.
 # Every scaffold's status protocol distinguishes the configured
 # declared-external-wait verb (FM_CLASSIFY_PAUSED_VERB, default "paused") from
 # "blocked:": pause for a known external wait expected to clear on its own,
@@ -158,6 +165,19 @@ shell_quote() {
 }
 
 STATUS_FILE=$(shell_quote "$STATE/$ID.status")
+
+# The browser rule, stated once for both the scout and ship scaffolds.
+# chrome-devtools-axi starts a bridge that detaches itself from the pane, so it
+# survives the pane closing, the worktree being returned, and every kill
+# teardown performs; the session name is the only handle anything has on it
+# afterwards. Pinning it to the task id makes the bridge attributable and lets
+# teardown stop exactly this task's session and no other, and asking the worker
+# to stop it before reporting closes the case where teardown never runs.
+BROWSER_RULE="3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
+   Prefix EVERY chrome-devtools-axi call with \`CHROME_DEVTOOLS_AXI_SESSION=fm-$ID\` so the browser it
+   starts belongs to this task; an unpinned call leaves behind a browser nobody can attribute or stop.
+   If you used the tool at all, run \`CHROME_DEVTOOLS_AXI_SESSION=fm-$ID chrome-devtools-axi stop\`
+   before you append \`done:\` or \`failed:\` - it outlives your worktree otherwise."
 
 if [ "$KIND" = secondmate ]; then
 SECONDMATE_PROJECTS=""
@@ -314,7 +334,7 @@ The report is the only thing that survives, so anything worth keeping must be in
 # Rules
 1. Never push to any remote and never open a PR.
 2. Stay inside this worktree; the only files you may write outside it are the report and the status file below.
-3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
+$BROWSER_RULE
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
@@ -450,7 +470,7 @@ If the top-level path is firstmate's own main repository checkout, or not the wo
 # Rules
 $RULE1
 2. Stay inside this worktree; modify nothing outside it.
-3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
+$BROWSER_RULE
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.

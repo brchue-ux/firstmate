@@ -15,6 +15,7 @@
 #                 "PR_CHECK_MIGRATION: <private remediation>",
 #                 "SCRATCH_SWEEP: <name|temp root>: skipped: <reason>",
 #                 "TMP_USAGE: <temp root>: warn|high|critical|unknown: <detail>",
+#                 "BROWSER_SWEEP: <session>: idle|skipped: <detail>",
 #                 "TANGLE: <remediation>",
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
 #                 "NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>",
@@ -106,6 +107,14 @@
 #          later commands fail silently rather than visibly; bin/fm-tmp-usage.sh
 #          owns the measurement and thresholds, and a healthy root is silent. It
 #          only measures, so it runs in detect-only sessions too.
+#          The browser sweep then reports chrome-devtools-axi bridges no task is
+#          using any more. The bridge detaches itself from the pane that started
+#          it, so nothing a teardown kills can reach it and each one holds a
+#          headless Chrome tree open; bin/fm-browser-sweep.sh owns the idle rules
+#          and never stops a session, because stopping a bridge a live worker
+#          still needs is worse than leaving an idle one. A BROWSER_SWEEP line
+#          carries the session-scoped stop command for the operator to run. It
+#          only reads, so it runs in detect-only sessions too.
 #          Fleet sync fetches, fast-forwards safe default-branch states, reports
 #          recovered and STUCK clone drift, and prunes gone local branches; it is
 #          bounded by FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT when it is a non-empty
@@ -251,6 +260,24 @@ tmp_usage_check() {
   esac
   [ -n "$out" ] || return 0
   echo "TMP_USAGE: $out"
+}
+
+browser_sweep() {
+  # The chrome-devtools-axi bridge detaches itself from the pane that started
+  # it, so no teardown, worktree return, or process-group kill can reach it;
+  # bin/fm-teardown.sh stops the task's own pinned session, and this reports the
+  # ones whose crewmate never got that far. It only reads, so it runs in
+  # detect-only sessions too - an orphaned browser tree costs the same memory
+  # whether or not this session holds the lock. The idle rules and the decision
+  # never to stop anything are owned by bin/fm-browser-sweep.sh.
+  [ -x "$FM_ROOT/bin/fm-browser-sweep.sh" ] || return 0
+  local out line
+  out=$("$FM_ROOT/bin/fm-browser-sweep.sh" --protect-home "$FM_HOME" 2>/dev/null || true)
+  [ -n "$out" ] || return 0
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    echo "BROWSER_SWEEP: $line"
+  done <<<"$out"
 }
 
 fleet_sync() {
@@ -1089,6 +1116,9 @@ fi
 # Report what is left in the temp root after any reclamation above. Not gated on
 # the lock: it only measures.
 tmp_usage_check
+# Same class of shared-host pressure, same read-only contract: report browser
+# bridges no task is using any more.
+browser_sweep
 
 if [ "$BACKEND_VALID" -eq 0 ]; then
   echo "BACKEND_INVALID: $BACKEND (known: $FM_BACKEND_KNOWN)"
