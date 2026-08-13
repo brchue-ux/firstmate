@@ -5,6 +5,10 @@
 # `fm-fleet-snapshot.v1`.
 # The command is read-only: it does not acquire the session lock, drain wakes,
 # arm watchers, mutate backlog state, or write reports.
+# Its only writes are an ephemeral private scratch directory under
+# ${TMPDIR:-/tmp}, created on first use and removed by the EXIT trap, so it
+# needs `mktemp` and a writable temp root; the comment on SNAPSHOT_SCRATCH_DIR
+# owns why the cross-home aggregate is carried in files rather than arguments.
 #
 # Top-level fields:
 #   schema: stable schema id.
@@ -610,6 +614,36 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
 FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME=${FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME:-10}
 case "$FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME" in ''|*[!0-9]*) FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME=10 ;; esac
 
+# Cross-home aggregation moves its bulk JSON through scratch files rather than
+# jq arguments. One execve argument is capped well below ARG_MAX (128 KiB on
+# Linux), and the registered-secondmate aggregate passes that cap at an ordinary
+# fleet size: accumulating it through a per-iteration `--argjson` also cost
+# quadratic work and failed with "Argument list too long" partway through the
+# registry. The scratch directory is created on first use and removed on exit.
+SNAPSHOT_SCRATCH_DIR=
+# shellcheck disable=SC2317,SC2329 # Invoked by the EXIT trap below.
+snapshot_scratch_cleanup() {
+  [ -z "$SNAPSHOT_SCRATCH_DIR" ] || rm -rf -- "$SNAPSHOT_SCRATCH_DIR"
+  SNAPSHOT_SCRATCH_DIR=
+}
+trap snapshot_scratch_cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+# Sets SNAPSHOT_SCRATCH_PATH rather than printing it: a command substitution
+# would create the directory inside a subshell, leaving the parent with nothing
+# to clean up on exit.
+SNAPSHOT_SCRATCH_PATH=
+snapshot_scratch_path() {  # <name>
+  if [ -z "$SNAPSHOT_SCRATCH_DIR" ]; then
+    # The `-scratch` suffix keeps this out of the `fm-fleet-snapshot.*`
+    # namespace that tests/lib.sh's fm_test_tmproot already uses, so a leaked
+    # scratch directory stays distinguishable from a test fixture root.
+    SNAPSHOT_SCRATCH_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-fleet-snapshot-scratch.XXXXXX") || return 1
+  fi
+  SNAPSHOT_SCRATCH_PATH="$SNAPSHOT_SCRATCH_DIR/$1"
+}
+
 run_timed() {  # <seconds> <command...>
   local seconds=$1
   shift
@@ -940,7 +974,7 @@ secondmate_current_json() {  # <parent-tasks-json>
   local tasks=$1 registry union rows total_registered total shown truncated
   local row id home registered registry_error task status_file event_raw event_note event_epoch event_age
   local activity_scan activities decisions reconciliation provenance freshness reason summary summary_rc summary_bytes summary_valid summary_reason summary_invalidity state current_reason terminal terminal_contradiction contradiction
-  local records='[]' seen_homes=''
+  local records_file seen_homes=''
   registry=$(registry_secondmates_json) || return 1
   union=$(jq -n --argjson registry "$registry" --argjson tasks "$tasks" '
     ($registry.records // []) as $registered
@@ -962,6 +996,10 @@ secondmate_current_json() {  # <parent-tasks-json>
   rows=$(printf '%s' "$union" | jq -c --argjson cap "$FM_SNAPSHOT_SECONDMATES" '(if $cap == 0 then .records else .records[:$cap] end)[]')
   shown=$(printf '%s\n' "$rows" | grep -c . || true)
   truncated=$((total - shown))
+
+  snapshot_scratch_path records.jsonl || return 1
+  records_file=$SNAPSHOT_SCRATCH_PATH
+  : > "$records_file" || return 1
 
   while IFS= read -r row; do
     [ -n "$row" ] || continue
@@ -1109,13 +1147,19 @@ secondmate_current_json() {  # <parent-tasks-json>
          parent_event:{raw:$event_raw,note:$event_note,age_seconds:$event_age,open_activities:$activities,open_decisions:$decisions,activity_scan:$activity_scan},
          terminal_evidence:$terminal,contradiction:false}')
     fi
-    records=$(jq -n --argjson records "$records" --argjson record "$record" '$records + [$record]')
+    # An empty record means the jq above failed. Appending it would drop this
+    # home from the aggregate silently, where accumulating through an argument
+    # used to fail the whole snapshot; refuse rather than under-report a home.
+    [ -n "$record" ] || return 1
+    printf '%s\n' "$record" >> "$records_file" || return 1
   done <<EOF
 $rows
 EOF
+  # --slurpfile reads the appended stream back in registry order, so the records
+  # array is identical to the one the per-iteration append produced.
   jq -n \
     --argjson registry "$(printf '%s' "$union" | jq '.registry')" \
-    --argjson records "$records" \
+    --slurpfile records "$records_file" \
     --argjson total_registered "$total_registered" \
     --argjson total "$total" \
     --argjson shown "$shown" \
@@ -1123,22 +1167,24 @@ EOF
     '{registry:$registry,records:$records,total_registered:$total_registered,total:$total,shown:$shown,truncated:$truncated}'
 }
 
-secondmate_landed_from_current_json() {  # <secondmate-current-json>
-  jq -n --argjson current "$1" '
-    {records:[ $current.records[]
+# Reads the aggregate from a file for the same argument-size reason: at fleet
+# scale it does not fit in one jq argument.
+secondmate_landed_from_current_json() {  # <secondmate-current-file>
+  jq '
+    {records:[ .records[]
       | select(.provenance.selected == "structured-home") as $mate
       | $mate.landed[]
       | . + {home:$mate.home,home_id:$mate.id}],
-     truncated:[ $current.records[]
+     truncated:[ .records[]
        | select(.provenance.selected == "structured-home" and (.counts.landed > (.landed | length)))
        | .home],
-     unreadable:[ $current.records[]
+     unreadable:[ .records[]
        | select(.current.state == "unknown" and .provenance.selected != "structured-home")
        | .home // ("<" + .id + ": unavailable>")],
-     partial:[ $current.records[]
+     partial:[ .records[]
        | select(.current.state == "unknown" and .provenance.selected == "structured-home")
        | .home // ("<" + .id + ": partial>")]}
-    | .records |= sort_by([(.completion.date // ""), .id]) | .records |= reverse'
+    | .records |= sort_by([(.completion.date // ""), .id]) | .records |= reverse' "$1"
 }
 
 scout_report_lines() {
@@ -1168,9 +1214,15 @@ fi
 SCOUT_REPORTS_JSON=$(scout_report_lines)
 MAIN_INVENTORY_JSON=$(main_inventory_json "$BACKLOG_JSON" "$TASKS_JSON") \
   || { echo "fm-fleet-snapshot: main inventory summary failed" >&2; exit 1; }
-SECONDMATE_CURRENT_JSON=$(secondmate_current_json "$TASKS_JSON") \
+snapshot_scratch_path secondmate-current.json \
+  || { echo "fm-fleet-snapshot: cannot create scratch file" >&2; exit 1; }
+SECONDMATE_CURRENT_FILE=$SNAPSHOT_SCRATCH_PATH
+secondmate_current_json "$TASKS_JSON" > "$SECONDMATE_CURRENT_FILE" \
   || { echo "fm-fleet-snapshot: registered secondmate aggregation failed" >&2; exit 1; }
-SECONDMATE_LANDED_JSON=$(secondmate_landed_from_current_json "$SECONDMATE_CURRENT_JSON") \
+snapshot_scratch_path secondmate-landed.json \
+  || { echo "fm-fleet-snapshot: cannot create scratch file" >&2; exit 1; }
+SECONDMATE_LANDED_FILE=$SNAPSHOT_SCRATCH_PATH
+secondmate_landed_from_current_json "$SECONDMATE_CURRENT_FILE" > "$SECONDMATE_LANDED_FILE" \
   || { echo "fm-fleet-snapshot: secondmate landed projection failed" >&2; exit 1; }
 
 jq -n \
@@ -1185,8 +1237,8 @@ jq -n \
   --argjson tasks "$TASKS_JSON" \
   --argjson main_inventory "$MAIN_INVENTORY_JSON" \
   --argjson scout_reports "$SCOUT_REPORTS_JSON" \
-  --argjson secondmate_current "$SECONDMATE_CURRENT_JSON" \
-  --argjson secondmate_landed "$SECONDMATE_LANDED_JSON" \
+  --slurpfile secondmate_current "$SECONDMATE_CURRENT_FILE" \
+  --slurpfile secondmate_landed "$SECONDMATE_LANDED_FILE" \
   'def backlog_by_id($id): ($backlog.records[]? | select(.structured == true and .id == $id) | .) // null;
    def task_by_id($id): ($tasks[]? | select(.id == $id) | .) // null;
    def report_kind($id): (task_by_id($id).kind // backlog_by_id($id).kind // "scout");
@@ -1199,8 +1251,8 @@ jq -n \
      tasks:($tasks | map(. + {backlog:backlog_by_id(.id)})),
      main_inventory:$main_inventory,
      scout_reports:($scout_reports | map(. + {kind:report_kind(.id)})),
-     secondmate_current:$secondmate_current,
-     secondmate_landed:$secondmate_landed,
+     secondmate_current:$secondmate_current[0],
+     secondmate_landed:$secondmate_landed[0],
      secondmate_guidance:{
        note:"For kind=secondmate, bearings selects validated structured state from that registered home; parent events and bounded terminal evidence are fallback-only supplements and never current-state authority."
      }
