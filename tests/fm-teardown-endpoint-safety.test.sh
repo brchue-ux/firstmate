@@ -225,6 +225,37 @@ test_browser_session_cleanup_is_scoped_to_the_task() {
   pass "fm-teardown: cleanup stops exactly the task's own pinned browser session and no other"
 }
 
+# A 64-character task id is legal, and fm-<id> would then be 67 - a name
+# chrome-devtools-axi refuses, so the stop would silently reach nothing and the
+# bridge would survive cleanup exactly as it did before this existed. The name
+# has to be the one bin/fm-brief.sh briefed, which means the shared derivation,
+# not a second spelling.
+test_browser_session_cleanup_uses_the_shared_name_for_a_maximum_length_id() {
+  local dir id session
+  id="long-teardown-task-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+  [ "${#id}" -eq 64 ] || fail "fixture task id is ${#id} characters, wanted 64"
+  # shellcheck source=bin/fm-browser-session-lib.sh disable=SC1091
+  . "$ROOT/bin/fm-browser-session-lib.sh"
+  session=$(fm_browser_session_name "$id") || fail "no session name derived for a 64-character id"
+  [ "${#session}" -le 64 ] \
+    || fail "the shared derivation produced a ${#session}-character name: $session"
+
+  dir=$(make_case browser-session-long)
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/nonexistent-worktree" "project=$dir/nonexistent-project" \
+    "kind=scout" "mode=no-mistakes"
+
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "long-id browser cleanup teardown failed: $(cat "$dir/stderr")"
+
+  grep -Fqx "chrome-devtools-axi session=<$session> <stop>" "$dir/runtime.log" \
+    || fail "cleanup did not stop the derived session for a maximum-length id: $(cat "$dir/runtime.log")"
+  grep -Fq "session=<fm-$id>" "$dir/runtime.log" \
+    && fail "cleanup used a session name chrome-devtools-axi would refuse: $(cat "$dir/runtime.log")"
+  pass "fm-teardown: a maximum-length task id is stopped under the shared derived session name, not an over-cap one"
+}
+
 isolated_tmux_window_exists() {  # <dir> <socket> <session> <window>
   ( cd "$1" && "$REAL_TMUX" -S "$2" list-windows -t "$3" -F '#{window_name}' 2>/dev/null ) \
     | grep -Fqx "$4"
@@ -314,4 +345,5 @@ test_supported_backend_endpoint_records_validate
 test_tmux_empty_target_refuses_without_invocation
 test_recorded_process_identity_cleanup_is_exact
 test_browser_session_cleanup_is_scoped_to_the_task
+test_browser_session_cleanup_uses_the_shared_name_for_a_maximum_length_id
 test_isolated_tmux_invalid_and_valid_cleanup

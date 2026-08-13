@@ -245,6 +245,34 @@ test_browser_session_is_pinned_to_the_task() {
   pass "fm-brief.sh: ship and scout briefs pin the browser session to the task and require a scoped stop before a terminal report"
 }
 
+# A task id may be 64 characters (bin/fm-pr-lib.sh's fm_task_id_creation_valid),
+# while chrome-devtools-axi refuses a session name over 64. Briefing the naive
+# fm-<id> for such a task would hand the worker a name that throws on EVERY call
+# it makes, so the brief has to carry the derived one - and it has to be the
+# same derivation bin/fm-teardown.sh and bin/fm-browser-sweep.sh use, or the
+# bridge it does start is one nothing can stop or attribute.
+test_browser_session_fits_the_tool_cap_for_a_maximum_length_task_id() {
+  local home id brief session
+  home="$TMP_ROOT/browser-session-long-home"
+  write_registry "$home"
+  id="long-brief-task-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+  [ "${#id}" -eq 64 ] || fail "fixture task id is ${#id} characters, wanted 64"
+
+  # shellcheck source=bin/fm-browser-session-lib.sh disable=SC1091
+  . "$ROOT/bin/fm-browser-session-lib.sh"
+  session=$(fm_browser_session_name "$id") || fail "no session name derived for a 64-character id"
+  [ "${#session}" -le 64 ] \
+    || fail "the shared derivation produced a ${#session}-character name: $session"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" someproj --scout >/dev/null
+  brief="$home/data/$id/brief.md"
+  assert_grep "CHROME_DEVTOOLS_AXI_SESSION=$session chrome-devtools-axi stop" "$brief" \
+    "the brief does not pin the derived session name teardown and the sweep use"
+  assert_no_grep "CHROME_DEVTOOLS_AXI_SESSION=fm-$id" "$brief" \
+    "the brief pinned a session name chrome-devtools-axi would refuse on every call"
+  pass "fm-brief.sh: a maximum-length task id is briefed with the shared derived session name, inside the tool's cap"
+}
+
 test_faster_paths_use_configured_authority_without_stacked_review() {
   local home id brief
   home="$TMP_ROOT/configured-authority-home"
@@ -777,6 +805,7 @@ test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
 test_browser_session_is_pinned_to_the_task
+test_browser_session_fits_the_tool_cap_for_a_maximum_length_task_id
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
 test_ship_project_memory_wording

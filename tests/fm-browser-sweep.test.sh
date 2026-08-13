@@ -5,17 +5,61 @@
 # The sweep exists because the bridge detaches itself from the pane that started
 # it, so nothing teardown kills can reach it. It reports and never stops, so the
 # cases that matter are the ones proving it stays quiet: a bridge used within the
-# window, a session a live task still owns, a recorded pid the process has since
-# released, and a pid the OS reused for something that is not a bridge. Each case
-# builds its own fake state root, so nothing here reads the host's real
-# ~/.chrome-devtools-axi.
+# window, a session a live task still owns anywhere in the fleet, a recorded pid
+# the process has since released, and a pid the OS reused for something that is
+# not a bridge. Each case builds its own fake state root and its own fixture
+# fleet, so nothing here reads the host's real ~/.chrome-devtools-axi or the
+# developer's own backlog.
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
+# The sweep refuses to report anything it cannot check against the fleet's open
+# work, and that index is built with jq.
+command -v jq >/dev/null 2>&1 || {
+  echo "skip: jq not found"
+  exit 0
+}
+
 TMP_ROOT=$(fm_test_tmproot fm-browser-sweep)
 SWEEP="$ROOT/bin/fm-browser-sweep.sh"
+
+# The session name is derived, never spelled out, for the same reason the sweep
+# derives it: a long task id produces a shortened name with no id inside it.
+# shellcheck source=bin/fm-browser-session-lib.sh disable=SC1091
+. "$ROOT/bin/fm-browser-session-lib.sh"
+
+# A fixture fleet: this home plus one registered secondmate home carrying the
+# open work. Nothing in this home's own backlog is open, so a session that is
+# protected here is protected because of ANOTHER home's live worker - the case
+# --protect-home alone can never see, since bridge state is host-global.
+FLEET_MAIN="$TMP_ROOT/fleet-main"
+FLEET_MATE="$TMP_ROOT/fleet-mate"
+mkdir -p "$FLEET_MAIN/data" "$FLEET_MATE/data"
+# A 64-character id is legal (bin/fm-pr-lib.sh caps ids there), and its session
+# name is shortened, so matching it proves the sweep derives names forward
+# instead of stripping a prefix off one.
+FLEET_LONG_ID="long-fleet-task-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+FLEET_LONG_SESSION=$(fm_browser_session_name "$FLEET_LONG_ID")
+cat > "$FLEET_MAIN/data/backlog.md" <<'EOF'
+# Backlog
+
+## In flight
+## Queued
+## Done
+EOF
+cat > "$FLEET_MATE/data/backlog.md" <<EOF
+# Backlog
+
+## In flight
+- [ ] other-home-task - a secondmate's worker, paused on an external wait (repo: alpha) (since 2026-08-01)
+- [ ] $FLEET_LONG_ID - a secondmate's worker with a maximum-length id (repo: alpha) (since 2026-08-01)
+## Queued
+## Done
+EOF
+printf -- '- mate - owns alpha work (home: %s; scope: alpha; projects: alpha; added 2026-08-01)\n' \
+  "$FLEET_MATE" > "$FLEET_MAIN/data/secondmates.md"
 
 HELD_PIDS=()
 
@@ -84,6 +128,26 @@ SH
   printf '%s\n' "$pid"
 }
 
+# start_fake_cli <dir>: a running process whose command line carries the package
+# name but is NOT the bridge - the shape a short-lived `chrome-devtools-axi
+# <cmd>` invocation has. This is the nastiest reused-pid case, because the
+# reported stop command SIGTERMs and then SIGKILLs the recorded pid whatever it
+# turns out to be.
+start_fake_cli() {
+  local dir=$1 script="$1/chrome-devtools-axi.js" pid
+  mkdir -p "$dir"
+  cat > "$script" <<'SH'
+#!/usr/bin/env bash
+sleep 300
+SH
+  chmod +x "$script"
+  "$script" >/dev/null 2>&1 &
+  pid=$!
+  HELD_PIDS+=("$pid")
+  await_args "$pid" chrome-devtools-axi.js
+  printf '%s\n' "$pid"
+}
+
 new_root() {
   local root="$TMP_ROOT/$1"
   mkdir -p "$root/sessions"
@@ -110,10 +174,39 @@ age_out() {
   touch -t 202601010000 "$@"
 }
 
+# FM_HOME selects the fixture fleet the sweep consults for open work. Without it
+# the real cross-home index would read the developer's own backlog, and one open
+# item of theirs named like a fixture task would silently protect it.
 run_sweep() {
   local root=$1
   shift
-  ( cd "$TMP_ROOT" && env -u FM_BROWSER_SWEEP_HOMES "$SWEEP" --root "$root" "$@" ) 2>&1
+  ( cd "$TMP_ROOT" && env -u FM_BROWSER_SWEEP_HOMES FM_HOME="$FLEET_MAIN" \
+    "$SWEEP" --root "$root" "$@" ) 2>&1
+}
+
+# A bin/ holding the sweep and the libs it sources, plus whatever stands in for
+# the cross-home work index. The sweep resolves the index next to itself, so
+# this is how an index that cannot be consulted is presented to it.
+sweep_bin_with_index() {  # <dir> <absent|fails|wrong-schema>
+  local dir=$1 mode=$2 bindir="$1/bin" index
+  mkdir -p "$bindir"
+  cp "$ROOT/bin/fm-browser-sweep.sh" "$ROOT/bin/fm-supervision-lib.sh" \
+    "$ROOT/bin/fm-browser-session-lib.sh" "$bindir/"
+  index="$bindir/fm-fleet-work-index.sh"
+  case "$mode" in
+    absent) : ;;
+    fails)
+      printf '%s\n' '#!/usr/bin/env bash' 'exit 3' > "$index"
+      chmod +x "$index"
+      ;;
+    wrong-schema)
+      printf '%s\n' '#!/usr/bin/env bash' \
+        'printf %s "{\"schema\":\"something-else.v1\",\"items\":[]}"' > "$index"
+      chmod +x "$index"
+      ;;
+    *) fail "unknown index fixture mode: $mode" ;;
+  esac
+  printf '%s\n' "$bindir/fm-browser-sweep.sh"
 }
 
 test_idle_bridge_is_reported_and_fresh_one_is_not() {
@@ -157,8 +250,62 @@ test_live_task_session_is_protected() {
   pass "fm-browser-sweep: a session pinned to a task the home still records is never reported, however long it has sat"
 }
 
+# Bridge state is host-global while a task lives in exactly one home, so the
+# session an operator is told to stop can belong to a worker this home has never
+# heard of. That worker is exactly the case the sweep must never report: a task
+# deliberately parked on an external wait looks identical, from the outside, to
+# an abandoned one.
+test_open_work_in_another_home_is_never_reported() {
+  local root owned_pid long_pid orphan_pid dir out
+  root=$(new_root fleet-owned)
+  owned_pid=$(start_fake_bridge "$root/proc")
+  long_pid=$(start_fake_bridge "$root/proc")
+  orphan_pid=$(start_fake_bridge "$root/proc")
+
+  dir=$(write_session "$root" fm-other-home-task "$owned_pid")
+  age_out "$dir/bridge.pid" "$dir/snapshot-generation"
+  dir=$(write_session "$root" "$FLEET_LONG_SESSION" "$long_pid")
+  age_out "$dir/bridge.pid" "$dir/snapshot-generation"
+  dir=$(write_session "$root" fm-nobody-task "$orphan_pid")
+  age_out "$dir/bridge.pid" "$dir/snapshot-generation"
+
+  out=$(run_sweep "$root" --age-hours 12)
+  assert_not_contains "$out" "fm-other-home-task" \
+    "a bridge whose task is in flight in another home was reported as an orphan"
+  assert_not_contains "$out" "$FLEET_LONG_SESSION" \
+    "a bridge whose maximum-length task id is in flight in another home was reported as an orphan"
+  assert_contains "$out" "fm-nobody-task: idle:" \
+    "a bridge whose task is open nowhere in the fleet was not reported"
+  pass "fm-browser-sweep: a session owned by open work in any home is left alone, whatever its id length, and one owned nowhere is still reported"
+}
+
+# The fleet's open work is a precondition for reporting, not an enhancement.
+# With no way to read it, every session on the host is indistinguishable from a
+# live worker's, and flagging one anyway is the exact harm this sweep exists to
+# avoid - so it says so once, about the whole run, and flags nothing.
+test_unconsultable_fleet_index_reports_nothing_idle() {
+  local mode root pid dir sweep out
+  for mode in absent fails wrong-schema; do
+    root=$(new_root "no-index-$mode")
+    sweep=$(sweep_bin_with_index "$root" "$mode")
+    pid=$(start_fake_bridge "$root/proc")
+    dir=$(write_session "$root" fm-nobody-task "$pid")
+    age_out "$dir/bridge.pid" "$dir/snapshot-generation"
+
+    out=$( cd "$TMP_ROOT" && env -u FM_BROWSER_SWEEP_HOMES FM_HOME="$FLEET_MAIN" \
+      "$sweep" --root "$root" --age-hours 12 2>&1 )
+    assert_contains "$out" "$root: skipped:" \
+      "$mode: an unconsultable fleet index did not produce a whole-sweep skip"
+    assert_not_contains "$out" "idle:" \
+      "$mode: a session was reported idle with no way to check the fleet's open work"
+    assert_not_contains "$out" "chrome-devtools-axi stop" \
+      "$mode: a stop command was handed to the operator with no way to check the fleet's open work"
+  done
+  pass "fm-browser-sweep: an unreadable, failing, or unrecognized fleet work index skips the whole sweep instead of flagging a live worker's browser"
+}
+
 test_dead_and_reused_pids_are_not_reported() {
-  local root dead_pid other_pid dir out
+  local root dead_pid other_pid cli_pid live_pid dir out
   root=$(new_root pid-identity)
 
   dead_pid=$(start_fake_bridge "$root/proc")
@@ -171,12 +318,28 @@ test_dead_and_reused_pids_are_not_reported() {
   dir=$(write_session "$root" fm-reused-task "$other_pid")
   age_out "$dir/bridge.pid" "$dir/snapshot-generation"
 
+  cli_pid=$(start_fake_cli "$root/proc")
+  dir=$(write_session "$root" fm-cli-task "$cli_pid")
+  age_out "$dir/bridge.pid" "$dir/snapshot-generation"
+
+  # A real bridge in the same run, so the absences above are the identity check
+  # working rather than the whole sweep having gone quiet.
+  live_pid=$(start_fake_bridge "$root/proc")
+  dir=$(write_session "$root" fm-real-task "$live_pid")
+  age_out "$dir/bridge.pid" "$dir/snapshot-generation"
+
   out=$(run_sweep "$root" --age-hours 12)
   assert_not_contains "$out" "fm-dead-task" \
     "a bridge record whose process is gone was reported as a live orphan"
   assert_not_contains "$out" "fm-reused-task" \
     "a pid the OS reused for an unrelated process was reported as a bridge"
-  pass "fm-browser-sweep: a released pid and a pid reused by a non-bridge process are both left alone"
+  assert_not_contains "$out" "fm-cli-task" \
+    "a pid the OS reused for a chrome-devtools-axi CLI call was reported as a bridge"
+  assert_contains "$out" "fm-real-task: idle:" \
+    "the identity check silenced a genuine idle bridge too"
+  kill -0 "$cli_pid" 2>/dev/null \
+    || fail "the sweep killed the unrelated chrome-devtools-axi process"
+  pass "fm-browser-sweep: a released pid, a pid reused by an unrelated process, and a pid reused by a chrome-devtools-axi CLI call are all left alone"
 }
 
 test_default_session_is_examined_without_borrowing_named_activity() {
@@ -239,6 +402,8 @@ SH
 
 test_idle_bridge_is_reported_and_fresh_one_is_not
 test_live_task_session_is_protected
+test_open_work_in_another_home_is_never_reported
+test_unconsultable_fleet_index_reports_nothing_idle
 test_dead_and_reused_pids_are_not_reported
 test_default_session_is_examined_without_borrowing_named_activity
 test_unreadable_record_is_reported_and_missing_root_is_silent

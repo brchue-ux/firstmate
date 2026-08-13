@@ -268,8 +268,11 @@ browser_sweep() {
   # bin/fm-teardown.sh stops the task's own pinned session, and this reports the
   # ones whose crewmate never got that far. It only reads, so it runs in
   # detect-only sessions too - an orphaned browser tree costs the same memory
-  # whether or not this session holds the lock. The idle rules and the decision
-  # never to stop anything are owned by bin/fm-browser-sweep.sh.
+  # whether or not this session holds the lock. The idle rules, the cross-home
+  # open-work check that keeps another mate's live browser out of this digest,
+  # and the decision never to stop anything are all owned by
+  # bin/fm-browser-sweep.sh; this home is passed as the one whose own task
+  # records are additionally protected.
   [ -x "$FM_ROOT/bin/fm-browser-sweep.sh" ] || return 0
   local out line
   out=$("$FM_ROOT/bin/fm-browser-sweep.sh" --protect-home "$FM_HOME" 2>/dev/null || true)

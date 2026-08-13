@@ -2,7 +2,7 @@
 # Tear down a finished task: return the treehouse worktree, release the Orca
 # worktree, or retire a secondmate home; kill the recorded runtime endpoint,
 # stop the task's own pinned browser session (see stop_task_browser_session -
-# scoped to fm-<task-id>, never a blanket stop),
+# scoped to the task's own derived session name, never a blanket stop),
 # clear volatile state, refresh/prune the project's clone for PR-based ship
 # tasks, then print a backlog-refresh reminder for ship and scout teardowns
 # (a secondmate teardown prints none, since secondmates are not backlog items).
@@ -112,6 +112,11 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# The pinned browser session name has one owner, shared with bin/fm-brief.sh
+# (which briefs it) and bin/fm-browser-sweep.sh (which decides who still owns
+# one). Deriving it a second time here is how a stop stops nothing.
+# shellcheck source=bin/fm-browser-session-lib.sh
+. "$SCRIPT_DIR/fm-browser-session-lib.sh"
 if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
   echo "error: invalid teardown request" >&2
   exit 2
@@ -898,20 +903,22 @@ safe_rm_rf() {
 # SCOPED BY SESSION NAME ONLY. A bare `chrome-devtools-axi stop` would stop the
 # default session, which is a sibling home's live browser - the same class of
 # mistake AGENTS.md section 8 forbids for `pkill -f bin/fm-watch.sh`. The name
-# comes from the task id, so this can only ever reach the session this task's
-# own brief told it to use.
+# is derived from the task id through the same owner bin/fm-brief.sh briefed it
+# with, so this can only ever reach the session this task's own brief told it to
+# use, and can never miss it because the two spellings drifted.
 #
 # Failure is never fatal: the tool may not be installed, the task may never have
 # opened a browser, and a bridge that is already gone is the outcome we wanted.
 # It is time-bounded because a wedged bridge must not wedge cleanup.
 stop_task_browser_session() {
-  local task_id=$1
+  local task_id=$1 session
   [ -n "$task_id" ] || return 0
   command -v chrome-devtools-axi >/dev/null 2>&1 || return 0
+  session=$(fm_browser_session_name "$task_id") || return 0
   if command -v timeout >/dev/null 2>&1; then
-    CHROME_DEVTOOLS_AXI_SESSION="fm-$task_id" timeout 20 chrome-devtools-axi stop >/dev/null 2>&1 || true
+    CHROME_DEVTOOLS_AXI_SESSION="$session" timeout 20 chrome-devtools-axi stop >/dev/null 2>&1 || true
   else
-    CHROME_DEVTOOLS_AXI_SESSION="fm-$task_id" chrome-devtools-axi stop >/dev/null 2>&1 || true
+    CHROME_DEVTOOLS_AXI_SESSION="$session" chrome-devtools-axi stop >/dev/null 2>&1 || true
   fi
   return 0
 }
