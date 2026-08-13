@@ -982,8 +982,9 @@ test_perl_fallback_bounds_github_call() {
   mkdir -p "$toolbin"
   # `timeout` is the one deliberate omission: withholding it is what forces the
   # Perl fallback under test. Everything else is just what this path needs to
-  # run, including the mktemp the snapshot uses for its scratch directory.
-  for cmd in bash dirname basename jq date sed git grep tail cut tr head sort wc perl sleep cat find mktemp; do
+  # run, including the mktemp the snapshot uses for its scratch directory and
+  # the rm its exit trap removes that directory with.
+  for cmd in bash dirname basename jq date sed git grep tail cut tr head sort wc perl sleep cat find mktemp rm; do
     ln -s "$(command -v "$cmd")" "$toolbin/$cmd"
   done
   started=$(date +%s)
