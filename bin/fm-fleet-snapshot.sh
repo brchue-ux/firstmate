@@ -5,6 +5,10 @@
 # `fm-fleet-snapshot.v1`.
 # The command is read-only: it does not acquire the session lock, drain wakes,
 # arm watchers, mutate backlog state, or write reports.
+# Its only writes are an ephemeral private scratch directory under
+# ${TMPDIR:-/tmp}, created on first use and removed by the EXIT trap, so it
+# needs `mktemp` and a writable temp root; the comment on SNAPSHOT_SCRATCH_DIR
+# owns why the cross-home aggregate is carried in files rather than arguments.
 #
 # Top-level fields:
 #   schema: stable schema id.
