@@ -68,8 +68,10 @@ The captain's request to create that local project authorizes this local initial
 Run no-mistakes initialization only for `no-mistakes` projects:
 
 ```sh
-cd projects/<name> && no-mistakes init && no-mistakes doctor
+(cd projects/<name> && no-mistakes init && no-mistakes doctor)
 ```
+
+Keep the subshell parentheses: a top-level `cd projects/<name>` persistently relocates the primary shell and is denied by the cd-guard seatbelt in every primary session, main home and secondmate home alike ([`docs/cd-guard.md`](../../../docs/cd-guard.md)).
 
 Initialization configures the local gate and does not vendor a no-mistakes skill into the project.
 Do not create a commit merely because initialization ran.
