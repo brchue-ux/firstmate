@@ -73,7 +73,11 @@
 #          v<installed> -> v<available>" banner rather than querying a forge, so
 #          it stays honest about whichever release channel no-mistakes itself
 #          resolves. The banner is a cached advisory owned by no-mistakes, so
-#          detection is best-effort: no banner means no line. A build below the
+#          detection is best-effort: no banner means no line. Because that cache
+#          can outlive an out-of-band upgrade, the banner's own "installed" side
+#          is never trusted: the reported installed version is the floor check's
+#          parse of the real binary, and the line is suppressed unless the
+#          advertised release is strictly newer than that. A build below the
 #          floor reports MISSING only, because MISSING already means upgrade and
 #          a second line would be noise. Detection never updates anything.
 #          tasks-axi and quota-axi are required bootstrap tools (same class as
@@ -760,15 +764,31 @@ no_mistakes_compatible() {
 # the answer tied to whatever channel, mirror, or auth no-mistakes itself resolves
 # "latest" against. The banner is an advisory no-mistakes may print on either
 # stream and refreshes from its own cache, so both streams are captured and an
-# absent banner simply yields no output. Prints "<installed> <available>" without
-# "v" prefixes when a newer release is advertised, and nothing otherwise.
+# absent banner simply yields no output. Only the advertised AVAILABLE version is
+# returned, as "<major> <minor> <patch>": the banner's left-hand side is the
+# version no-mistakes believed was installed when it last refreshed that cache,
+# which can outlive an out-of-band upgrade, so it is never used as the installed
+# version. Prints nothing when no upgrade is advertised.
 no_mistakes_advertised_upgrade() {
   local output
   command -v no-mistakes >/dev/null 2>&1 || return 1
   output=$(no-mistakes --version 2>&1) || return 1
   printf '%s\n' "$output" \
-    | sed -nE 's/.*A new version of no-mistakes is available:[[:space:]]*v?([0-9]+\.[0-9]+\.[0-9]+)[[:space:]]*->[[:space:]]*v?([0-9]+\.[0-9]+\.[0-9]+).*/\1 \2/p' \
+    | sed -nE 's/.*A new version of no-mistakes is available:[[:space:]]*v?[0-9]+\.[0-9]+\.[0-9]+[[:space:]]*->[[:space:]]*v?([0-9]+)\.([0-9]+)\.([0-9]+).*/\1 \2 \3/p' \
     | head -n 1
+}
+
+# True when the first "<major> <minor> <patch>" triple is strictly newer than the
+# second. The staleness check needs this to compare a cached advisory against the
+# version actually installed; a stale cache that advertises a release the host is
+# already running (or has passed) must stay silent rather than name a version the
+# host no longer runs.
+no_mistakes_version_newer() {
+  [ "$1" -gt "$4" ] && return 0
+  [ "$1" -eq "$4" ] || return 1
+  [ "$2" -gt "$5" ] && return 0
+  [ "$2" -eq "$5" ] || return 1
+  [ "$3" -gt "$6" ]
 }
 
 x_mode_write_if_changed() {
@@ -1093,10 +1113,21 @@ if command -v no-mistakes >/dev/null 2>&1; then
     # here rather than stacking a second upgrade report on the same install.
     echo "MISSING: no-mistakes (install: $(install_cmd no-mistakes))"
   else
+    # The installed version comes from the floor check's own parse of the real
+    # binary, never from the banner's self-reported left-hand side, so a cached
+    # advisory that outlived an out-of-band upgrade cannot report a version the
+    # host no longer runs - and stays silent unless the advertised release is
+    # genuinely newer than what is installed.
     nm_upgrade=$(no_mistakes_advertised_upgrade || true)
-    if [ -n "$nm_upgrade" ]; then
-      IFS=' ' read -r nm_installed nm_available <<< "$nm_upgrade"
-      echo "NO_MISTAKES_OUTDATED: v$nm_installed -> v$nm_available available (run: no-mistakes update -y)"
+    nm_actual=$(no_mistakes_version_parts || true)
+    if [ -n "$nm_upgrade" ] && [ -n "$nm_actual" ]; then
+      IFS=' ' read -r nm_new_major nm_new_minor nm_new_patch <<< "$nm_upgrade"
+      IFS=' ' read -r nm_major nm_minor nm_patch <<< "$nm_actual"
+      if no_mistakes_version_newer \
+        "$nm_new_major" "$nm_new_minor" "$nm_new_patch" \
+        "$nm_major" "$nm_minor" "$nm_patch"; then
+        echo "NO_MISTAKES_OUTDATED: v$nm_major.$nm_minor.$nm_patch -> v$nm_new_major.$nm_new_minor.$nm_new_patch available (run: no-mistakes update -y)"
+      fi
     fi
   fi
 fi

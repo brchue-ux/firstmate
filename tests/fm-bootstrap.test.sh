@@ -337,7 +337,11 @@ ROWS
 # questions, so they are pinned separately: the floor asserts a CLI capability
 # and passes forever once cleared, while staleness reuses no-mistakes' own
 # upgrade banner to say the install is behind the current release. An empty
-# banner field means the fake advertises no upgrade at all.
+# banner field means the fake advertises no upgrade at all. The banner's own
+# left-hand "installed" version is deliberately never the one reported: the cases
+# below drive it out of step with the fake binary's real version to pin that the
+# report follows the binary and goes quiet once the advertised release is no
+# longer newer than what is installed.
 test_no_mistakes_staleness_is_reported_beyond_the_floor() {
   local label version banner stream expected case_dir fakebin out missing n
   missing='MISSING: no-mistakes (install: curl -fsSL https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.sh | sh)'
@@ -365,6 +369,9 @@ an advertised upgrade above the floor is reported^no-mistakes version v1.41.2 (f
 an advertised upgrade on stdout is reported the same way^no-mistakes version v1.41.2 (fake)^A new version of no-mistakes is available: v1.41.2 -> v1.48.0^stdout^NO_MISTAKES_OUTDATED: v1.41.2 -> v1.48.0 available (run: no-mistakes update -y)
 an install below the floor reports only the floor^no-mistakes version v1.31.1 (fake)^A new version of no-mistakes is available: v1.31.1 -> v1.48.0^stderr^missing
 unrelated banner output is not an upgrade advertisement^no-mistakes version v1.48.0 (fake)^no-mistakes notice: read the changelog at 1.48.0 for details^stderr^empty
+a cache outliving an out-of-band upgrade to the advertised release stays silent^no-mistakes version v1.48.0 (fake)^A new version of no-mistakes is available: v1.41.2 -> v1.48.0^stderr^empty
+a cache outliving an out-of-band upgrade past the advertised release stays silent^no-mistakes version v1.49.0 (fake)^A new version of no-mistakes is available: v1.41.2 -> v1.48.0^stderr^empty
+the installed version comes from the binary, not the banner^no-mistakes version v1.45.0 (fake)^A new version of no-mistakes is available: v1.41.2 -> v1.48.0^stderr^NO_MISTAKES_OUTDATED: v1.45.0 -> v1.48.0 available (run: no-mistakes update -y)
 ROWS
   pass "bootstrap reports no-mistakes staleness separately from its compatibility floor"
 }
