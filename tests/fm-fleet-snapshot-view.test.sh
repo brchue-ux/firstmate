@@ -755,8 +755,102 @@ test_parked_scout_decision_stays_pending() {
   pass "a scout still parked at a decision stays pending (terminal clear does not over-fire)"
 }
 
+# --- cross-home aggregation scale -------------------------------------------
+#
+# The registered-secondmate aggregate outgrows what one execve argument can
+# carry (128 KiB on Linux, whatever ARG_MAX allows elsewhere). Every stage that
+# handles it - the per-home accumulation and the landed projection and final
+# assembly that read it back - must therefore move it through files rather than
+# jq arguments. This fixture reaches that size with a handful of homes so the
+# regression is reproducible in seconds.
+
+# A seeded secondmate home whose backlog is large enough to make its summary a
+# meaningful fraction of the argument limit. QUEUED_PER_HOME stays well inside
+# what a single home's own backlog argument can carry.
+QUEUED_PER_HOME=60
+LANDED_PER_HOME=3
+
+make_registered_secondmate_home() {  # <main-home> <id>
+  local main=$1 id=$2 home=$TMP_ROOT/$2 title j
+  mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects" "$home/bin"
+  : > "$home/AGENTS.md"
+  printf '%s\n' "$id" > "$home/.fm-secondmate-home"
+  title=$(printf 'w%.0s' $(seq 1 110))
+  {
+    printf '# Backlog\n\n## Queued\n'
+    for j in $(seq 1 "$QUEUED_PER_HOME"); do
+      printf -- '- [ ] %s-q%s - %s (repo: alpha) (kind: ship) (since 2026-07-08)\n' "$id" "$j" "$title"
+    done
+    printf '\n## Done\n'
+    for j in $(seq 1 "$LANDED_PER_HOME"); do
+      printf -- '- [x] %s-d%s - %s https://github.com/kunchenguid/firstmate/pull/%s (repo: alpha) (kind: ship) (merged 2026-07-06)\n' \
+        "$id" "$j" "$title" "$j"
+    done
+  } > "$home/data/backlog.md"
+  printf -- '- %s - Owns the %s scope (home: %s; scope: %s work; projects: alpha; added 2026-07-09)\n' \
+    "$id" "$id" "$home" "$id" >> "$main/data/secondmates.md"
+  printf '%s\n' "$home"
+}
+
+test_secondmate_aggregate_survives_argument_limit() {
+  local main scratch mates=8 i id out ids expected agg leftover
+  main=$(make_home aggregate-scale)
+  scratch="$main/scratch"
+  mkdir -p "$scratch"
+  expected=
+  for i in $(seq 1 "$mates"); do
+    id=$(printf 'mate-%02d' "$i")
+    make_registered_secondmate_home "$main" "$id" >/dev/null
+    expected="$expected$id "
+  done
+
+  out=$(TMPDIR="$scratch" FM_HOME="$main" FM_SNAPSHOT_SECONDMATE_QUEUED=200 "$SNAPSHOT" --json) \
+    || fail "snapshot failed for $mates registered secondmates (the argument-limit regression)"
+
+  # Same records, same order as the registry, with each home's structured
+  # surfaces intact - the aggregation only changed how they are carried.
+  ids=$(printf '%s' "$out" | jq -r '[.secondmate_current.records[].id] | join(" ")')
+  [ "$ids " = "$expected" ] \
+    || fail "aggregated records must match the registry in id and order: got '$ids', want '${expected% }'"
+  printf '%s' "$out" | jq -e --argjson queued "$QUEUED_PER_HOME" --argjson mates "$mates" '
+    .secondmate_current.total == $mates
+      and .secondmate_current.shown == $mates
+      and .secondmate_current.total_registered == $mates
+      and .secondmate_current.truncated == 0
+      and ([.secondmate_current.records[]
+            | select(.provenance.selected == "structured-home"
+                     and .counts.queued == $queued
+                     and (.queued | length) == $queued)] | length) == $mates
+  ' >/dev/null || fail "aggregated records lost structured content: $(printf '%s' "$out" | jq -c '.secondmate_current.records[0]')"
+
+  # The landed projection and the final assembly read the same oversized
+  # aggregate, so they must carry it too.
+  printf '%s' "$out" | jq -e --argjson n "$((mates * LANDED_PER_HOME))" --argjson mates "$mates" '
+    (.secondmate_landed.records | length) == $n
+      and (.secondmate_landed.unreadable | length) == 0
+      and ([.secondmate_landed.records[].home_id] | unique | length) == $mates
+  ' >/dev/null || fail "landed projection lost records from the oversized aggregate: $(printf '%s' "$out" | jq -c '.secondmate_landed | {n:(.records|length),unreadable}')"
+
+  # Scratch files are the mechanism, so none may outlive the command.
+  leftover=$(find "$scratch" -maxdepth 1 -name 'fm-fleet-snapshot-scratch.*' | wc -l | tr -d ' ')
+  [ "$leftover" = 0 ] || fail "snapshot left $leftover scratch directories behind in $scratch"
+
+  # Record that the fixture really is past what an argument can carry: the exact
+  # call the previous accumulation made on its last iteration must fail here.
+  # A platform generous enough to accept it cannot exercise the regression, and
+  # says so rather than passing quietly.
+  agg=$(printf '%s' "$out" | jq -c '.secondmate_current.records')
+  if jq -n --argjson records "$agg" --argjson record '{}' '$records + [$record]' >/dev/null 2>&1; then
+    printf 'skip: this platform accepts a %s-byte jq argument; argument-limit guard not exercised\n' \
+      "${#agg}"
+    return 0
+  fi
+  pass "cross-home aggregation survives an aggregate too large for one jq argument"
+}
+
 test_empty_fleet_json
 test_fixture_snapshot_json
+test_secondmate_aggregate_survives_argument_limit
 test_main_inventory_orphan_and_unstructured_disclosure
 test_normalized_roles_and_plural_blocker_readiness
 test_event_hints_follow_reconciled_current_state
