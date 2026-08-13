@@ -4,13 +4,14 @@
 #
 # bin/fm-cd-command-policy.mjs is the single owner of the block/allow decision;
 # it reuses the shell classifier owned by bin/fm-arm-command-policy.mjs.
-# bin/fm-cd-pretool-check.sh is the stable transport: it scopes the guard to the
-# real primary checkout, then drives all five harness entry forms. This suite
-# proves the decision matrix, the harness-output shaping, the primary-checkout
-# scoping (including the deliberate secondmate-home difference from the turn-end
-# guard), the fail-open transport behavior, the prefilter fast path, the
-# end-to-end cwd-leak regression, and the per-harness wiring. No harness is
-# spawned; live per-harness evidence lives in docs/cd-guard.md.
+# bin/fm-cd-pretool-check.sh is the stable transport: it scopes the guard to a
+# primary firstmate session through the shared fm_primary_scope_matches
+# predicate, then drives all five harness entry forms. This suite proves the
+# decision matrix, the harness-output shaping, the primary-session scoping
+# (including the marked secondmate home, leased or cloned, that the shared
+# predicate force-includes), the fail-open transport behavior, the prefilter
+# fast path, the end-to-end cwd-leak regression, and the per-harness wiring. No
+# harness is spawned; live per-harness evidence lives in docs/cd-guard.md.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -19,13 +20,15 @@ set -u
 fm_git_identity fmtest fmtest@example.invalid
 TMP_ROOT=$(fm_test_tmproot fm-cd-pretool-check)
 
-# A primary-shaped checkout: plain (non-worktree) git repo, AGENTS.md, bin/ with
-# the transport plus both policy files (fm-cd-command-policy.mjs imports the
-# shared classifier from fm-arm-command-policy.mjs). This is what the transport's
-# scoping treats as the real primary firstmate checkout.
+# A primary-shaped checkout: plain (non-worktree) git repo, AGENTS.md, state/,
+# and bin/ with the transport, the shared scope libraries it sources, plus both
+# policy files (fm-cd-command-policy.mjs imports the shared classifier from
+# fm-arm-command-policy.mjs). This is what the transport's scoping treats as a
+# primary firstmate session.
 install_cd_scripts() {
   local dir=$1
   mkdir -p "$dir/bin"
+  fm_copy_core_libs "$dir/bin"
   cp "$ROOT/bin/fm-cd-pretool-check.sh" "$dir/bin/fm-cd-pretool-check.sh"
   cp "$ROOT/bin/fm-cd-command-policy.mjs" "$dir/bin/fm-cd-command-policy.mjs"
   cp "$ROOT/bin/fm-arm-command-policy.mjs" "$dir/bin/fm-arm-command-policy.mjs"
@@ -37,12 +40,13 @@ make_primary_fixture() {
   git init -q "$dir"
   git -C "$dir" commit -q --allow-empty -m init
   : > "$dir/AGENTS.md"
+  mkdir -p "$dir/state"
   install_cd_scripts "$dir"
   printf '%s\n' "$dir"
 }
 
-# Same shape as primary plus the .fm-secondmate-home marker: a secondmate's own
-# primary session, which the cd-guard DOES guard (unlike the turn-end guard).
+# Same shape as primary plus the .fm-secondmate-home marker: a git-cloned
+# secondmate home, which the cd-guard guards as its own primary session.
 make_secondmate_fixture() {
   local dir=$1
   make_primary_fixture "$dir" >/dev/null
@@ -51,17 +55,39 @@ make_secondmate_fixture() {
 }
 
 # A genuine linked git worktree - the shape bin/fm-spawn.sh hands crewmate/scout
-# tasks. git-dir and git-common-dir differ, so the guard must be inert.
+# tasks. git-dir and git-common-dir differ and there is no marker, so the guard
+# must be inert. It carries state/ so the ONLY difference from the leased
+# secondmate home below is the marker.
 make_child_worktree_fixture() {
   local base=$1 dir=$2
   fm_git_worktree "$base" "$dir" fm/cd-guard-test-branch
   : > "$dir/AGENTS.md"
+  mkdir -p "$dir/state"
   install_cd_scripts "$dir"
+  printf '%s\n' "$dir"
+}
+
+# A treehouse-leased secondmate HOME: a genuine linked git worktree (git-dir !=
+# git-common-dir, exactly like every real secondmate home in the fleet) that DOES
+# carry a valid .fm-secondmate-home marker. The git-cloned fixture above cannot
+# represent this topology, and the raw git-dir test the guard used to run left it
+# silently inert - in precisely the homes that do the fleet's project work.
+make_leased_secondmate_fixture() {
+  local base=$1 dir=$2
+  fm_git_worktree "$base" "$dir" fm/cd-guard-leased-secondmate
+  : > "$dir/AGENTS.md"
+  mkdir -p "$dir/state"
+  install_cd_scripts "$dir"
+  printf 'sm-cd-leased-1\n' > "$dir/.fm-secondmate-home"
   printf '%s\n' "$dir"
 }
 
 PRIMARY=$(make_primary_fixture "$TMP_ROOT/primary")
 CHECK="$PRIMARY/bin/fm-cd-pretool-check.sh"
+# Every fixture selects its own home explicitly, so an FM_HOME inherited from the
+# session running this suite can never decide which state dir the guard reads.
+# tests/lib.sh declares this process tree to the FM_HOME resolver.
+export FM_HOME="$PRIMARY"
 
 # --- full cross-harness acceptance matrix ----------------------------------
 
@@ -208,21 +234,38 @@ test_full_acceptance_matrix() {
 test_fires_in_secondmate_home() {
   local dir out rc
   dir=$(make_secondmate_fixture "$TMP_ROOT/secondmate")
-  out=$("$dir/bin/fm-cd-pretool-check.sh" --claude --command 'cd projects/foo' 2>&1); rc=$?
-  expect_code 2 "$rc" "cd-guard must fire in a secondmate's own primary session (unlike the turn-end guard)"
+  out=$(FM_HOME="$dir" "$dir/bin/fm-cd-pretool-check.sh" --claude --command 'cd projects/foo' 2>&1); rc=$?
+  expect_code 2 "$rc" "cd-guard must fire in a git-cloned secondmate's own primary session"
   assert_contains "$out" '[persistent-cd]' "secondmate-home block must carry the reason code"
-  pass "cd-guard: fires in a secondmate home (its own primary session is a primary)"
+  pass "cd-guard: fires in a git-cloned secondmate home (its own primary session is a primary)"
 }
 
+# The regression this guard's scope was rebuilt for: every real secondmate home
+# is a treehouse-leased linked worktree, so the raw git-dir test left the guard
+# inert in every home that does project work. The marker must force-include it.
+test_fires_in_leased_secondmate_home() {
+  local base dir out rc
+  base="$TMP_ROOT/leased-base"
+  dir="$TMP_ROOT/leased-secondmate"
+  make_leased_secondmate_fixture "$base" "$dir" >/dev/null
+  out=$(FM_HOME="$dir" "$dir/bin/fm-cd-pretool-check.sh" --claude --command 'cd projects/foo' 2>&1); rc=$?
+  expect_code 2 "$rc" "cd-guard must fire in a treehouse-leased (linked worktree) secondmate home"
+  assert_contains "$out" '[persistent-cd]' "leased secondmate-home block must carry the reason code"
+  pass "cd-guard: fires in a treehouse-leased LINKED secondmate home (marker force-include)"
+}
+
+# The discriminator between this fixture and the leased secondmate home above is
+# the marker alone: both are linked worktrees carrying AGENTS.md, bin/, and
+# state/. A crewmate/scout worktree is legitimately scratch and stays inert.
 test_inert_in_child_worktree() {
   local base dir out rc
   base="$TMP_ROOT/child-base"
   dir="$TMP_ROOT/child-wt"
   make_child_worktree_fixture "$base" "$dir" >/dev/null
-  out=$("$dir/bin/fm-cd-pretool-check.sh" --claude --command 'cd projects/foo' 2>&1); rc=$?
+  out=$(FM_HOME="$dir" "$dir/bin/fm-cd-pretool-check.sh" --claude --command 'cd projects/foo' 2>&1); rc=$?
   expect_code 0 "$rc" "cd-guard must be inert in a crewmate/scout linked worktree"
   [ -z "$out" ] || fail "cd-guard produced output in a child worktree: $out"
-  pass "cd-guard: inert in a crewmate/scout task worktree (linked git worktree)"
+  pass "cd-guard: inert in a crewmate/scout task worktree (linked git worktree, no marker)"
 }
 
 test_inert_when_not_firstmate_repo() {
@@ -230,8 +273,9 @@ test_inert_when_not_firstmate_repo() {
   dir="$TMP_ROOT/not-firstmate"
   git init -q "$dir"
   git -C "$dir" commit -q --allow-empty -m init
-  install_cd_scripts "$dir"   # bin/ present but no AGENTS.md
-  out=$("$dir/bin/fm-cd-pretool-check.sh" --claude --command 'cd projects/foo' 2>&1); rc=$?
+  mkdir -p "$dir/state"
+  install_cd_scripts "$dir"   # bin/ and state/ present but no AGENTS.md
+  out=$(FM_HOME="$dir" "$dir/bin/fm-cd-pretool-check.sh" --claude --command 'cd projects/foo' 2>&1); rc=$?
   expect_code 0 "$rc" "cd-guard must be inert without AGENTS.md (not a firstmate checkout)"
   [ -z "$out" ] || fail "cd-guard produced output outside a firstmate checkout: $out"
   pass "cd-guard: inert in a non-firstmate repo (no AGENTS.md)"
@@ -240,13 +284,25 @@ test_inert_when_not_firstmate_repo() {
 test_inert_when_not_a_git_repo() {
   local dir out rc
   dir="$TMP_ROOT/no-git"
-  mkdir -p "$dir"
+  mkdir -p "$dir/state"
   : > "$dir/AGENTS.md"
-  install_cd_scripts "$dir"   # AGENTS.md + bin/ but no git repo
-  out=$("$dir/bin/fm-cd-pretool-check.sh" --claude --command 'cd projects/foo' 2>&1); rc=$?
+  install_cd_scripts "$dir"   # AGENTS.md + bin/ + state/ but no git repo
+  out=$(FM_HOME="$dir" "$dir/bin/fm-cd-pretool-check.sh" --claude --command 'cd projects/foo' 2>&1); rc=$?
   expect_code 0 "$rc" "cd-guard must be inert when the checkout is not a git repo"
   [ -z "$out" ] || fail "cd-guard produced output in a non-git dir: $out"
   pass "cd-guard: inert when not inside a git repo"
+}
+
+# Scoping now reads the effective home's state dir, so a home without one is a
+# home the guard cannot confirm. It must go inert silently, never block.
+test_inert_without_state_dir() {
+  local dir out rc
+  dir=$(make_primary_fixture "$TMP_ROOT/no-state")
+  rmdir "$dir/state"
+  out=$(FM_HOME="$dir" "$dir/bin/fm-cd-pretool-check.sh" --claude --command 'cd projects/foo' 2>&1); rc=$?
+  expect_code 0 "$rc" "cd-guard must be inert when the effective home has no state dir"
+  [ -z "$out" ] || fail "cd-guard produced output for a home with no state dir: $out"
+  pass "cd-guard: inert when the effective home carries no state dir"
 }
 
 # --- end-to-end cwd-leak regression ----------------------------------------
@@ -327,6 +383,19 @@ test_fail_open_missing_jq_on_stdin() {
   pass "cd-guard: fails open on the stdin path when jq is missing"
 }
 
+# Scoping is delegated to shared libraries the transport sources. A deployment
+# missing one must fail open silently rather than let the source error reach a
+# harness that reads stderr.
+test_fail_open_missing_scope_lib() {
+  local dir out rc
+  dir=$(make_primary_fixture "$TMP_ROOT/nolib")
+  rm -f "$dir/bin/fm-home-anchor-lib.sh"
+  out=$(FM_HOME="$dir" "$dir/bin/fm-cd-pretool-check.sh" --command 'cd projects/foo' 2>&1); rc=$?
+  expect_code 0 "$rc" "transport must fail open when a shared scope library is missing"
+  [ -z "$out" ] || fail "transport produced output without the scope library: $out"
+  pass "cd-guard: fails open silently when a shared scope library is missing"
+}
+
 # --- prefilter fast path ----------------------------------------------------
 
 test_prefilter_skips_node_without_cd_substring() {
@@ -347,7 +416,7 @@ EOF
   chmod +x "$fakebin/node"
   # No cd/pushd/popd substring: the prefilter must fast-allow before scoping or
   # the policy runtime is ever consulted.
-  out=$(PATH="$fakebin" "$dir/bin/fm-cd-pretool-check.sh" --command 'git status' 2>&1); rc=$?
+  out=$(PATH="$fakebin" FM_HOME="$dir" "$dir/bin/fm-cd-pretool-check.sh" --command 'git status' 2>&1); rc=$?
   expect_code 0 "$rc" "prefilter must fast-allow a command with no cd/pushd/popd substring"
   [ -z "$out" ] || fail "prefilter fast-allow produced output: $out"
   [ ! -e "$marker" ] || fail "prefilter fast-allow still invoked the node policy owner"
@@ -375,8 +444,8 @@ test_policy_cli_direct() {
 test_scripts_are_shellcheck_clean() {
   command -v shellcheck >/dev/null 2>&1 || { pass "shellcheck not installed, skipping"; return; }
   # Same question bin/fm-lint.sh asks; see the note in tests/fm-arm-pretool-check.test.sh.
-  # This script sources nothing today, so it is the sibling check that would have
-  # inherited the identical false failure the day it does.
+  # This script sources the shared scope libraries, so --external-sources plus
+  # --source-path is what keeps bare shellcheck from reporting them as unfollowed.
   shellcheck --norc --external-sources --source-path="$ROOT" "$ROOT/bin/fm-cd-pretool-check.sh" >/dev/null 2>&1 \
     || fail "bin/fm-cd-pretool-check.sh is not shellcheck-clean"
   pass "bin/fm-cd-pretool-check.sh is shellcheck-clean"
@@ -384,14 +453,17 @@ test_scripts_are_shellcheck_clean() {
 
 test_full_acceptance_matrix
 test_fires_in_secondmate_home
+test_fires_in_leased_secondmate_home
 test_inert_in_child_worktree
 test_inert_when_not_firstmate_repo
 test_inert_when_not_a_git_repo
+test_inert_without_state_dir
 test_e2e_cwd_leak_regression
 test_fail_open_empty_stdin
 test_fail_open_unparseable_json
 test_fail_open_missing_node
 test_fail_open_missing_jq_on_stdin
+test_fail_open_missing_scope_lib
 test_prefilter_skips_node_without_cd_substring
 test_policy_cli_direct
 test_scripts_are_shellcheck_clean

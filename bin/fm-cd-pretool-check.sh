@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # Stable PreToolUse transport for the cd-guard command policy.
 #
-# A stray persistent top-level `cd projects/<clone>` in the PRIMARY firstmate
-# shell silently relocates the shell, so a later firstmate-owned command (a
-# backlog write, an fm-* lifecycle call, tasks-axi) runs inside a project clone
-# instead of the home. This seatbelt denies such a command before it runs.
+# A stray persistent top-level `cd projects/<clone>` in a PRIMARY firstmate
+# shell - the main home or a secondmate's own home - silently relocates the
+# shell, so a later firstmate-owned command (a backlog write, an fm-* lifecycle
+# call, tasks-axi) runs inside a project clone instead of the home. This seatbelt
+# denies such a command before it runs.
 # bin/fm-cd-command-policy.mjs is the sole owner of the block/allow decision; it
 # reuses the shell classifier owned by bin/fm-arm-command-policy.mjs. This
-# wrapper only scopes the guard to the real primary checkout, acquires the
+# wrapper only scopes the guard to a primary firstmate session, acquires the
 # harness payload, invokes that policy, and renders the established harness
 # responses. It never executes, sources, evaluates, or expands the command.
 # See docs/cd-guard.md for the complete contract and validation record.
@@ -24,10 +25,11 @@
 #   ALLOW - exit 0 and no output.
 #   DENY - exit 2, a Claude-shaped deny object on stderr, and a Grok-shaped
 #          deny object on stdout unless --claude was supplied.
-#   INERT - not the real primary checkout (a crewmate/scout task worktree or a
+#   INERT - not a primary firstmate session (a crewmate/scout task worktree or a
 #           non-firstmate repo): exit 0 with no output, exactly like ALLOW.
 #   FAIL OPEN - malformed or empty stdin, missing jq for stdin transport,
-#               missing Node or policy owner, or an invalid policy response.
+#               a missing shared scope library, an unresolvable FM_HOME, missing
+#               Node or policy owner, or an invalid policy response.
 #
 # Claude requires stdout to remain empty on deny.
 # Codex blocks on exit 2 and displays stderr.
@@ -45,8 +47,9 @@ Usage: fm-cd-pretool-check.sh [--command <cmd>] [--claude]
 
 With no --command, reads a PreToolUse-style JSON payload on stdin (Grok
 toolInput.command, or Claude/Codex tool_input.command).
-Fires only in the real primary firstmate checkout; it is a silent no-op in a
-crewmate/scout task worktree or any non-firstmate repo.
+Fires only in a primary firstmate session - the main home or a secondmate's own
+home, whether that home is a plain checkout or a leased linked worktree. It is a
+silent no-op in a crewmate/scout task worktree or any non-firstmate repo.
 Exits 0 to allow and 2 to deny a persistent top-level cwd change.
 The deny reason is written to stderr, with a Grok decision object on stdout
 unless --claude is supplied.
@@ -123,21 +126,32 @@ esac
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P) || exit 0
 FM_ROOT=${FM_ROOT_OVERRIDE:-$(CDPATH='' cd -- "$SCRIPT_DIR/.." 2>/dev/null && pwd -P)} || exit 0
 
-# Scope to a plain, non-worktree firstmate checkout, where git-dir equals
-# git-common-dir. A crewmate/scout task worktree - the shape bin/fm-spawn.sh
-# always hands out - is a linked git worktree where the two differ. This guard
-# does not inspect .fm-secondmate-home, so it applies in a git-cloned secondmate
-# home but remains inert when the secondmate home is itself a treehouse-leased
-# linked worktree. docs/cd-guard.md owns this scope; docs/turnend-guard.md owns
-# the turn-end guard's separate marker-aware scope. Any failure to confirm the
-# checkout is inert (exit 0), never a block, so a broken environment never
+# Scope to a PRIMARY firstmate session, through the same shared predicate the
+# turn-end guard (docs/turnend-guard.md) and the subagent seatbelt
+# (docs/subagent-guard.md) use, so all three hooks answer "is this a guarded
+# primary" from one owner. A secondmate runs its OWN primary firstmate session -
+# and is where the fleet's real project work happens - so a valid
+# .fm-secondmate-home marker force-INCLUDES that home whether treehouse leased it
+# as a linked worktree or it is a git-cloned plain checkout. Only an unmarked
+# root falls through to the plain-checkout test, which keeps the crewmate/scout
+# task worktree bin/fm-spawn.sh always hands out inert: that worktree is
+# legitimately scratch, carries no marker, and has a git-dir that differs from
+# its git-common-dir. docs/cd-guard.md owns this scope. Any failure to confirm
+# the primary is inert (exit 0), never a block, so a broken environment never
 # denies a shell command.
-[ -f "$FM_ROOT/AGENTS.md" ] || exit 0
-[ -d "$FM_ROOT/bin" ] || exit 0
-command -v git >/dev/null 2>&1 || exit 0
-GIT_DIR=$(git -C "$FM_ROOT" rev-parse --git-dir 2>/dev/null) || exit 0
-GIT_COMMON_DIR=$(git -C "$FM_ROOT" rev-parse --git-common-dir 2>/dev/null) || exit 0
-[ "$GIT_DIR" = "$GIT_COMMON_DIR" ] || exit 0
+[ -f "$SCRIPT_DIR/fm-home-anchor-lib.sh" ] || exit 0
+[ -f "$SCRIPT_DIR/fm-primary-scope-lib.sh" ] || exit 0
+# FM_HOME resolution, including the refusal on an ambiently inherited home, has
+# one owner: bin/fm-home-anchor-lib.sh. A home it cannot resolve is inert for the
+# same reason every other failure here is - this guard never denies a command it
+# cannot confirm belongs to a primary session.
+# shellcheck source=bin/fm-home-anchor-lib.sh
+. "$SCRIPT_DIR/fm-home-anchor-lib.sh"
+fm_home_anchor_resolve "$FM_ROOT" quiet || exit 0
+STATE=${FM_STATE_OVERRIDE:-$FM_HOME/state}
+# shellcheck source=bin/fm-primary-scope-lib.sh
+. "$SCRIPT_DIR/fm-primary-scope-lib.sh"
+fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 
 POLICY="$FM_ROOT/bin/fm-cd-command-policy.mjs"
 command -v node >/dev/null 2>&1 || exit 0

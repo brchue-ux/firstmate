@@ -14,7 +14,8 @@ Resolution is a shell-level concern, so `claude`, `codex`, `opencode`, `pi`, `pi
 The harness-specific surfaces that carry a home of their own are these:
 
 - `bin/fm-turnend-guard.sh` is the shared Stop guard for every harness; `bin/fm-turnend-guard-grok.sh` delegates to it and reads no home itself, and `bin/fm-kimi-turnend-hook.sh` reads no `FM_*` variable at all.
-- `bin/fm-claude-stop-autoarm.sh`, `bin/fm-arm-pretool-check.sh`, `bin/fm-cd-pretool-check.sh`, and `bin/fm-subagent-pretool-check.sh` are the Claude-registered hooks. `fm-cd-pretool-check.sh` never reads `FM_HOME` and is not applicable.
+- `bin/fm-claude-stop-autoarm.sh`, `bin/fm-arm-pretool-check.sh`, `bin/fm-cd-pretool-check.sh`, and `bin/fm-subagent-pretool-check.sh` are the Claude-registered hooks.
+  `fm-cd-pretool-check.sh` reads `FM_HOME` for the state directory its primary scope requires, re-checked on 2026-08-13 when it adopted the shared scope predicate ([`docs/cd-guard.md`](../cd-guard.md)); before that it read no home at all.
 - `bin/fm-sessionstart-nudge.sh` is the one session-open command every adapter invokes, registered by `.claude/settings.json`, `.codex/hooks.json`, `.grok/hooks/fm-primary-sessionstart-nudge.json`, and `.opencode/plugins/fm-primary-sessionstart-nudge.js`, with Pi reaching it through `.pi/extensions/fm-primary-turnend-guard.ts`.
   It reads `FM_HOME` for the state directory it checks, and declines silently under refusal because a Claude `SessionStart` non-zero exit blocks session initialization.
   `docs/sessionstart-nudge.md` owns that transport and exit contract.
@@ -31,6 +32,7 @@ Checked on 2026-07-31 against every spawn backend.
 ## Hook behavior when resolution refuses
 
 Reproduced with two synthetic home roots, the second carrying a `.fm-secondmate-home` marker, running each hook from the first with `FM_HOME` naming the second.
+The `fm-cd-pretool-check.sh` row was re-reproduced the same way on 2026-08-13, driving it with `--command 'cd projects/foo'` so the run reaches scoping rather than stopping at the prefilter; its control with `FM_HOME` naming the home it stands in exits 2.
 Every hook declined without writing into the other home, and the count of files under the other home's `state/` was 0 before and 0 after:
 
 ```
@@ -38,7 +40,7 @@ fm-turnend-guard.sh            exit=0   (silent decline)
 fm-claude-stop-autoarm.sh      exit=0   (silent decline)
 fm-sessionstart-nudge.sh       exit=0   (silent decline, no nudge printed)
 fm-subagent-pretool-check.sh   exit=0   (inert, never blocks a call it cannot confirm)
-fm-cd-pretool-check.sh         exit=0   (does not read FM_HOME)
+fm-cd-pretool-check.sh         exit=0   (inert, never denies a command it cannot confirm)
 fm-arm-pretool-check.sh        exit=2   (a broad watcher kill is still denied)
 fm-watch.sh --status           exit=1   error: FM_HOME names a different firstmate home ...
 ```
