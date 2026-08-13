@@ -57,11 +57,43 @@ run_guard_case_read_only() {
     "$ROOT/bin/fm-guard.sh" 2>&1
 }
 
+# A `date` that reports the wall clock advanced by FM_TEST_CLOCK_SKEW seconds.
+# The guard measures the outage as its own clock minus the beacon's mtime, so
+# skewing the clock ages the outage without touching the beacon - and the
+# episode key is the beacon's mtime, so the episode survives the skew. Only the
+# bare `date +%s` the age arithmetic uses is intercepted; anything else runs
+# real.
+make_clock_bin() {  # <dir>
+  local dir=$1 bin real
+  bin="$dir/clockbin"
+  if [ ! -x "$bin/date" ]; then
+    real=$(command -v date)
+    mkdir -p "$bin"
+    {
+      printf '#!/bin/sh\n'
+      printf "real='%s'\n" "$real"
+      cat <<'SHIM'
+if [ "$#" -eq 1 ] && [ "$1" = "+%s" ]; then
+  echo $(( $("$real" +%s) + ${FM_TEST_CLOCK_SKEW:-0} ))
+else
+  exec "$real" "$@"
+fi
+SHIM
+    } > "$bin/date"
+    chmod +x "$bin/date"
+  fi
+  printf '%s\n' "$bin"
+}
+
 # Escalation-ladder run: FM_GUARD_GRACE=0 makes any beacon stale, so the outage
-# duration the guard reports is exactly the beacon's age.
-run_guard_case_ladder() {
-  local dir=$1 ladder=$2 repeat=$3
-  FM_TMP_USAGE_WARN=100 FM_TMP_USAGE_HIGH=100 FM_TMP_USAGE_CRITICAL=100 \
+# duration the guard reports is exactly the beacon's age, plus the clock skew
+# this run hands it.
+run_guard_case_ladder() {  # <dir> <ladder> <repeat> [clock-skew-seconds]
+  local dir=$1 ladder=$2 repeat=$3 skew=${4:-0} clockbin
+  clockbin=$(make_clock_bin "$dir")
+  PATH="$clockbin:$PATH" \
+    FM_TEST_CLOCK_SKEW="$skew" \
+    FM_TMP_USAGE_WARN=100 FM_TMP_USAGE_HIGH=100 FM_TMP_USAGE_CRITICAL=100 \
     FM_ROOT_OVERRIDE="$(case_root "$dir")" \
     FM_HOME="$(case_home "$dir")" \
     FM_GUARD_GRACE=0 \
@@ -87,21 +119,6 @@ age_beacon() {  # <home> <seconds-ago>
     my $stamp = time - $ago;
     utime $stamp, $stamp, $path or die "utime: $!";
   ' "$1/state/.last-watcher-beat" "$2"
-}
-
-beacon_age() {  # <home>
-  perl -e 'my @s = stat($ARGV[0]) or exit 1; print time - $s[9], "\n"' \
-    "$1/state/.last-watcher-beat"
-}
-
-wait_for_outage() {  # <home> <seconds>
-  local home=$1 target=$2 i=0
-  while [ "$i" -lt 200 ]; do
-    [ "$(beacon_age "$home")" -ge "$target" ] && return 0
-    sleep 0.1
-    i=$((i + 1))
-  done
-  fail "beacon never reached an age of ${target}s"
 }
 
 episode_key_of() {  # <home>
@@ -185,6 +202,13 @@ test_concurrent_same_episode_prints_one_full_banner() {
   pass "fm-guard stale banner: concurrent same-episode calls claim exactly one full banner"
 }
 
+# Rungs and skews are minutes apart on purpose. The guard reads its own clock,
+# so crossing a rung by sleeping real seconds against a one-second ladder raced
+# the second each call happened to land on: a first call delayed past the
+# second boundary already measured a 1s outage and claimed rung 1, and the
+# later assertions then read the wrong side of the boundary. Every call below
+# sits hundreds of seconds inside one band instead, so no scheduling delay can
+# move it to another rung.
 test_lengthening_outage_reprints_full_banner() {
   local dir home key_first key_last out
   dir=$(make_guard_case escalating-outage)
@@ -193,7 +217,7 @@ test_lengthening_outage_reprints_full_banner() {
   # re-print below is caused by the outage getting LONGER, not by a new episode.
   age_beacon "$home" 0
 
-  out=$(run_guard_case_ladder "$dir" "1 4" 4)
+  out=$(run_guard_case_ladder "$dir" "300 900" 3600 0)
   [ "$(count_text "$out" "WATCHER DOWN - SUPERVISION IS OFF")" -eq 1 ] \
     || fail "first stale call did not print the full banner: $out"
   printf '%s\n' "$out" | grep -Eq 'WATCHER DOWN - SUPERVISION IS OFF - down for [0-9]+s' \
@@ -201,31 +225,27 @@ test_lengthening_outage_reprints_full_banner() {
   key_first=$(episode_key_of "$home")
   [ -n "$key_first" ] || fail "first full banner did not record an episode key"
 
-  out=$(run_guard_case_ladder "$dir" "1 4" 4)
+  out=$(run_guard_case_ladder "$dir" "300 900" 3600 0)
   [ "$(count_text "$out" "WATCHER DOWN - SUPERVISION IS OFF")" -eq 0 ] \
     || fail "same escalation level repeated the full banner: $out"
   assert_contains "$out" "full banner already printed at this escalation level" \
     "same escalation level did not print the concise reminder"
 
-  wait_for_outage "$home" 1
-  out=$(run_guard_case_ladder "$dir" "1 4" 4)
+  out=$(run_guard_case_ladder "$dir" "300 900" 3600 450)
   [ "$(count_text "$out" "WATCHER DOWN - SUPERVISION IS OFF")" -eq 1 ] \
     || fail "crossing the first ladder rung did not re-print the full banner: $out"
 
-  wait_for_outage "$home" 2
-  out=$(run_guard_case_ladder "$dir" "1 4" 4)
+  out=$(run_guard_case_ladder "$dir" "300 900" 3600 700)
   [ "$(count_text "$out" "WATCHER DOWN - SUPERVISION IS OFF")" -eq 0 ] \
     || fail "a duration between rungs re-printed the full banner: $out"
 
-  wait_for_outage "$home" 4
-  out=$(run_guard_case_ladder "$dir" "1 4" 4)
+  out=$(run_guard_case_ladder "$dir" "300 900" 3600 1200)
   [ "$(count_text "$out" "WATCHER DOWN - SUPERVISION IS OFF")" -eq 1 ] \
     || fail "crossing the second ladder rung did not re-print the full banner: $out"
 
   # Past the last rung the repeat interval keeps the alarm coming, so a long
   # outage never falls silent the way mtime-keyed suppression made it.
-  wait_for_outage "$home" 8
-  out=$(run_guard_case_ladder "$dir" "1 4" 4)
+  out=$(run_guard_case_ladder "$dir" "300 900" 3600 4800)
   [ "$(count_text "$out" "WATCHER DOWN - SUPERVISION IS OFF")" -eq 1 ] \
     || fail "outage past the last ladder rung stopped re-printing the full banner: $out"
 
