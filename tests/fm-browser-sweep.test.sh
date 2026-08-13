@@ -61,6 +61,24 @@ EOF
 printf -- '- mate - owns alpha work (home: %s; scope: alpha; projects: alpha; added 2026-08-01)\n' \
   "$FLEET_MATE" > "$FLEET_MAIN/data/secondmates.md"
 
+# A second fixture fleet whose registered secondmate home has no readable
+# backlog. The index still exits 0 for this - a home it cannot read is reported
+# as skipped and simply contributes no open work - so this is the fleet that
+# proves the sweep refuses a partial answer instead of reading it as "that home
+# has nothing open".
+FLEET_PARTIAL_MAIN="$TMP_ROOT/fleet-partial-main"
+FLEET_PARTIAL_MATE="$TMP_ROOT/fleet-partial-mate"
+mkdir -p "$FLEET_PARTIAL_MAIN/data" "$FLEET_PARTIAL_MATE/data"
+cat > "$FLEET_PARTIAL_MAIN/data/backlog.md" <<'EOF'
+# Backlog
+
+## In flight
+## Queued
+## Done
+EOF
+printf -- '- mate - owns alpha work (home: %s; scope: alpha; projects: alpha; added 2026-08-01)\n' \
+  "$FLEET_PARTIAL_MATE" > "$FLEET_PARTIAL_MAIN/data/secondmates.md"
+
 HELD_PIDS=()
 
 # await_args <pid> <needle>: block until the process's command line is the one
@@ -177,17 +195,27 @@ age_out() {
 # FM_HOME selects the fixture fleet the sweep consults for open work. Without it
 # the real cross-home index would read the developer's own backlog, and one open
 # item of theirs named like a fixture task would silently protect it.
+run_sweep_in_home() {  # <home> <root> [args...]
+  local home=$1 root=$2
+  shift 2
+  ( cd "$TMP_ROOT" && env -u FM_BROWSER_SWEEP_HOMES FM_HOME="$home" \
+    "$SWEEP" --root "$root" "$@" ) 2>&1
+}
+
 run_sweep() {
   local root=$1
   shift
-  ( cd "$TMP_ROOT" && env -u FM_BROWSER_SWEEP_HOMES FM_HOME="$FLEET_MAIN" \
-    "$SWEEP" --root "$root" "$@" ) 2>&1
+  run_sweep_in_home "$FLEET_MAIN" "$root" "$@"
 }
 
 # A bin/ holding the sweep and the libs it sources, plus whatever stands in for
 # the cross-home work index. The sweep resolves the index next to itself, so
 # this is how an index that cannot be consulted is presented to it.
-sweep_bin_with_index() {  # <dir> <absent|fails|wrong-schema>
+#
+# The payload modes are written against the fm-fleet-work-index.v1 object, which
+# is that script's declared machine-readable interface, so what they encode is a
+# contract the real index emits and not a guess at its internals.
+sweep_bin_with_index() {  # <dir> <absent|fails|hangs|wrong-schema|partial-subtree>
   local dir=$1 mode=$2 bindir="$1/bin" index
   mkdir -p "$bindir"
   cp "$ROOT/bin/fm-browser-sweep.sh" "$ROOT/bin/fm-supervision-lib.sh" \
@@ -197,15 +225,35 @@ sweep_bin_with_index() {  # <dir> <absent|fails|wrong-schema>
     absent) : ;;
     fails)
       printf '%s\n' '#!/usr/bin/env bash' 'exit 3' > "$index"
-      chmod +x "$index"
+      ;;
+    hangs)
+      printf '%s\n' '#!/usr/bin/env bash' 'sleep 120' > "$index"
       ;;
     wrong-schema)
       printf '%s\n' '#!/usr/bin/env bash' \
         'printf %s "{\"schema\":\"something-else.v1\",\"items\":[]}"' > "$index"
-      chmod +x "$index"
+      ;;
+    partial-subtree)
+      # Every home was READ, so homes_skipped is 0 - but one home's secondmate
+      # registry could not be enumerated, so that home's whole subtree is
+      # missing from items[] and the run still succeeded.
+      cat > "$index" <<'SH'
+#!/usr/bin/env bash
+cat <<'JSON'
+{"schema":"fm-fleet-work-index.v1",
+ "totals":{"homes":2,"homes_read":2,"homes_skipped":0,"items":1},
+ "homes":[{"mate":"main","home":"/fixture/main","skipped":false,"reason":null,
+           "subtree_reason":null},
+          {"mate":"mate","home":"/fixture/mate","skipped":false,"reason":null,
+           "subtree_reason":"secondmate registry is unreadable, so this home's secondmates could not be enumerated"}],
+ "skipped":[],
+ "items":[{"mate":"main","home":"/fixture/main","id":"visible-task","state":"in_flight"}]}
+JSON
+SH
       ;;
     *) fail "unknown index fixture mode: $mode" ;;
   esac
+  [ "$mode" = absent ] || chmod +x "$index"
   printf '%s\n' "$bindir/fm-browser-sweep.sh"
 }
 
@@ -302,6 +350,87 @@ test_unconsultable_fleet_index_reports_nothing_idle() {
       "$mode: a stop command was handed to the operator with no way to check the fleet's open work"
   done
   pass "fm-browser-sweep: an unreadable, failing, or unrecognized fleet work index skips the whole sweep instead of flagging a live worker's browser"
+}
+
+# The index answers successfully on a PARTIAL read: a home whose backlog it
+# cannot read is reported as skipped and contributes no items. Reading that as
+# "no open work owns this session" is how a live worker in that very home gets
+# its browser stopped, so an incomplete answer has to be worth exactly as much
+# as no answer - and it has to say which home went unread, or the operator has
+# nothing to repair.
+test_partially_read_fleet_index_reports_nothing_idle() {
+  local root pid dir out
+  root=$(new_root partial-index)
+  pid=$(start_fake_bridge "$root/proc")
+  dir=$(write_session "$root" fm-nobody-task "$pid")
+  age_out "$dir/bridge.pid" "$dir/snapshot-generation"
+
+  # The same bridge against the complete fleet is reported, so the silence below
+  # is the incompleteness being caught and not the fixture failing to look idle.
+  out=$(run_sweep "$root" --age-hours 12)
+  assert_contains "$out" "fm-nobody-task: idle:" \
+    "the fixture bridge is not reported even against a fully readable fleet"
+
+  out=$(run_sweep_in_home "$FLEET_PARTIAL_MAIN" "$root" --age-hours 12)
+  assert_contains "$out" "$root: skipped:" \
+    "a fleet index that could not read every home did not produce a whole-sweep skip"
+  assert_contains "$out" "$FLEET_PARTIAL_MATE" \
+    "the whole-sweep skip did not name the home that went unread"
+  assert_not_contains "$out" "idle:" \
+    "a session was reported idle while a home's open work was unreadable"
+  pass "fm-browser-sweep: a fleet index that read only some homes skips the whole sweep and names the home that went unread"
+}
+
+# The other half of an incomplete answer: every home was read, but one home's
+# secondmate registry could not be enumerated, so that home's entire subtree is
+# absent from items[] while homes_skipped stays 0.
+test_unenumerated_secondmate_subtree_reports_nothing_idle() {
+  local root pid dir sweep out
+  root=$(new_root partial-subtree)
+  sweep=$(sweep_bin_with_index "$root" partial-subtree)
+  pid=$(start_fake_bridge "$root/proc")
+  dir=$(write_session "$root" fm-nobody-task "$pid")
+  age_out "$dir/bridge.pid" "$dir/snapshot-generation"
+
+  out=$( cd "$TMP_ROOT" && env -u FM_BROWSER_SWEEP_HOMES FM_HOME="$FLEET_MAIN" \
+    "$sweep" --root "$root" --age-hours 12 2>&1 )
+  assert_contains "$out" "$root: skipped:" \
+    "an index hiding a whole secondmate subtree did not produce a whole-sweep skip"
+  assert_contains "$out" "/fixture/mate" \
+    "the whole-sweep skip did not name the home whose secondmates went unenumerated"
+  assert_not_contains "$out" "idle:" \
+    "a session was reported idle while a secondmate subtree's open work was invisible"
+  pass "fm-browser-sweep: a fleet index that could not enumerate a home's secondmates skips the whole sweep rather than trusting the ids it did return"
+}
+
+# The index walks every registered home, so one on a hung mount would otherwise
+# hold session start open indefinitely. An expiry is just another unavailable
+# answer and takes the same fail-safe path.
+test_slow_fleet_index_is_bounded_and_reports_nothing_idle() {
+  local root pid dir sweep out started elapsed
+  # The bound is deliberately optional, the same way teardown's browser stop is,
+  # so a host without `timeout` runs unbounded rather than never sweeping.
+  command -v timeout >/dev/null 2>&1 || {
+    pass "fm-browser-sweep: bounded fleet index skipped, timeout not found"
+    return 0
+  }
+  root=$(new_root slow-index)
+  sweep=$(sweep_bin_with_index "$root" hangs)
+  pid=$(start_fake_bridge "$root/proc")
+  dir=$(write_session "$root" fm-nobody-task "$pid")
+  age_out "$dir/bridge.pid" "$dir/snapshot-generation"
+
+  started=$(date +%s)
+  out=$( cd "$TMP_ROOT" && env -u FM_BROWSER_SWEEP_HOMES FM_HOME="$FLEET_MAIN" \
+    FM_BROWSER_SWEEP_INDEX_TIMEOUT=1 "$sweep" --root "$root" --age-hours 12 2>&1 )
+  elapsed=$(( $(date +%s) - started ))
+  [ "$elapsed" -lt 30 ] \
+    || fail "the sweep waited ${elapsed}s on an index that never returns"
+  assert_contains "$out" "$root: skipped:" \
+    "an index that outlived its bound did not produce a whole-sweep skip"
+  assert_not_contains "$out" "idle:" \
+    "a session was reported idle after the fleet index timed out"
+  pass "fm-browser-sweep: an index that never returns is bounded, and its expiry reports nothing idle"
 }
 
 test_dead_and_reused_pids_are_not_reported() {
@@ -404,6 +533,9 @@ test_idle_bridge_is_reported_and_fresh_one_is_not
 test_live_task_session_is_protected
 test_open_work_in_another_home_is_never_reported
 test_unconsultable_fleet_index_reports_nothing_idle
+test_partially_read_fleet_index_reports_nothing_idle
+test_unenumerated_secondmate_subtree_reports_nothing_idle
+test_slow_fleet_index_is_bounded_and_reports_nothing_idle
 test_dead_and_reused_pids_are_not_reported
 test_default_session_is_examined_without_borrowing_named_activity
 test_unreadable_record_is_reported_and_missing_root_is_silent

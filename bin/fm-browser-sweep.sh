@@ -47,16 +47,24 @@
 #     once per run and every open item's pinned session name is protected.
 #     Session names are derived FROM ids through bin/fm-browser-session-lib.sh,
 #     never parsed back out of a name: a shortened name has no id to recover.
+#     The index must have read EVERY home to answer this. It succeeds on a
+#     partial read by design - a home with no readable backlog is reported as
+#     skipped and contributes no items, and a home whose registry cannot be read
+#     hides its whole secondmate subtree - so a partial answer is treated
+#     exactly as no answer, not as "that home has no open work"
 # Idle is measured from that state, not from process age: a bridge started two
 # days ago and used a minute ago is in use, and reporting it as an orphan is the
 # error that gets a live session killed.
 #
 # The fleet index is a precondition for reporting, not a bonus. When it cannot
-# be consulted at all - no jq, no index script, a non-zero exit, output that is
-# not an fm-fleet-work-index.v1 object - this reports a whole-sweep skip naming
-# the reason and flags nothing, exactly as it does when ps is unusable. Falling
-# back to flagging would trade a silent run for the one outcome this sweep
-# exists to avoid: an operator stopping a live worker's browser.
+# be consulted - no jq, no index script, a non-zero exit, a run that outlived
+# its time bound, output that is not an fm-fleet-work-index.v1 object, or a run
+# that did not read every home - this reports a whole-sweep skip naming the
+# reason and the homes it names, and flags nothing, exactly as it does when ps
+# is unusable. Falling back to flagging would trade a silent run for the one
+# outcome this sweep exists to avoid: an operator stopping a live worker's
+# browser. A home is never allowed to leave the answer silently, which is the
+# same property bin/fm-fleet-work-index.sh maintains on its own side.
 #
 # Scope limit, narrowed but not gone: the index knows a task by its backlog row,
 # so a session pinned to work that another home tracks only in state/<id>.meta,
@@ -88,6 +96,10 @@
 #                                 (default $HOME/.chrome-devtools-axi)
 #   FM_BROWSER_SWEEP_HOMES        firstmate homes whose live tasks are protected,
 #                                 colon-separated
+#   FM_BROWSER_SWEEP_INDEX_TIMEOUT
+#                                 seconds the cross-home work index may take
+#                                 before its answer is treated as unavailable
+#                                 (default 20; 0 disables the bound)
 #
 # The fleet index resolves its own home the ordinary way, from the environment
 # this sweep was invoked with, so it settles on exactly the home its caller
@@ -113,6 +125,7 @@ AGE_HOURS=${FM_BROWSER_SWEEP_AGE_HOURS:-12}
 AGE_MINUTES_OPT=${FM_BROWSER_SWEEP_AGE_MINUTES:-}
 ROOT_DIR=${FM_BROWSER_SWEEP_ROOT:-${HOME:-}/.chrome-devtools-axi}
 PROTECT_HOMES=${FM_BROWSER_SWEEP_HOMES:-}
+FLEET_INDEX_TIMEOUT=${FM_BROWSER_SWEEP_INDEX_TIMEOUT:-20}
 VERBOSE=0
 
 while [ $# -gt 0 ]; do
@@ -144,6 +157,10 @@ else
   AGE_SECONDS=$((AGE_HOURS * 3600))
   AGE_WINDOW="${AGE_HOURS}h"
 fi
+
+case "$FLEET_INDEX_TIMEOUT" in
+  ''|*[!0-9]*) die "FM_BROWSER_SWEEP_INDEX_TIMEOUT must be a whole number of seconds" ;;
+esac
 
 SCRIPT_DIR="$(cd "$(dirname "$SELF")" && pwd)"
 
@@ -218,11 +235,25 @@ FLEET_INDEX_STATE=unread
 FLEET_INDEX_REASON=
 FLEET_TASK_SESSIONS=
 
+# The index walks every registered home, so one on a stale or hung mount would
+# otherwise hold session start open forever. The bound is the same reasoning
+# bin/fm-teardown.sh applies to the browser stop and bin/fm-bootstrap.sh to
+# fleet sync, and an expiry needs no path of its own: it is simply another way
+# the answer is unavailable. `timeout` stays optional, exactly as it is on the
+# teardown stop, so a host without it runs unbounded rather than never sweeping.
+run_fleet_index() {
+  if [ "$FLEET_INDEX_TIMEOUT" -gt 0 ] && command -v timeout >/dev/null 2>&1; then
+    timeout "$FLEET_INDEX_TIMEOUT" "$FLEET_INDEX_CMD" --json 2>/dev/null </dev/null
+  else
+    "$FLEET_INDEX_CMD" --json 2>/dev/null </dev/null
+  fi
+}
+
 # Populate FLEET_TASK_SESSIONS, or set FLEET_INDEX_REASON and fail. Every
 # failure mode here means "the fleet's open work is unknown", never "there is
 # none": the caller must not report anything after one.
 load_fleet_task_sessions() {
-  local json ids id name
+  local json ids id name rc unread
   command -v jq >/dev/null 2>&1 || {
     FLEET_INDEX_REASON="jq is not installed, so the fleet's open work could not be read"
     return 1
@@ -231,16 +262,50 @@ load_fleet_task_sessions() {
     FLEET_INDEX_REASON="the cross-home work index is missing or not executable ($FLEET_INDEX_CMD)"
     return 1
   }
-  json=$("$FLEET_INDEX_CMD" --json 2>/dev/null </dev/null) || {
-    FLEET_INDEX_REASON="the cross-home work index failed ($FLEET_INDEX_CMD --json)"
+  json=$(run_fleet_index) || {
+    rc=$?
+    if [ "$rc" -eq 124 ]; then
+      FLEET_INDEX_REASON="the cross-home work index did not finish within ${FLEET_INDEX_TIMEOUT}s"
+    else
+      FLEET_INDEX_REASON="the cross-home work index failed ($FLEET_INDEX_CMD --json)"
+    fi
     return 1
   }
-  # An object that is not the schema this reads is refused rather than mined for
-  # whatever ids it happens to contain.
-  ids=$(printf '%s' "$json" | jq -r '
+
+  # A home the index could not read contributes no items while the run still
+  # succeeds, and a home whose registry it could not read hides that home's
+  # whole secondmate subtree the same way. Either one turns "no open work owns
+  # this session" into "no open work we happened to see owns this session",
+  # which is the assumption that gets a live worker's browser stopped - so an
+  # incomplete answer is refused here and named, rather than mined for the ids
+  # it does carry.
+  unread=$(printf '%s' "$json" | jq -r '
     if (.schema? == "fm-fleet-work-index.v1") and ((.items | type) == "array")
-    then (.items[] | .id // empty)
+       and ((.homes | type) == "array")
+    then
+      ([ .homes[]
+         | select((.skipped == true) or (.subtree_reason != null))
+         | ((.home // .mate // "unnamed home") | tostring) + ": "
+           + ((.reason // .subtree_reason) | tostring) ]) as $named
+      | (if ($named | length) > 0 then $named
+         elif ((.totals.homes_skipped // 0) > 0)
+         then ["\(.totals.homes_skipped) home(s) went unread"]
+         else [] end) as $problems
+      | if ($problems | length) == 0 then ""
+        else ($problems[0:3] | join("; "))
+             + (if ($problems | length) > 3
+                then "; and \(($problems | length) - 3) more" else "" end)
+        end
     else error("not an fm-fleet-work-index.v1 object") end' 2>/dev/null) || {
+    FLEET_INDEX_REASON="the cross-home work index did not emit a readable fm-fleet-work-index.v1 object"
+    return 1
+  }
+  if [ -n "$unread" ]; then
+    FLEET_INDEX_REASON="the cross-home work index could not read every home ($unread)"
+    return 1
+  fi
+
+  ids=$(printf '%s' "$json" | jq -r '.items[] | .id // empty' 2>/dev/null) || {
     FLEET_INDEX_REASON="the cross-home work index did not emit a readable fm-fleet-work-index.v1 object"
     return 1
   }
