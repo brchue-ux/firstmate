@@ -1006,6 +1006,58 @@ test_home_seed_copies_base_remote_into_seeded_clone() {
   pass "home seeding copies a project's base remote into the seeded clone"
 }
 
+test_home_seed_backfills_base_remote_into_existing_clone() {
+  local home subhome seeded work upstream_abs fork_abs sync_out head_before
+  home="$TMP_ROOT/base-backfill-home"
+  subhome="$TMP_ROOT/base-backfill-subhome"
+  seeded="$subhome/projects/alpha"
+  work="$TMP_ROOT/base-backfill-work"
+  mkdir -p "$home/projects" "$home/data" "$home/state" "$home/remotes"
+  fm_git_init_commit "$home/projects/alpha"
+  git -C "$home/projects/alpha" branch -M main
+  git clone --quiet --bare "$home/projects/alpha" "$home/remotes/backfill-alpha-upstream.git"
+  git clone --quiet --bare "$home/projects/alpha" "$home/remotes/backfill-alpha-fork.git"
+  upstream_abs=$(cd "$home/remotes/backfill-alpha-upstream.git" && pwd)
+  fork_abs=$(cd "$home/remotes/backfill-alpha-fork.git" && pwd)
+  git -C "$home/projects/alpha" remote add origin "file://$upstream_abs"
+  git -C "$home/projects/alpha" remote add fork "file://$fork_abs"
+  printf '%s\n' '- alpha [direct-PR base=fork] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
+  # The home was seeded before base=fork was recorded: it already holds a clone of
+  # origin with no fork remote, which a re-seed must repair rather than leave rotting.
+  git clone --quiet "$ROOT" "$subhome"
+  mkdir -p "$subhome/projects"
+  git clone --quiet "file://$upstream_abs" "$seeded"
+  git clone --quiet "file://$fork_abs" "$work"
+  printf 'fork line\n' > "$work/file.txt"
+  git -C "$work" add file.txt
+  git -C "$work" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm F1
+  git -C "$work" push -q origin main
+  head_before=$(git -C "$seeded" rev-parse HEAD)
+
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='base backfill scope' FM_SECONDMATE_SCOPE='base backfill scope' \
+    "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha >/dev/null \
+    || fail "re-seed failed for an existing clone missing its base remote"
+
+  [ "$(git -C "$seeded" remote get-url fork)" = "file://$fork_abs" ] \
+    || fail "re-seed did not add the missing base remote to an existing clone"
+  [ "$(git -C "$seeded" rev-parse HEAD)" = "$head_before" ] \
+    || fail "re-seed moved an existing clone's checked-out work"
+  sync_out=$(FM_HOME="$subhome" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-fleet-sync.sh" "$seeded" 2>/dev/null)
+  printf '%s\n' "$sync_out" | grep -F 'alpha: synced' >/dev/null \
+    || fail "existing clone did not sync after the base remote was backfilled: $sync_out"
+  [ "$(git -C "$seeded" rev-parse HEAD)" = "$(git -C "$seeded" rev-parse fork/main)" ] \
+    || fail "existing clone was not fast-forwarded to its base remote"
+
+  # A base remote the clone already has is never rewritten, whatever it points at.
+  git -C "$seeded" remote set-url fork "file://$upstream_abs"
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='base backfill scope' FM_SECONDMATE_SCOPE='base backfill scope' \
+    "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha >/dev/null \
+    || fail "re-seed failed when the base remote was already present"
+  [ "$(git -C "$seeded" remote get-url fork)" = "file://$upstream_abs" ] \
+    || fail "re-seed overwrote an existing base remote URL"
+  pass "home seeding backfills a missing base remote into an existing clone without overwriting one"
+}
+
 test_home_seed_skips_initialized_existing_no_mistakes_projects() {
   local home subhome err fakebin log origin
   home="$TMP_ROOT/existing-initialized-home"
@@ -2241,6 +2293,7 @@ test_home_seed_refuses_remote_backed_project_without_origin
 test_home_seed_refuses_existing_remote_backed_project_with_wrong_origin
 test_home_seed_resolves_relative_source_origins
 test_home_seed_copies_base_remote_into_seeded_clone
+test_home_seed_backfills_base_remote_into_existing_clone
 test_home_seed_skips_initialized_existing_no_mistakes_projects
 test_home_seed_refuses_uninitialized_existing_no_mistakes_project
 test_home_seed_refuses_project_destinations_outside_subhome

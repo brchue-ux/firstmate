@@ -470,12 +470,18 @@ seeded_origin_url() {
 
 # sync_project_registry copies the captain's project line into the sub-home
 # verbatim, base=<remote> token included, so a project whose working line is not
-# origin needs that remote in the fresh clone too: without it bin/fm-fleet-sync.sh
+# origin needs that remote in the seeded clone too: without it bin/fm-fleet-sync.sh
 # skips the seeded clone by name on every run and it never refreshes again.
-# bin/fm-project-mode.sh has already validated the name as a plain remote.
+# Purely additive, so it is safe on a clone this seed did not create: a remote
+# that is already present is left exactly as it is, and nothing else in the clone
+# is touched. bin/fm-project-mode.sh has already validated the name as a plain
+# remote.
 copy_base_remote() {
   local project=$1 base=$2 src=$3 dst=$4 url
   case "$base" in ''|origin) return 0 ;; esac
+  if git -C "$dst" remote get-url "$base" >/dev/null 2>&1; then
+    return 0
+  fi
   url=$(git -C "$src" remote get-url "$base" 2>/dev/null || true)
   if [ -z "$url" ]; then
     echo "warn: project $project records base remote $base but $src has no such remote; seeded clone will not refresh until it is added" >&2
@@ -581,7 +587,8 @@ EOF
       echo "error: seeded project $project at $dst has origin $dst_url; expected $url" >&2
       return 1
     }
-    return 0
+    copy_base_remote "$project" "$base" "$src" "$dst"
+    return
   fi
   url=$(source_origin_url "$project" "$mode" "$src") || return 1
   git clone --quiet "$url" "$dst"
