@@ -593,9 +593,32 @@ test_landed_teardown_publishes_herdr_outcome() {
     'herdr_workspace_id=w1' \
     'herdr_tab_id=w1:t2' \
     'herdr_pane_id=w1:p2' >> "$case_dir/state/task-x1.meta"
+  # Teardown preflights the endpoint through the backend's structured presence
+  # probe and refuses an endpoint it cannot inspect exactly, so this stub has to
+  # answer `pane get` and `workspace list` as real JSON. A stub that only logged
+  # and exited 0 reads as ambiguous presence, and teardown then refuses before
+  # reaching the landed-outcome publish these assertions are about.
   cat > "$case_dir/fakebin/herdr" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "${FM_TEST_HERDR_LOG:?}"
+closed="${FM_TEST_HERDR_LOG:?}.pane-closed"
+case "$*" in
+  *"pane close"*)
+    : > "$closed" ;;
+  *"pane get"*)
+    # Report the pane gone once its close has run: teardown confirms the close
+    # took effect before it removes any durable record, so a fake that always
+    # reports the pane present is refused rather than believed.
+    if [ -e "$closed" ]; then
+      printf '{"error":{"code":"pane_not_found"}}\n'
+    else
+      printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n'
+    fi ;;
+  *"session list"*)
+    printf '{"sessions":[{"name":"fmtest","running":true,"socket_path":"/tmp/fmtest-herdr.sock"}]}\n' ;;
+  *"workspace list"*)
+    printf '{"result":{"workspaces":[{"workspace_id":"w1"}]}}\n' ;;
+esac
 exit 0
 SH
   chmod +x "$case_dir/fakebin/herdr"
@@ -628,9 +651,26 @@ test_forced_teardown_publishes_no_herdr_outcome() {
     'herdr_workspace_id=w1' \
     'herdr_tab_id=w1:t2' \
     'herdr_pane_id=w1:p2' >> "$case_dir/state/task-x1.meta"
+  # Same structured, stateful stub as the landed case above: the endpoint
+  # preflight and the post-close confirmation run for a forced teardown too.
   cat > "$case_dir/fakebin/herdr" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "${FM_TEST_HERDR_LOG:?}"
+closed="${FM_TEST_HERDR_LOG:?}.pane-closed"
+case "$*" in
+  *"pane close"*)
+    : > "$closed" ;;
+  *"pane get"*)
+    if [ -e "$closed" ]; then
+      printf '{"error":{"code":"pane_not_found"}}\n'
+    else
+      printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n'
+    fi ;;
+  *"session list"*)
+    printf '{"sessions":[{"name":"fmtest","running":true,"socket_path":"/tmp/fmtest-herdr.sock"}]}\n' ;;
+  *"workspace list"*)
+    printf '{"result":{"workspaces":[{"workspace_id":"w1"}]}}\n' ;;
+esac
 exit 0
 SH
   chmod +x "$case_dir/fakebin/herdr"
