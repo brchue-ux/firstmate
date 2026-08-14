@@ -42,6 +42,10 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-subagent-pretool-check.sh` | Primary-home delegation-shape PreToolUse guard (docs/subagent-guard.md) |
 | `fm-supervision-instructions.sh` | Render the session-start primary-harness supervision block or the one-line repair instruction |
 | `fm-home-seed.sh`        | Transactionally provision a secondmate home and maintain `data/secondmates.md`       |
+| `fm-leased-home-lib.sh`  | Shared record-based secondmate-home ownership guard and pool-lease predicates used by teardown, spawn, and the audit |
+| `fm-leased-home-audit.sh` | Report every registered secondmate home an ordinary pool allocation could be handed, plus any task record already inside one |
+| `fm-collided-record-clear.sh` | Retire one already-collided task record whose recorded `worktree=` names another secondmate's home, never touching that home |
+| `fm-turnend-artifact-lib.sh` | Ownership predicates for the worktree-resident turn-end hook artifacts a spawn clears and a teardown removes |
 | `fm-spawn.sh`            | Spawn crewmates, scouts, `id=repo` batches, and secondmates on the resolved harness and runtime backend |
 | `fm-backend.sh`          | Runtime-backend selection, meta helpers, selector resolution, and operation dispatch |
 | `fm-backend-hometag-lib.sh` | Shared per-installation home-tag derivation for zellij tab and cmux workspace titles |
@@ -90,6 +94,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-pr-merge.sh`         | Record PR metadata, then merge a task's canonical full GitHub URL                    |
 | `fm-promote.sh`          | Promote a scout task in place to a protected ship task                               |
 | `fm-teardown.sh`         | Fail-closed teardown: return landed ship worktrees, require completed scout deliverables, retire secondmate homes |
+| `fm-task-record-lib.sh`  | Shared hardened task-record artifact cleanup (PR-check protocol, turn-end authorization) for teardown and the collided-record command |
 | `fm-idle-sweep.sh`       | Heartbeat-cadence cleanup: offer this home's finished tasks that still hold a pane or worktree to `fm-teardown.sh`, bounded and backed off |
 | `fm-herdr-outcome-publish.sh` | Decoration-only: publish a real learned work outcome (PR merged, task landed) into herdr as a signal plus durable metadata, when the task's own meta names a herdr workspace target |
 | `fm-herdr-owner-publish.sh` | Decoration-only: tag a standalone-clone secondmate's herdr workspace with a never-expiring `owner=` token so herdr nests it under the spawning home, leaving a linked-worktree secondmate untouched |

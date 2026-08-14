@@ -52,6 +52,26 @@
 # leased home releases its durable treehouse lease so the pool slot is freed,
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
+#
+# Foreign-home refusal: an ordinary task's recorded worktree= is checked against
+# bin/fm-leased-home-lib.sh's ownership guard before ANY command touches that
+# path - ahead of the stale-lock cleanup, the branch deletion, and the turn-end
+# hook removal, not only ahead of the treehouse return - and every treehouse
+# return passes through the same guard again as a backstop, because `treehouse
+# return` releases a durable lease for any caller that does not pass a lease
+# precondition. A recorded worktree= can name a pool slot that was reallocated
+# and then leased as a secondmate home, so teardown refuses when its target is a
+# secondmate home that this task does not own - identified by the home's own
+# .fm-secondmate-home marker or by data/secondmates.md. Only the matching
+# secondmate id may return its own home. --force does NOT bypass this: it
+# authorizes discarding THIS task's work, never another agent's home. A child
+# swept from a retiring home is skipped whole when its recorded worktree= names a
+# foreign home, because that sweep answers a failed return with `rm -rf`, and the
+# home retirement then fails rather than reporting success for declined work.
+# bin/fm-leased-home-audit.sh reports homes whose lease is already lost, and
+# bin/fm-collided-record-clear.sh is the only supported way to retire an
+# already-collided task record - it clears the record alone and never touches the
+# home, so this refusal never needs a bypass.
 # Usage: fm-teardown.sh <task-id> [--force]
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
@@ -108,8 +128,12 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-lock-lib.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
+# shellcheck source=bin/fm-leased-home-lib.sh
+. "$SCRIPT_DIR/fm-leased-home-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-task-record-lib.sh
+. "$SCRIPT_DIR/fm-task-record-lib.sh"
 if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
   echo "error: invalid teardown request" >&2
   exit 2
@@ -146,6 +170,21 @@ KIND=$(grep '^kind=' "$META" | cut -d= -f2- || true)
 [ -n "$KIND" ] || KIND=ship
 MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 [ -n "$MODE" ] || MODE=no-mistakes
+
+# A recorded worktree= can name a pool slot that was later leased as a secondmate
+# home. Refuse here, before the first command that touches that path at all - the
+# stale-lock cleanup, the branch deletion, and the removal of the turn-end hook
+# artifacts all run ahead of the treehouse return, so a guard placed only at the
+# return would refuse after the home had already lost its hooks. An ordinary task
+# owns no home, hence the empty owner id; a kind=secondmate teardown targets its
+# OWN home and is guarded by id inside teardown_treehouse_return instead.
+# --force does not reach this: it authorizes discarding THIS task's work only.
+if [ "$KIND" != secondmate ]; then
+  fm_leased_home_guard "$WT" "" "teardown of task $ID" "$SECONDMATE_REG" || {
+    echo "This task record is already collided and cannot be retired here at all. Clear the record alone - leaving that home untouched - with bin/fm-collided-record-clear.sh $ID." >&2
+    exit 1
+  }
+fi
 
 default_branch() {
   local ref branch
@@ -193,103 +232,6 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   T_ORCA=$(meta_value "$META" terminal)
   [ -z "$T_ORCA" ] || T=$T_ORCA
 fi
-
-remove_grok_turnend_auth() {
-  local state_dir=$1 id=$2 token hooks_dir
-  token=$(cat "$state_dir/$id.grok-turnend-token" 2>/dev/null || true)
-  case "$token" in ''|*[!A-Za-z0-9._-]*) return 0 ;; esac
-  hooks_dir="${GROK_HOME:-$HOME/.grok}/hooks/fm-turn-end.d"
-  rm -f "$hooks_dir/$token"
-}
-
-remove_kimi_turnend_auth() {
-  local state_dir=$1 id=$2 token hooks_dir
-  token=$(cat "$state_dir/$id.kimi-turnend-token" 2>/dev/null || true)
-  case "$token" in ''|*[!A-Za-z0-9._-]*) return 0 ;; esac
-  hooks_dir="$HOME/.kimi-code/fm-turn-end.d"
-  rm -f "$hooks_dir/$token"
-}
-
-validate_pr_poll_cleanup() {
-  local state_dir=$1 id=$2 quarantine state_device artifact has_artifact=0
-  fm_task_id_path_safe "$id" || return 0
-  quarantine="$state_dir/.pr-check-quarantine"
-  if [ "$id" = _noncanonical ] \
-    && { [ -e "$quarantine/_noncanonical.diagnostic.pending-noncanonical" ] \
-      || [ -L "$quarantine/_noncanonical.diagnostic.pending-noncanonical" ] \
-      || [ -e "$quarantine/_noncanonical.diagnostic.noncanonical" ] \
-      || [ -L "$quarantine/_noncanonical.diagnostic.noncanonical" ]; }; then
-    echo "REFUSED: legacy PR-check quarantine migration is incomplete; preserving task state." >&2
-    return 1
-  fi
-  for artifact in "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
-    "$state_dir/$id.pr-poll-registration" "$state_dir/$id.pr-poll-retirement" \
-    "$state_dir/$id.check-trust"; do
-    [ -e "$artifact" ] || [ -L "$artifact" ] || continue
-    has_artifact=1
-  done
-  if [ -e "$quarantine" ] || [ -L "$quarantine" ]; then
-    has_artifact=1
-  fi
-  [ "$has_artifact" -eq 1 ] || return 0
-  [ -d "$state_dir" ] && [ ! -L "$state_dir" ] || return 1
-  state_device=$(fm_pr_file_device "$state_dir") || return 1
-  for artifact in "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
-    "$state_dir/$id.pr-poll-registration" "$state_dir/$id.pr-poll-retirement" \
-    "$state_dir/$id.check-trust"; do
-    [ -e "$artifact" ] || [ -L "$artifact" ] || continue
-    if [ ! -f "$artifact" ] || [ -L "$artifact" ] \
-      || [ "$(fm_pr_file_device "$artifact")" != "$state_device" ] \
-      || [ "$(fm_pr_file_link_count "$artifact")" != 1 ]; then
-      echo "REFUSED: unsafe task PR-check artifact; preserving task state." >&2
-      return 1
-    fi
-  done
-  if [ -e "$state_dir/$id.pr-poll-retirement" ] \
-    || [ -L "$state_dir/$id.pr-poll-retirement" ]; then
-    fm_pr_poll_retirement_state_valid "$state_dir" "$id" || {
-      echo "REFUSED: invalid PR-poll retirement receipt; preserving task state." >&2
-      return 1
-    }
-  fi
-  [ -e "$quarantine" ] || [ -L "$quarantine" ] || return 0
-  if [ ! -d "$state_dir" ] || [ -L "$state_dir" ] \
-    || [ ! -d "$quarantine" ] || [ -L "$quarantine" ]; then
-    echo "REFUSED: unsafe PR-check quarantine path $quarantine; preserving task state." >&2
-    return 1
-  fi
-  if [ "$(fm_pr_file_device "$quarantine")" != "$state_device" ] \
-    || [ "$(fm_pr_file_mode "$quarantine")" != 700 ]; then
-    echo "REFUSED: PR-check quarantine is not on the task state device; preserving task state." >&2
-    return 1
-  fi
-  for artifact in "$quarantine/$id."*; do
-    [ -e "$artifact" ] || [ -L "$artifact" ] || continue
-    if ! fm_pr_private_file_valid "$artifact" 600 "$state_device"; then
-      echo "REFUSED: unsafe task quarantine entry; preserving task state." >&2
-      return 1
-    fi
-  done
-}
-
-remove_pr_poll_artifacts() {
-  local state_dir=$1 id=$2 quarantine artifact
-  validate_pr_poll_cleanup "$state_dir" "$id" || return 1
-  fm_pr_poll_retirement_recover_one "$state_dir" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" || return 1
-  rm -f "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
-    "$state_dir/$id.pr-poll-registration" "$state_dir/$id.pr-poll-retirement" \
-    "$state_dir/$id.check-trust" || return 1
-  if fm_task_id_path_safe "$id"; then
-    quarantine="$state_dir/.pr-check-quarantine"
-    if [ -d "$quarantine" ] && [ ! -L "$quarantine" ]; then
-      for artifact in "$quarantine/$id."*; do
-        [ -e "$artifact" ] || [ -L "$artifact" ] || continue
-        rm -f -- "$artifact" || return 1
-      done
-      rmdir "$quarantine" 2>/dev/null || true
-    fi
-  fi
-}
 
 # Resolve the PR number for a worktree branch via gh-axi. Echoes the number on a
 # single match and returns 0; returns non-zero on no match or any lookup failure,
@@ -532,6 +474,10 @@ fi
 STALE_WORKTREE_LOCK_RETRY_WAIT_SECS=$TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS
 TEARDOWN_TREEHOUSE_LOCK_REFUSED=2
 TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED=3
+# A foreign-home ownership refusal must be distinguishable from a failed return:
+# the child-worktree path answers a failed return with `rm -rf`, which would turn
+# the guard that protects another secondmate's home into the thing that deletes it.
+TEARDOWN_FOREIGN_HOME_REFUSED=4
 
 # True when treehouse/git stderr shows the transient index.lock "File exists" race.
 # Other return failures must not enter the retry path.
@@ -594,9 +540,21 @@ cleanup_stale_lock_for_safety_check() {
 
 # Return a worktree/home via `treehouse return --force`, tolerating a transient or
 # stale git index.lock left by a killed crew process. See the script header.
+# <owner-id> is the only secondmate allowed to have its home returned here; it is
+# empty for every ordinary task worktree, which owns no home at all.
 teardown_treehouse_return() {
-  local dir=$1 cd_dir=$2 label=$3 post_cleanup_check=${4:-}
+  local dir=$1 cd_dir=$2 label=$3 post_cleanup_check=${4:-} owner_id=${5:-}
   local out lock attempt=0 max_retries lock_desc
+
+  # `treehouse return` releases a durable lease for any caller, so a stale or
+  # mistaken path that now names a live secondmate home would kill that
+  # secondmate's processes and hand its home back to the pool. The ordinary-task
+  # path is already refused near the top of the script, before anything touches
+  # the target; this is the backstop that covers every other caller of this
+  # function - the child-worktree path and home retirement. See
+  # bin/fm-leased-home-lib.sh.
+  fm_leased_home_guard "$dir" "$owner_id" "teardown of $label" "$SECONDMATE_REG" \
+    || return "$TEARDOWN_FOREIGN_HOME_REFUSED"
 
   # Capture stdout+stderr so non-lock failures stay visible and lock failures can
   # be matched by signature even when the lock file is already gone mid-check.
@@ -924,7 +882,7 @@ EOF
 }
 
 remove_firstmate_home() {
-  local home=$1 label=$2 expected_id=${3:-} abs_home_path
+  local home=$1 label=$2 expected_id=${3:-} abs_home_path return_rc
   [ -n "$home" ] || return 0
   [ -e "$home" ] || return 0
   abs_home_path=$(validate_firstmate_home_for_removal "$home" "$label" "$expected_id") || return 1
@@ -934,7 +892,11 @@ remove_firstmate_home() {
       echo "error: treehouse command not found; cannot return $label $abs_home_path" >&2
       return 1
     }
-    teardown_treehouse_return "$abs_home_path" "$FM_ROOT" "$label" || {
+    teardown_treehouse_return "$abs_home_path" "$FM_ROOT" "$label" "" "$expected_id" || {
+      return_rc=$?
+      if [ "$return_rc" -eq "$TEARDOWN_FOREIGN_HOME_REFUSED" ]; then
+        return "$return_rc"
+      fi
       echo "error: treehouse return failed for $label $abs_home_path; lease may still be held" >&2
       return 1
     }
@@ -977,6 +939,7 @@ validate_firstmate_home_children_removal() {
 
 cleanup_firstmate_home_children() {
   local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_return_rc
+  local foreign_refused=0
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
@@ -986,6 +949,23 @@ cleanup_firstmate_home_children() {
     child_proj=$(meta_value "$child_meta" project)
     child_kind=$(meta_value "$child_meta" kind)
     [ -n "$child_kind" ] || child_kind=ship
+    # A child's recorded worktree= can name a DIFFERENT secondmate's home, which
+    # is the same stale-record class this guard exists to close. Decide ownership
+    # before anything here touches that path - the endpoint kill, the removal of
+    # the turn-end hook artifacts, and the treehouse return that a failure answers
+    # with `rm -rf` all come after. A kind=secondmate child is retired through
+    # remove_firstmate_home, which checks its marker against the expected id.
+    # The retiring home's OWN registry is consulted alongside the primary's, the
+    # same fallback validate_firstmate_home_for_removal uses: a home can register
+    # grandchild homes the primary's registry has never seen, and the registry is
+    # the independent second source for a home whose marker was lost.
+    if [ "$child_kind" != secondmate ] \
+       && ! fm_leased_home_guard "$child_wt" "" "teardown of child task $child_id" \
+            "$SECONDMATE_REG" "$home/data/secondmates.md"; then
+      echo "Leaving the home it names, and child task $child_id's record in $sub_state, exactly as they are; retire that home through its own secondmate id, then reconcile the child record." >&2
+      foreign_refused=1
+      continue
+    fi
     child_backend=$(fm_backend_of_meta "$child_meta")
     if [ "$child_backend" = orca ]; then
       child_t=$(meta_value "$child_meta" terminal)
@@ -1030,7 +1010,8 @@ cleanup_firstmate_home_children() {
           :
         else
           child_return_rc=$?
-          if [ "$child_return_rc" -eq "$TEARDOWN_TREEHOUSE_LOCK_REFUSED" ]; then
+          if [ "$child_return_rc" -eq "$TEARDOWN_TREEHOUSE_LOCK_REFUSED" ] \
+             || [ "$child_return_rc" -eq "$TEARDOWN_FOREIGN_HOME_REFUSED" ]; then
             return "$child_return_rc"
           fi
           safe_rm_rf_child_worktree "$child_wt" "$child_proj"
@@ -1046,6 +1027,14 @@ cleanup_firstmate_home_children() {
       "$sub_state/$child_id.meta" "$sub_state/$child_id.pi-ext.ts" \
       "$sub_state/$child_id.grok-turnend-token" "$sub_state/$child_id.kimi-turnend-token"
   done
+  # A skipped child is declined work, so this cannot report success. Failing here
+  # is also what makes the skip message true: the caller stops before returning
+  # THIS home to the pool, and a treehouse reset of the slot would otherwise take
+  # the very child record the operator was just told to reconcile with it.
+  [ "$foreign_refused" = 0 ] || {
+    echo "REFUSED: home $home cannot be retired while a child record in $sub_state names another secondmate's home." >&2
+    return 1
+  }
 }
 
 remove_secondmate_registry_entry() {
@@ -1224,6 +1213,10 @@ elif [ "$BACKEND" = herdr ] \
      && { [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; }; then
   echo "warning: herdr presentation journal for $ID remains quarantined; no workspace cleanup was attempted" >&2
 fi
+# bin/fm-task-record-lib.sh's ordering contract: the one step that can REFUSE
+# runs before anything else in this phase is unlinked, so a refusal still leaves
+# a whole task record for the operator to act on.
+remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
   remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID"
@@ -1235,7 +1228,6 @@ fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 # Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
-remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 if [ "$FORCE" != "--force" ]; then
   # Decoration only, never a blocker: publishes the landed teardown into
   # herdr as a signal and durable metadata when the task's own meta names a

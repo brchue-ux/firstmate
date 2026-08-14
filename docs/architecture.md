@@ -169,7 +169,9 @@ That keeps spawn launch compatible across claude, codex, grok, pi, opencode, and
 For a domain whose subject is the firstmate repo itself, a deliberate `--no-projects` seed creates a project-less home whose crews take pooled worktrees of that repo instead of separate clones.
 The signal cannot be mixed with project names or omitted accidentally, and a populated home cannot be converted in place; the full seed contract is in [configuration.md](configuration.md#secondmate-routes-datasecondmatesmd).
 On the herdr backend, a secondmate launch lands in that secondmate home's labeled workspace, and crewmates spawned from that home land in the same workspace.
-When seeded with `-`, the home is a durable treehouse lease under the secondmate id, so it survives with no live process and is not recycled by later `treehouse get` or pruning.
+When seeded with `-`, the home is a durable treehouse lease under the secondmate id, so it survives with no live process and, for as long as that lease is held, is not recycled by later `treehouse get` or pruning.
+Because homes and disposable task worktrees come from the same pool, firstmate does not trust the lease alone: `bin/fm-leased-home-lib.sh` decides home ownership from the home's own `.fm-secondmate-home` marker and `data/secondmates.md`, so teardown refuses to return, and a crewmate or scout spawn refuses to launch into, a secondmate home the task does not own even after that home's lease has already been lost.
+`bin/fm-leased-home-audit.sh` reports homes in that state, and the [`secondmate-provisioning` skill](../.agents/skills/secondmate-provisioning/SKILL.md) owns the repair procedure.
 Retirement or seed rollback returns the leased home; normal restart/recovery keeps it leased.
 If returning the lease fails during teardown, firstmate leaves the route and home intact instead of hiding a still-held lease.
 Seeding is transactional: if validation, cloning, initialization, or registry update fails, generated briefs, new homes, new project clones, and registry edits are rolled back.

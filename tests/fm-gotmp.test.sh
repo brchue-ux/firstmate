@@ -67,6 +67,10 @@ make_fake_root() {
   ln -s "$ROOT/bin/fm-gate-refuse-lib.sh" "$fake/bin/fm-gate-refuse-lib.sh"
   # fm-pr-lib.sh: teardown uses its canonical task-ID validator for poll cleanup.
   ln -s "$ROOT/bin/fm-pr-lib.sh" "$fake/bin/fm-pr-lib.sh"
+  # fm-leased-home-lib.sh: teardown sources it for the secondmate-home guard.
+  ln -s "$ROOT/bin/fm-leased-home-lib.sh" "$fake/bin/fm-leased-home-lib.sh"
+  # fm-task-record-lib.sh: teardown sources it for the shared record cleanup.
+  ln -s "$ROOT/bin/fm-task-record-lib.sh" "$fake/bin/fm-task-record-lib.sh"
   # fm-guard.sh: stub (teardown calls it with `|| true`).
   cat > "$fake/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash
@@ -136,6 +140,10 @@ test_teardown_skips_gracefully_without_tasktmp() {
   ln -s "$ROOT/bin/fm-gate-refuse-lib.sh" "$fake/bin/fm-gate-refuse-lib.sh"
   # fm-pr-lib.sh: teardown uses its canonical task-ID validator for poll cleanup.
   ln -s "$ROOT/bin/fm-pr-lib.sh" "$fake/bin/fm-pr-lib.sh"
+  # fm-leased-home-lib.sh: teardown sources it for the secondmate-home guard.
+  ln -s "$ROOT/bin/fm-leased-home-lib.sh" "$fake/bin/fm-leased-home-lib.sh"
+  # fm-task-record-lib.sh: teardown sources it for the shared record cleanup.
+  ln -s "$ROOT/bin/fm-task-record-lib.sh" "$fake/bin/fm-task-record-lib.sh"
   cat > "$fake/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash
 exit 0

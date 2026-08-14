@@ -691,6 +691,11 @@ seed_return_treehouse_home() {
     echo "warning: failed to return treehouse-acquired home $abs_home during seed rollback; treehouse command not found" >&2
     return 0
   fi
+  # No secondmate-home ownership guard here, deliberately. This path is reached
+  # only with SEED_HOME_ACQUIRED=1, so the lease being released is the one this
+  # seed took seconds earlier under its own id - never a pre-existing durable
+  # lease. Refusing on a foreign marker would instead strand our own lease on a
+  # home no registry records, which nothing could later release.
   ( cd "$FM_ROOT" && treehouse return --force "$abs_home" >/dev/null ) || {
     echo "warning: failed to return treehouse-acquired home $abs_home during seed rollback; lease may still be held" >&2
     return 0

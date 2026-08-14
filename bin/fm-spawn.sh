@@ -27,6 +27,24 @@
 #   A backend spawn refusal (missing dependency, version gate, unauthenticated
 #   socket, or unsupported secondmate mode) is terminal for that selected backend;
 #   callers must surface it instead of silently retrying another backend.
+#   Secondmate homes and disposable task worktrees come from the SAME treehouse
+#   pool, kept apart only by the home's durable lease, so a ship or scout spawn
+#   guards that boundary twice through bin/fm-leased-home-lib.sh. Before the
+#   backend endpoint is created at all, it refuses when any registered home in
+#   this pool has lost its lease, which is the state in which an ordinary
+#   `treehouse get` can be handed a home; raising that refusal any later would
+#   leak the window or tab the backend had already opened, since
+#   spawn_abort_cleanup closes only orca endpoints. Pool state that cannot be
+#   read warns and does not block. After
+#   acquiring, validate_spawn_worktree refuses any worktree that is a secondmate
+#   home, before the agent launches and takes that home's session lock.
+#   bin/fm-leased-home-audit.sh reports which homes are currently unprotected.
+#   Because a reused worktree can still hold the PREVIOUS occupant's turn-end
+#   hook - which wakes firstmate for a task id that no longer exists - every
+#   spawn, of every kind, first clears foreign hook artifacts through
+#   bin/fm-turnend-artifact-lib.sh. Writing this task's own hook is not enough:
+#   it overwrites only the artifact this harness uses, and a secondmate spawn
+#   writes none at all.
 #   Herdr additionally supports a default-off presentation-only layout when the
 #   local config/herdr-presentation-spaces flag exists. A clean fresh task first
 #   writes state/<id>.herdr-presentation atomically, then creates a disposable
@@ -168,6 +186,10 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
+# shellcheck source=bin/fm-leased-home-lib.sh
+. "$SCRIPT_DIR/fm-leased-home-lib.sh"
+# shellcheck source=bin/fm-turnend-artifact-lib.sh
+. "$SCRIPT_DIR/fm-turnend-artifact-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
@@ -898,6 +920,34 @@ validate_spawn_worktree() {  # <source> <inspect-target>
     echo "error: $source did not yield an isolated worktree (resolved '$WT'; worktree root '${wt_top:-none}'; primary '$PROJ_ABS'); refusing to launch to avoid tangling the primary checkout. Inspect target $inspect_target" >&2
     exit 1
   fi
+  # A disposable task worktree and a persistent secondmate home come from the same
+  # pool, so an allocator that was handed a home passes every isolation test above.
+  # Refuse before the agent launches and takes that home's session lock.
+  fm_leased_home_guard "$wt_real" "" "$source for task $ID" "$DATA/secondmates.md" || {
+    echo "error: $source yielded a secondmate home; refusing to launch. Inspect target $inspect_target" >&2
+    exit 1
+  }
+}
+
+# Refuse to allocate from a pool that can currently hand out a registered
+# secondmate home. Ordinary `treehouse get` skips a leased worktree, so a home is
+# only at risk once its lease has been lost; this is the pre-allocation half of
+# that guarantee, and validate_spawn_worktree is the post-allocation half.
+# Pool state that cannot be read is reported and does not block the spawn - the
+# post-allocation assertion still catches a home before anything destructive.
+assert_pool_has_no_unprotected_home() {  # <project-dir>
+  local project=$1 unprotected id home
+  unprotected=$(fm_leased_home_unprotected "$project" "$DATA/secondmates.md") || {
+    echo "warning: could not read the treehouse pool for $project; skipping the secondmate-home lease check" >&2
+    return 0
+  }
+  [ -n "$unprotected" ] || return 0
+  while IFS=$'\t' read -r id home; do
+    [ -n "$id" ] || continue
+    echo "REFUSED: secondmate '$id' home $home has lost its pool lease, so an ordinary worktree acquisition can be handed that home." >&2
+  done <<< "$unprotected"
+  echo "Refusing to acquire a worktree from this pool until the lease is restored; see bin/fm-leased-home-audit.sh." >&2
+  exit 1
 }
 
 herdr_projection_meta_field_exact() {  # <meta> <key>
@@ -975,6 +1025,14 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
       ;;
   esac
 }
+
+# Runs before the backend endpoint exists: spawn_abort_cleanup only tears down
+# orca worktrees and locks, so a refusal raised after the case block below would
+# leave an orphan window, tab, or task behind on every attempt. The check needs
+# nothing the backend creates.
+if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+  assert_pool_has_no_unprotected_home "$PROJ_ABS"
+fi
 
 W="fm-$ID"
 case "$BACKEND" in
@@ -1360,6 +1418,13 @@ exclude_path() {
   mkdir -p "$(dirname "$EXCL")"
   grep -qxF "$rel" "$EXCL" 2>/dev/null || echo "$rel" >> "$EXCL"
 }
+
+# Clear any turn-end hook a PREVIOUS occupant of this worktree left behind.
+# bin/fm-turnend-artifact-lib.sh owns the ownership test and the exact file set;
+# it runs for every kind because writing our own hook below overwrites only the
+# artifact this harness uses, and a secondmate spawn writes none at all.
+fm_turnend_clear_foreign "$WT" "$ID"
+
 if [ "$KIND" != secondmate ]; then
   case "$HARNESS" in
     claude*)

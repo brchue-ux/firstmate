@@ -6,6 +6,19 @@
 #   target. fm-send refuses unresolved guesses rather than falling back to a
 #   tmux window search, because a "successful" send to the wrong endpoint is
 #   worse than a loud failure.
+#
+# Ambiguous-endpoint refusal: a backend endpoint id is reusable - herdr reissues
+# a pane id, tmux a window index, once the previous occupant exits - so a task's
+# recorded endpoint can outlive that task and come to name another task's live
+# session, which an existence check still accepts because the endpoint does
+# exist. When two live task records in this home name the SAME endpoint, at most
+# one is right and nothing in firstmate's records says which, so fm-send names
+# both records and refuses rather than typing one task's instruction into the
+# other's session. It refuses on both resolution paths - naming the task and
+# naming the endpoint itself - because the explicit-endpoint path answers with
+# the first record that matches in glob order, which is the same silent guess.
+# This is decided before any backend is consulted, so it holds for every backend;
+# reconcile the stale record, then re-send.
 # Special keys instead of text: fm-send.sh <target> --key Enter
 # Key support is backend-specific: tmux/herdr support Escape, Enter, and C-c;
 # Orca currently supports Enter and C-c only, and rejects Escape.
@@ -111,6 +124,44 @@ fm_send_count_colons() {  # <string>
   printf '%s' $(( ${#s} - ${#no_colons} ))
 }
 
+# A backend endpoint id is reusable: herdr reissues a pane id, tmux reissues a
+# window index, once the previous occupant is gone. A task's recorded endpoint
+# can therefore outlive the task that owned it and start naming somebody else's
+# live session, and an existence check still passes because the endpoint really
+# does exist - it just is not ours any more.
+#
+# When two live task records name the SAME endpoint, at most one of them is
+# right and firstmate cannot tell which from its own records, so a message
+# addressed to one task would be typed into the other's session. Print the
+# conflicting meta and let the caller refuse rather than guess.
+#
+# fm_send_assert_unique_endpoint below is the single refusal, applied on BOTH
+# resolution branches: naming the task and naming the endpoint you can see reach
+# the same ambiguous pair, and the explicit-endpoint branch resolves through
+# fm_backend_meta_for_window, which answers with the FIRST matching record in
+# glob order - exactly the silent guess this refusal exists to prevent.
+fm_send_conflicting_meta_for_target() {  # <target> <own-meta>
+  local target=$1 own=$2 meta other
+  [ -n "$target" ] || return 1
+  for meta in "$STATE"/*.meta; do
+    [ -f "$meta" ] || continue
+    [ "$meta" != "$own" ] || continue
+    other=$(fm_backend_target_of_meta "$meta" 2>/dev/null || true)
+    [ -n "$other" ] && [ "$other" = "$target" ] || continue
+    printf '%s\n' "$meta"
+    return 0
+  done
+  return 1
+}
+
+fm_send_assert_unique_endpoint() {  # <target> <own-meta> <tried>
+  local target=$1 own=$2 tried=$3 conflict
+  conflict=$(fm_send_conflicting_meta_for_target "$target" "$own" || true)
+  [ -n "$conflict" ] || return 0
+  echo "error: endpoint $target is recorded by both $own and $conflict, so a message for one task would land in the other's live session; reconcile the stale record before steering (tried $tried)" >&2
+  return 1
+}
+
 fm_send_resolve_target() {  # <raw-target>
   local raw=$1 meta pane_meta target backend assumed colons id session hint
 
@@ -130,6 +181,7 @@ fm_send_resolve_target() {  # <raw-target>
       echo "error: no backend target recorded in $meta (tried $RESOLUTION_TRIED)" >&2
       return 1
     fi
+    fm_send_assert_unique_endpoint "$target" "$meta" "$RESOLUTION_TRIED" || return 1
     backend=$(fm_backend_of_meta "$meta")
     RESOLVED_TARGET=$target
     TARGET_BACKEND=$backend
@@ -164,8 +216,11 @@ fm_send_resolve_target() {  # <raw-target>
       echo "error: no backend target recorded in $meta (tried explicit target '$raw' via recorded window/terminal; backend=from-meta)" >&2
       return 1
     fi
+    backend=$(fm_backend_of_meta "$meta")
+    fm_send_assert_unique_endpoint "$target" "$meta" \
+      "explicit target '$raw' matched $meta; backend=$backend" || return 1
     RESOLVED_TARGET=$target
-    TARGET_BACKEND=$(fm_backend_of_meta "$meta")
+    TARGET_BACKEND=$backend
     TARGET_META=$meta
     TARGET_HARNESS=$(fm_meta_get "$meta" harness)
     RESOLUTION_TRIED="explicit target '$raw' matched $meta; backend=$TARGET_BACKEND"

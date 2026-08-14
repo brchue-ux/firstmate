@@ -77,7 +77,8 @@ A selector containing `:` is passed through as an explicit backend endpoint esca
 Otherwise an exact task id matching `state/<id>.meta` wins before the legacy `fm-<id>` label fallback, so task ids that themselves start with `fm-` route to their own metadata instead of being stripped.
 A metadata-routed selector returns the recorded backend target (`terminal=` for Orca, otherwise `window=`), and matching explicit targets can still recover the recorded backend when metadata contains the same endpoint.
 Only metadata-routed task selectors carry secondmate-marker and Codex-harness context; explicit endpoint escape hatches do not.
-These five sentences are the single owner of the task-selector vocabulary; backend guides and other documents point here instead of restating the resolution order.
+Because a backend endpoint id is reusable, `fm-send.sh` additionally names both records and refuses - on the task-id path and on the explicit-endpoint path alike, before any backend is consulted - when two live task records in this home resolve to the same endpoint, rather than typing one task's message into another's session.
+These six sentences are the single owner of the task-selector vocabulary; backend guides and other documents point here instead of restating the resolution order.
 `fm-teardown.sh <id>` takes a task id directly and validates the complete metadata-only endpoint identity before any runtime dispatch or cleanup mutation.
 Missing, empty, duplicate, malformed, backend-inconsistent, or task-mismatched endpoint records are preserved and refused.
 Legacy tmux metadata remains cleanup-compatible when its exact window name is `fm-<id>`; opaque non-tmux endpoints require their recorded `endpoint_task_id=` binding.
