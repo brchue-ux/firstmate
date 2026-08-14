@@ -491,22 +491,49 @@ pass "fm-collided-record-clear.sh: reclaims the per-task temp root the record na
 
 # (N) That removal is an rm -rf of a path read out of a file, so the shape is
 # proven rather than trusted: a tasktmp= that is not this task's own temp root is
-# refused, and refused before anything else is unlinked.
+# refused. The refusal has to be decided BEFORE the first removal, because it
+# says "leaving it in place" - the record it names has to still be there. This
+# fixture therefore carries the artifacts the removals would destroy first: a
+# grok token record with its authorization file, and a quarantined PR-check
+# artifact. A refusal raised after those are gone is a false all-clear on the one
+# command that exists to repair an already-collided record by hand.
 case_dir=$(make_teardown_case clear-task-tmp-unsafe dictate)
 mark_secondmate_home "$case_dir/wt"
 mkdir -p "$case_dir/not-a-task-root"
 printf 'precious\n' > "$case_dir/not-a-task-root/keep"
+fake_home="$case_dir/fakehome"
+grok_auth="$fake_home/.grok/hooks/fm-turn-end.d"
+mkdir -p "$grok_auth"
+printf '%s\n' "$case_dir/state/task-x1.turn-ended" > "$grok_auth/fm.999988887777"
+printf 'fm.999988887777\n' > "$case_dir/state/task-x1.grok-turnend-token"
+printf 'poll\n' > "$case_dir/state/task-x1.pr-poll"
+quarantine="$case_dir/state/.pr-check-quarantine"
+mkdir -p "$quarantine"
+chmod 700 "$quarantine"
+printf 'quarantined\n' > "$quarantine/task-x1.diagnostic"
+chmod 600 "$quarantine/task-x1.diagnostic"
 fm_write_meta "$case_dir/state/task-x1.meta" \
   "window=firstmate:fm-task-x1" "endpoint_task_id=task-x1" \
   "worktree=$case_dir/wt" "project=$case_dir/project" \
   "harness=echo" "kind=ship" "yolo=off" "tasktmp=$case_dir/not-a-task-root"
-out=$(run_clear "$case_dir" task-x1 2>&1); rc=$?
+out=$(FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_DATA_OVERRIDE="$case_dir/data" FM_CONFIG_OVERRIDE="$case_dir/config" \
+  HOME="$fake_home" GROK_HOME="$fake_home/.grok" \
+  PATH="$case_dir/fakebin:$PATH" "$CLEAR" task-x1 2>&1); rc=$?
 expect_code 1 "$rc" "clear-task-tmp-unsafe run"
 assert_contains "$out" "REFUSED" "a tasktmp that is not this task's temp root is refused"
 assert_present "$case_dir/not-a-task-root/keep" \
   "clear-task-tmp-unsafe: a path that is not a per-task temp root was removed anyway"
 assert_present "$case_dir/state/task-x1.meta" \
   "clear-task-tmp-unsafe: the record was unlinked despite the refusal"
+assert_present "$grok_auth/fm.999988887777" \
+  "clear-task-tmp-unsafe: the turn-end authorization was destroyed before the refusal"
+assert_present "$case_dir/state/task-x1.grok-turnend-token" \
+  "clear-task-tmp-unsafe: the token record was destroyed before the refusal"
+assert_present "$case_dir/state/task-x1.pr-poll" \
+  "clear-task-tmp-unsafe: a PR-check artifact was destroyed before the refusal"
+assert_present "$quarantine/task-x1.diagnostic" \
+  "clear-task-tmp-unsafe: a quarantined PR-check artifact was destroyed before the refusal"
 pass "fm-collided-record-clear.sh: refuses a tasktmp that is not this task's temp root"
 
 # (O) The command's hard boundary outranks the cleanup: a tasktmp= pointing

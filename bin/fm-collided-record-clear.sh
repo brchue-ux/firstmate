@@ -22,11 +22,12 @@
 # endpoint. Closing a window the cleared record used to name is the operator's
 # call afterwards; the recorded endpoint is printed so it can be found.
 #
-# A PR-check artifact that is a symlink, is hardlinked, or sits on a different
-# device REFUSES and preserves the whole task record, exactly as in teardown; the
-# refusal is raised before anything at all is removed. A recorded tasktmp= that
-# is not an absolute per-task temp root named fm-<task-id>, or that resolves
-# inside the home, is refused rather than removed on the meta's word.
+# Every refusal is decided before the first removal, so a refusal really does
+# preserve the whole task record: a PR-check artifact that is a symlink, is
+# hardlinked, or sits on a different device refuses exactly as in teardown, and a
+# recorded tasktmp= that is not an absolute per-task temp root named
+# fm-<task-id>, or that resolves inside the home, is refused rather than removed
+# on the meta's word.
 #
 # It refuses unless the recorded worktree= really does resolve to a secondmate
 # home that this task does not own, decided by bin/fm-leased-home-lib.sh from the
@@ -62,7 +63,7 @@ SECONDMATE_REG="$DATA/secondmates.md"
 . "$SCRIPT_DIR/fm-leased-home-lib.sh"
 
 case "${1:-}" in
-  -h|--help) sed -n '2,44p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  -h|--help) sed -n '2,45p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
 esac
 
 [ "$#" -eq 1 ] || { echo "usage: fm-collided-record-clear.sh <task-id>" >&2; exit 2; }
@@ -96,9 +97,12 @@ ENDPOINT=$(sed -n 's/^window=//p' "$META" | head -1)
 [ -n "$ENDPOINT" ] || ENDPOINT=$(sed -n 's/^terminal=//p' "$META" | head -1)
 TASK_TMP=$(sed -n 's/^tasktmp=//p' "$META" | head -1)
 
-# The temp root is the one recorded path that could be made to point INSIDE the
-# home, which this command may never touch. bin/fm-task-record-lib.sh proves the
-# shape; the boundary is proven here, where the home is known.
+# Both refusals this value can raise are decided here, before the first removal:
+# a refusal that landed after the PR-check artifacts and turn-end authorizations
+# were already gone would announce "leaving it in place" about a record most of
+# which had been destroyed. bin/fm-task-record-lib.sh proves the shape; the
+# boundary is proven here, where the home is known.
+validate_task_tmp_root "$TASK_TMP" "$ID" || exit 1
 if [ -n "$TASK_TMP" ]; then
   TASK_TMP_ABS=$(fm_leased_home_abs "$TASK_TMP") || TASK_TMP_ABS=$TASK_TMP
   HOME_ABS=$(fm_leased_home_abs "$WT") || HOME_ABS=$WT
@@ -112,8 +116,8 @@ fi
 
 # Every removal below is confined to this home's own state/ directory and to the
 # firstmate-owned files its records point at, in the order
-# bin/fm-task-record-lib.sh's contract requires: the refusing PR-check protocol
-# first, so its refusal leaves the whole record intact, then the turn-end
+# bin/fm-task-record-lib.sh's contract requires: the PR-check protocol first,
+# since it decides its own refusal before it unlinks anything, then the turn-end
 # authorizations and the temp root while the records naming them still exist,
 # then the records.
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1

@@ -18,32 +18,48 @@
 #     not match this root's shape, so unlinking the meta first orphans it with
 #     nothing left able to reclaim it.
 #
-# bin/fm-teardown.sh is the original owner of these predicates and still their
-# only ordinary-lifecycle caller. They live here because
-# bin/fm-collided-record-clear.sh retires the one class of record teardown
-# refuses outright, and a second retirement path that only approximated this
-# would reintroduce exactly the dead-task-wake and orphaned-artifact classes the
-# originals exist to prevent.
+# bin/fm-teardown.sh is the original owner of the turn-end authorization and
+# PR-check predicates and is still their only ordinary-lifecycle caller. They
+# live here because bin/fm-collided-record-clear.sh retires the one class of
+# record teardown refuses outright, and a second retirement path that only
+# approximated this would reintroduce exactly the dead-task-wake and
+# orphaned-artifact classes the originals exist to prevent.
 #
-# Ordering contract for every caller: run remove_pr_poll_artifacts FIRST, because
-# it is the only one of these that can REFUSE, and its refusal is meaningful only
-# while the rest of the task record is still intact; then the turn-end
-# authorizations and the temp root, while the records naming them still exist;
-# and only then unlink state/<id>.*.
+# The temp-root predicate is the exception and has no teardown caller: teardown
+# still removes the per-task temp root with its own unguarded `rm -rf` of the
+# recorded value, and routing it through this predicate is deliberately deferred
+# to its own change, because teardown runs on every task and a new refusal there
+# is a fleet-wide behavior decision. Do not read this file as proving teardown
+# validates that path - only bin/fm-collided-record-clear.sh does today.
+#
+# Ordering contract for every caller. Two of these steps can REFUSE -
+# remove_pr_poll_artifacts and remove_task_tmp_root - and a refusal is only
+# meaningful while the rest of the task record is still intact, so validate
+# BEFORE removing anything: run validate_task_tmp_root (and any caller-specific
+# check on the same value) up front, then remove in order - the PR-check
+# artifacts first, since remove_pr_poll_artifacts decides its own refusal before
+# it unlinks anything, then the turn-end authorizations and the temp root while
+# the records naming them still exist, and only then unlink state/<id>.*.
 #
 # bin/fm-pr-lib.sh owns the PR-artifact safety predicates this consults. This
 # file is sourced and has no side effects on source.
 
 FM_TASK_RECORD_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Remove the per-task temp root bin/fm-spawn.sh recorded as `tasktmp=`.
+# Prove the shape of the per-task temp root bin/fm-spawn.sh recorded as
+# `tasktmp=`, without removing anything.
 #
-# The path is read out of a file rather than computed, so its shape is proven
-# before an `rm -rf` acts on it: spawn builds it as <absolute root>/fm-<id> and
-# refuses a relative FM_TASK_TMP_ROOT for this exact reason, so anything that is
-# not an absolute path ending in the caller's own fm-<id>, and not a plain
-# directory, is refused and left in place rather than removed on trust.
-remove_task_tmp_root() {  # <task-tmp> <id>
+# The path is read out of a file rather than computed, so it is proven before any
+# `rm -rf` acts on it: spawn builds it as <absolute root>/fm-<id> and refuses a
+# relative FM_TASK_TMP_ROOT for this exact reason, so anything that is not an
+# absolute path ending in the caller's own fm-<id>, and not a plain directory, is
+# refused and left in place rather than removed on trust.
+#
+# Split from the removal below so a caller can raise this refusal up front, per
+# the ordering contract in the header: a refusal that lands after the turn-end
+# authorization and PR-check artifacts are already gone says "leaving it in
+# place" about a record most of which no longer exists.
+validate_task_tmp_root() {  # <task-tmp> <id>
   local task_tmp=$1 id=$2
   [ -n "$task_tmp" ] || return 0
   case "$task_tmp" in
@@ -61,6 +77,15 @@ remove_task_tmp_root() {  # <task-tmp> <id>
     echo "REFUSED: recorded tasktmp=$task_tmp is not a plain directory; leaving it in place." >&2
     return 1
   fi
+}
+
+# Remove that temp root. Re-proves the shape rather than trusting the caller to
+# have done it, so this can never become the unvalidated removal it replaced.
+remove_task_tmp_root() {  # <task-tmp> <id>
+  local task_tmp=$1 id=$2
+  validate_task_tmp_root "$task_tmp" "$id" || return 1
+  [ -n "$task_tmp" ] || return 0
+  { [ -e "$task_tmp" ] || [ -L "$task_tmp" ]; } || return 0
   rm -rf -- "$task_tmp"
 }
 
