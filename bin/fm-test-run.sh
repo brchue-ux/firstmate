@@ -431,7 +431,8 @@ family_for_basename() {
     fm-backend-herdr-smoke.test.sh|fm-backend-herdr-workspace-per-home-e2e.test.sh)
       printf '%s\n' real-herdr-gated
       ;;
-    fm-backlog-handoff.test.sh|fm-secondmate-harness.test.sh|fm-secondmate-lifecycle-e2e.test.sh|\
+    fm-backlog-handoff.test.sh|fm-leased-home.test.sh|fm-secondmate-harness.test.sh|\
+    fm-secondmate-lifecycle-e2e.test.sh|\
     fm-secondmate-liveness.test.sh|fm-secondmate-safety.test.sh|fm-secondmate-sync.test.sh|\
     fm-startup-memory-budget.test.sh|\
     fm-send-secondmate-marker.test.sh|fm-shared-captain-inheritance.test.sh)
@@ -950,6 +951,14 @@ families_for_changed_path() {
     bin/fm-config-inherit-lib.sh|bin/fm-config-push.sh|bin/fm-shared*)
       printf '%s\n' secondmate
       ;;
+    bin/fm-leased-home*|bin/fm-turnend-artifact-lib.sh)
+      # The home guard runs inside teardown's return path and spawn's worktree
+      # acquisition, so a change here can refuse either lifecycle, not only the
+      # secondmate unit that owns the predicate.
+      printf '%s\n' secondmate
+      printf '%s\n' pr-forge
+      printf '%s\n' backend-dispatch
+      ;;
     bin/fm-home-anchor-lib.sh)
       # Every script defers its FM_HOME resolution to this lib, so a change here
       # can reroute any home-scoped command. Select every family that resolves a
@@ -973,6 +982,9 @@ families_for_changed_path() {
     bin/fm-peek.sh|bin/fm-composer*)
       printf '%s\n' backend-dispatch
       printf '%s\n' pure-contract-unit
+      # Spawn's worktree acquisition and send's endpoint resolution both carry
+      # identifier-reuse refusals that the secondmate family owns.
+      printf '%s\n' secondmate
       ;;
     bin/fm-bearings-snapshot.sh|bin/fm-fleet-snapshot.sh|bin/fm-fleet-view.sh)
       printf '%s\n' snapshot-bearings
