@@ -733,21 +733,34 @@ test_restart_declines_to_kill_a_healthy_watcher() {
   ! grep -qF 'watcher: FAILED' "$restartout" || fail "declined restart reported a failure: $(cat "$restartout")"
 
   # The escape hatch still replaces a live watcher when that is genuinely wanted.
+  #
+  # What --force guarantees is that the live watcher is REPLACED rather than
+  # declined. It does not guarantee the replacement is still running afterwards:
+  # killing the old watcher creates real downtime, and a fresh watcher surfaces
+  # that downtime as `check: rearm-resurface` and exits (bin/fm-watch.sh's
+  # resurface_after_downtime). So the replacement legitimately reports one wake
+  # and ends, and reading .watch.lock/pid after the fact races that exit. Assert
+  # the guarantee instead of the lifetime.
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" --restart --force > "$forceout" &
   forcepid=$!
   i=0
-  while [ "$i" -lt 80 ]; do
-    grep -qF 'watcher: started pid=' "$forceout" 2>/dev/null && break
+  while [ "$i" -lt 120 ]; do
+    grep -qE 'watcher: started pid=|check: rearm-resurface' "$forceout" 2>/dev/null && break
     sleep 0.1
     i=$((i + 1))
   done
-  grep -qF 'watcher: started pid=' "$forceout" || fail "forced restart did not start a fresh watcher: $(cat "$forceout")"
-  newpid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
-  { [ -n "$newpid" ] && [ "$newpid" != "$wpid" ] && kill -0 "$newpid" 2>/dev/null; } \
-    || fail "forced restart did not replace the live watcher (got '$newpid')"
+  ! grep -qF 'watcher: restart declined' "$forceout" \
+    || fail "--force still declined to replace the live watcher: $(cat "$forceout")"
+  grep -qE 'watcher: started pid=|check: rearm-resurface' "$forceout" \
+    || fail "forced restart did not run a fresh watcher cycle: $(cat "$forceout")"
+  # When the fresh watcher was confirmed before it surfaced the downtime, its pid
+  # is named in the arm's own output and must not be the one just replaced.
+  newpid=$(grep -oE 'watcher: started pid=[0-9]+' "$forceout" | head -1 | sed 's/.*=//')
+  [ -z "$newpid" ] || [ "$newpid" != "$wpid" ] \
+    || fail "forced restart reported the replaced watcher as its fresh one (got '$newpid')"
   ! is_live_non_zombie "$wpid" || fail "forced restart left the old watcher running"
 
-  kill "$restartpid" "$ownerpid" "$forcepid" "$newpid" 2>/dev/null || true
+  kill "$restartpid" "$ownerpid" "$forcepid" ${newpid:+"$newpid"} 2>/dev/null || true
   wait "$restartpid" 2>/dev/null || true
   wait "$ownerpid" 2>/dev/null || true
   wait "$forcepid" 2>/dev/null || true

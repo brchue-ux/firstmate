@@ -377,14 +377,15 @@ attached_cycle_end_is_explained() {
 # surfaced twice is collapsed by the drain's own duplicate-wake handling, and
 # presented records stay durable until their generation-bound acknowledgement.
 # Only a cycle neither accounts for is the typed nonzero failure.
-close_unobserved_cycle() {
+close_unobserved_cycle() {  # [allow-attached-evidence]
+  local allow_evidence=${1:-0}
   local i reason clean_identity record_pid record_identity record_reason
   clean_identity=$(printf '%s' "$cycle_watcher_identity" | tr '\t\r\n' '   ')
   i=0
   while ! fm_lock_try_acquire "$WATCH_DELIVERY_LOCK"; do
     [ "$i" -lt 20 ] || {
       # The ledger is unreadable right now, which is not evidence of an outage.
-      attached_cycle_end_is_explained && return 0
+      [ "$allow_evidence" -eq 1 ] && attached_cycle_end_is_explained && return 0
       fail_unexplained_cycle
       return 1
     }
@@ -404,7 +405,7 @@ close_unobserved_cycle() {
     printf '%s\n' "$reason"
     return 0
   fi
-  attached_cycle_end_is_explained && return 0
+  [ "$allow_evidence" -eq 1 ] && attached_cycle_end_is_explained && return 0
   fail_unexplained_cycle
   return 1
 }
@@ -434,7 +435,7 @@ attach_and_wait() {
       report_attached
       continue
     fi
-    if close_unobserved_cycle; then
+    if close_unobserved_cycle 1; then
       if [ -n "$FM_ARM_CYCLE_EXPLANATION" ]; then
         cycle_log_append unknown unknown attached-cycle-explained "$FM_ARM_CYCLE_EXPLANATION"
       else
