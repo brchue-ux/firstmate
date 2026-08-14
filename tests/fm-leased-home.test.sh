@@ -33,6 +33,9 @@
 #   (G) a grok/kimi token record       -> its authorization file goes too
 #   (H) an unsafe PR-check artifact    -> REFUSE, whole record preserved
 #   (I) quarantined PR-check artifacts -> swept with the record
+#   (M) the per-task temp root it named -> reclaimed with the record
+#   (N) a tasktmp= that is not this task's temp root -> REFUSE
+#   (O) a tasktmp= resolving inside the home         -> REFUSE
 #
 # Spawn guards the same boundary from the other side, in two layers:
 #   (t) a pool holding a registered home that lost its lease  -> REFUSE, no window
@@ -67,7 +70,9 @@
 #   (q) a grok/kimi token pointer for another task -> removed
 #   (r) this task's own hook                       -> kept
 #   (s) a settings.local.json with no firstmate hook -> kept
+#   (K) a pointer whose authorization file is gone  -> kept, never guessed at
 #   (E) a hook a REAL prior spawn wrote, swept by a REAL later spawn -> removed
+#   (L) the same, across the grok pointer, whose token only a real spawn mints
 #
 # And the audit that every one of those refusals names as the diagnostic must not
 # answer with a false alarm when it cannot read pool state at all:
@@ -466,6 +471,64 @@ assert_absent "$quarantine/task-x1.diagnostic" \
   "clear-pr-artifacts: a quarantined artifact was orphaned with no owner left to remove it"
 pass "fm-collided-record-clear.sh: sweeps the PR-check artifacts and quarantine with the record"
 
+# (M) tasktmp= names the per-task temp root, and that path exists only in the
+# meta about to be unlinked - bin/fm-tmp-sweep.sh's candidate glob does not match
+# this root's shape, so leaving it behind orphans it for good.
+case_dir=$(make_teardown_case clear-task-tmp dictate)
+mark_secondmate_home "$case_dir/wt"
+task_tmp="$case_dir/tmproot/fm-task-x1"
+mkdir -p "$task_tmp/gotmp"
+printf 'scratch\n' > "$task_tmp/gotmp/leftover"
+fm_write_meta "$case_dir/state/task-x1.meta" \
+  "window=firstmate:fm-task-x1" "endpoint_task_id=task-x1" \
+  "worktree=$case_dir/wt" "project=$case_dir/project" \
+  "harness=echo" "kind=ship" "yolo=off" "tasktmp=$task_tmp"
+out=$(run_clear "$case_dir" task-x1 2>&1); rc=$?
+expect_code 0 "$rc" "clear-task-tmp run"$'\n'"--- output ---"$'\n'"$out"
+assert_absent "$task_tmp" "clear-task-tmp: the per-task temp root was orphaned"
+assert_absent "$case_dir/state/task-x1.meta" "clear-task-tmp: the record survived"
+pass "fm-collided-record-clear.sh: reclaims the per-task temp root the record named"
+
+# (N) That removal is an rm -rf of a path read out of a file, so the shape is
+# proven rather than trusted: a tasktmp= that is not this task's own temp root is
+# refused, and refused before anything else is unlinked.
+case_dir=$(make_teardown_case clear-task-tmp-unsafe dictate)
+mark_secondmate_home "$case_dir/wt"
+mkdir -p "$case_dir/not-a-task-root"
+printf 'precious\n' > "$case_dir/not-a-task-root/keep"
+fm_write_meta "$case_dir/state/task-x1.meta" \
+  "window=firstmate:fm-task-x1" "endpoint_task_id=task-x1" \
+  "worktree=$case_dir/wt" "project=$case_dir/project" \
+  "harness=echo" "kind=ship" "yolo=off" "tasktmp=$case_dir/not-a-task-root"
+out=$(run_clear "$case_dir" task-x1 2>&1); rc=$?
+expect_code 1 "$rc" "clear-task-tmp-unsafe run"
+assert_contains "$out" "REFUSED" "a tasktmp that is not this task's temp root is refused"
+assert_present "$case_dir/not-a-task-root/keep" \
+  "clear-task-tmp-unsafe: a path that is not a per-task temp root was removed anyway"
+assert_present "$case_dir/state/task-x1.meta" \
+  "clear-task-tmp-unsafe: the record was unlinked despite the refusal"
+pass "fm-collided-record-clear.sh: refuses a tasktmp that is not this task's temp root"
+
+# (O) The command's hard boundary outranks the cleanup: a tasktmp= pointing
+# inside the home is exactly how a stale record could be made to reach into an
+# agent's home through a tool whose whole premise is that it never does.
+case_dir=$(make_teardown_case clear-task-tmp-in-home dictate)
+mark_secondmate_home "$case_dir/wt"
+mkdir -p "$case_dir/wt/fm-task-x1"
+printf 'the home\n' > "$case_dir/wt/fm-task-x1/keep"
+fm_write_meta "$case_dir/state/task-x1.meta" \
+  "window=firstmate:fm-task-x1" "endpoint_task_id=task-x1" \
+  "worktree=$case_dir/wt" "project=$case_dir/project" \
+  "harness=echo" "kind=ship" "yolo=off" "tasktmp=$case_dir/wt/fm-task-x1"
+out=$(run_clear "$case_dir" task-x1 2>&1); rc=$?
+expect_code 1 "$rc" "clear-task-tmp-in-home run"
+assert_contains "$out" "REFUSED" "a tasktmp inside the home is refused"
+assert_present "$case_dir/wt/fm-task-x1/keep" \
+  "clear-task-tmp-in-home: the tool reached inside the home it must never touch"
+assert_present "$case_dir/state/task-x1.meta" \
+  "clear-task-tmp-in-home: the record was unlinked despite the refusal"
+pass "fm-collided-record-clear.sh: refuses a tasktmp that resolves inside the home"
+
 # --- spawn refusal cases ----------------------------------------------------
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
@@ -537,6 +600,7 @@ run_spawn() {  # <case-dir> <task-id> <settled-pane-path> [project-arg] [extra-a
   FM_PROJECTS_OVERRIDE="$case_dir/home/projects" FM_CONFIG_OVERRIDE="$case_dir/home/config" \
   FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
   FM_FAKE_PANE_PATH="$pane" FM_TMUX_LOG="$case_dir/tmux.log" \
+  GROK_HOME="$case_dir/grokhome" \
   PATH="$case_dir/fakebin:$PATH" \
     "$SPAWN" "$id" "$project_arg" "$@" 2>&1
 }
@@ -739,12 +803,26 @@ pass "fm-send.sh: refuses an ambiguous endpoint addressed by the endpoint itself
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-turnend-artifact-lib.sh"
 
-# Build a worktree holding the exact artifacts bin/fm-spawn.sh writes, for the
-# task id given. The literal shapes are copied from that script's hook block.
-make_hook_worktree() {  # <name> <owning-task-id> <state-dir>
-  local name=$1 owner=$2 state=$3 wt
+# Build a worktree holding the artifacts bin/fm-spawn.sh writes, for the task id
+# given, plus the harness-side authorization files the grok and kimi pointers
+# resolve through. <auth-root> stands in for $HOME: the grok and kimi hooks dirs
+# are created under it, so nothing here writes to the real one.
+#
+# The grok and kimi files are NOT hooks and carry no task id of their own - they
+# hold `token=fm.<12 opaque chars>` naming an authorization file elsewhere, and
+# the task id lives in that file. A fixture that invented a task-bearing token
+# shape here would assert an outcome no real spawn can produce, which is why the
+# handover case below drives a real grok spawn end to end rather than trusting
+# these literals.
+make_hook_worktree() {  # <name> <owning-task-id> <state-dir> <auth-root> <token>
+  local name=$1 owner=$2 state=$3 auth_root=$4 token=$5 wt
   wt="$TMP_ROOT/$name"
-  mkdir -p "$wt/.claude" "$wt/.opencode/plugins"
+  mkdir -p "$wt/.claude" "$wt/.opencode/plugins" \
+    "$auth_root/.grok/hooks/fm-turn-end.d" "$auth_root/.kimi-code/fm-turn-end.d"
+  printf '%s\n' "$state/$owner.turn-ended" \
+    > "$auth_root/.grok/hooks/fm-turn-end.d/$token"
+  printf '%s\n' "$state/$owner.turn-ended" \
+    > "$auth_root/.kimi-code/fm-turn-end.d/$token"
   printf '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"touch %s"}]}]}}\n' \
     "'$state/$owner.turn-ended'" > "$wt/.claude/settings.local.json"
   cat > "$wt/.opencode/plugins/fm-turn-end.js" <<JS
@@ -754,19 +832,21 @@ export const FmTurnEnd = async ({ \$ }) => ({
   },
 })
 JS
-  printf 'token=%s\n' "$owner.grok-turnend-token" > "$wt/.fm-grok-turnend"
-  printf 'token=%s\n' "$owner.kimi-turnend-token" > "$wt/.fm-kimi-turnend"
+  printf 'token=%s\n' "$token" > "$wt/.fm-grok-turnend"
+  printf 'token=%s\n' "$token" > "$wt/.fm-kimi-turnend"
   printf '%s\n' "$wt"
 }
 
 # (o,p,q) Every artifact left by a previous occupant is identified and removed.
-wt=$(make_hook_worktree stale-hooks vector-fingerprint-instruction-design /home/x/state)
+auth_root="$TMP_ROOT/stale-hooks-authroot"
+wt=$(make_hook_worktree stale-hooks vector-fingerprint-instruction-design \
+  /home/x/state "$auth_root" fm.aaaabbbbcccc)
 for f in .claude/settings.local.json .opencode/plugins/fm-turn-end.js .fm-grok-turnend .fm-kimi-turnend; do
-  got=$(fm_turnend_artifact_task_id "$wt/$f")
+  got=$(HOME="$auth_root"; GROK_HOME="$auth_root/.grok"; fm_turnend_artifact_task_id "$wt/$f")
   [ "$got" = vector-fingerprint-instruction-design ] \
     || fail "stale-hooks: $f resolved owner '$got', expected the previous occupant's task id"
 done
-out=$(fm_turnend_clear_foreign "$wt" dictate 2>&1)
+out=$(HOME="$auth_root"; GROK_HOME="$auth_root/.grok"; fm_turnend_clear_foreign "$wt" dictate 2>&1)
 assert_contains "$out" "previous occupant" "the sweep reports what it removed"
 for f in .claude/settings.local.json .opencode/plugins/fm-turn-end.js .fm-grok-turnend .fm-kimi-turnend; do
   assert_absent "$wt/$f" "stale-hooks: $f survived the sweep"
@@ -774,12 +854,27 @@ done
 pass "fm-turnend-artifact-lib.sh: clears every turn-end hook a prior occupant left behind"
 
 # (r) This task's own hooks are never swept.
-wt=$(make_hook_worktree own-hooks dictate /home/x/state)
-fm_turnend_clear_foreign "$wt" dictate 2>/dev/null
+auth_root="$TMP_ROOT/own-hooks-authroot"
+wt=$(make_hook_worktree own-hooks dictate /home/x/state "$auth_root" fm.ddddeeeeffff)
+( HOME="$auth_root"; GROK_HOME="$auth_root/.grok"; fm_turnend_clear_foreign "$wt" dictate 2>/dev/null )
 for f in .claude/settings.local.json .opencode/plugins/fm-turn-end.js .fm-grok-turnend .fm-kimi-turnend; do
   assert_present "$wt/$f" "own-hooks: the sweep removed this task's own $f"
 done
 pass "fm-turnend-artifact-lib.sh: leaves this task's own turn-end hooks in place"
+
+# (K) A pointer this cannot tie to a task - its authorization file is gone, so
+# nothing anywhere still says which task it belonged to - is left alone rather
+# than guessed at, the same rule that protects an unsigned settings.local.json.
+auth_root="$TMP_ROOT/orphan-pointer-authroot"
+wt=$(make_hook_worktree orphan-pointer someone-else /home/x/state "$auth_root" fm.111122223333)
+rm -f "$auth_root/.grok/hooks/fm-turn-end.d/fm.111122223333"
+got=$(HOME="$auth_root"; GROK_HOME="$auth_root/.grok"; fm_turnend_artifact_task_id "$wt/.fm-grok-turnend")
+[ -z "$got" ] \
+  || fail "orphan-pointer: a pointer with no authorization file was attributed to task '$got'"
+( HOME="$auth_root"; GROK_HOME="$auth_root/.grok"; fm_turnend_clear_foreign "$wt" dictate 2>/dev/null )
+assert_present "$wt/.fm-grok-turnend" \
+  "orphan-pointer: an unattributable pointer was removed on a guess"
+pass "fm-turnend-artifact-lib.sh: leaves a pointer it cannot tie to a task alone"
 
 # (s) A settings file with no firstmate turn-end signature is not firstmate's to
 # delete - the captain may have written it.
@@ -820,6 +915,32 @@ got=$(fm_turnend_artifact_task_id "$slot/.opencode/plugins/fm-turn-end.js")
 [ "$got" = second-occupant ] \
   || fail "spawn-hook-handover: the new occupant's own hook reads as owner '$got', expected second-occupant"
 pass "fm-spawn.sh: a real spawn sweeps the turn-end hook a real earlier spawn left in the slot"
+
+# (L) The same handover across the grok arm, which is the one the hand-built
+# fixture above cannot honestly stand in for: .fm-grok-turnend is a pointer whose
+# token is opaque, so only a real spawn produces a real token and a real
+# authorization file to resolve it through. A different harness takes the slot
+# next, so spawn's own hook write cannot mask the sweep - if the pointer is not
+# swept, the global grok Stop hook keeps resolving it and waking firstmate for a
+# task that no longer exists.
+case_dir=$(make_spawn_case spawn-grok-handover grok-first)
+slot="$case_dir/.treehouse/pool-a/1/project"
+mkdir -p "$case_dir/home/data/claude-second"
+printf 'brief for claude-second\n' > "$case_dir/home/data/claude-second/brief.md"
+fake_spawn_treehouse "$case_dir" ""
+out=$(run_spawn "$case_dir" grok-first "$slot" "$case_dir/project" --harness grok); rc=$?
+expect_code 0 "$rc" "spawn-grok-handover first spawn"$'\n'"--- output ---"$'\n'"$out"
+assert_present "$slot/.fm-grok-turnend" \
+  "spawn-grok-handover: the first spawn wrote no grok turn-end pointer to sweep"
+grok_home="$case_dir/grokhome"
+got=$(HOME="$case_dir/fakehome"; GROK_HOME="$grok_home"; fm_turnend_artifact_task_id "$slot/.fm-grok-turnend")
+[ "$got" = grok-first ] \
+  || fail "spawn-grok-handover: the parser read owner '$got' out of the pointer fm-spawn.sh really wrote, expected grok-first"
+out=$(run_spawn "$case_dir" claude-second "$slot" "$case_dir/project" --harness claude); rc=$?
+expect_code 0 "$rc" "spawn-grok-handover second spawn"$'\n'"--- output ---"$'\n'"$out"
+assert_absent "$slot/.fm-grok-turnend" \
+  "spawn-grok-handover: the previous occupant's grok pointer survived the next spawn"
+pass "fm-spawn.sh: a real spawn sweeps the grok turn-end pointer a real earlier spawn left in the slot"
 
 # --- audit fixtures ---------------------------------------------------------
 

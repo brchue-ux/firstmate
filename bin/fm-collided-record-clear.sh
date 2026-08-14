@@ -9,13 +9,14 @@
 # out - and hand-editing state/<id>.meta is the exact repair that produced the
 # original collision. This command is that way out, and nothing more.
 #
-# What it removes: this home's own state/<id>.* task records, plus the two
+# What it removes: this home's own state/<id>.* task records, plus the three
 # classes of artifact those records are pointers into - the harness turn-end
-# authorization file and the PR-check artifacts - through the same hardened
-# helpers bin/fm-teardown.sh uses, which bin/fm-task-record-lib.sh owns. That
-# sharing is the point: a token record unlinked without its authorization file
-# strands a turn-end wake for a task id that no longer exists, and this command
-# is the ONLY remaining owner of a collided record's id.
+# authorization file, the PR-check artifacts, and the per-task temp root the
+# meta records as tasktmp= - through the same hardened helpers
+# bin/fm-teardown.sh uses, which bin/fm-task-record-lib.sh owns. That sharing is
+# the point: a token record unlinked without its authorization file strands a
+# turn-end wake for a task id that no longer exists, and this command is the
+# ONLY remaining owner of a collided record's id.
 # Nothing else. It never touches the home the record names - not its files, not
 # its processes, not its treehouse lease - and it never touches the backend
 # endpoint. Closing a window the cleared record used to name is the operator's
@@ -23,7 +24,9 @@
 #
 # A PR-check artifact that is a symlink, is hardlinked, or sits on a different
 # device REFUSES and preserves the whole task record, exactly as in teardown; the
-# refusal is raised before anything at all is removed.
+# refusal is raised before anything at all is removed. A recorded tasktmp= that
+# is not an absolute per-task temp root named fm-<task-id>, or that resolves
+# inside the home, is refused rather than removed on the meta's word.
 #
 # It refuses unless the recorded worktree= really does resolve to a secondmate
 # home that this task does not own, decided by bin/fm-leased-home-lib.sh from the
@@ -59,7 +62,7 @@ SECONDMATE_REG="$DATA/secondmates.md"
 . "$SCRIPT_DIR/fm-leased-home-lib.sh"
 
 case "${1:-}" in
-  -h|--help) sed -n '2,41p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  -h|--help) sed -n '2,44p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
 esac
 
 [ "$#" -eq 1 ] || { echo "usage: fm-collided-record-clear.sh <task-id>" >&2; exit 2; }
@@ -91,15 +94,32 @@ fi
 
 ENDPOINT=$(sed -n 's/^window=//p' "$META" | head -1)
 [ -n "$ENDPOINT" ] || ENDPOINT=$(sed -n 's/^terminal=//p' "$META" | head -1)
+TASK_TMP=$(sed -n 's/^tasktmp=//p' "$META" | head -1)
+
+# The temp root is the one recorded path that could be made to point INSIDE the
+# home, which this command may never touch. bin/fm-task-record-lib.sh proves the
+# shape; the boundary is proven here, where the home is known.
+if [ -n "$TASK_TMP" ]; then
+  TASK_TMP_ABS=$(fm_leased_home_abs "$TASK_TMP") || TASK_TMP_ABS=$TASK_TMP
+  HOME_ABS=$(fm_leased_home_abs "$WT") || HOME_ABS=$WT
+  case "$TASK_TMP_ABS" in
+    "$HOME_ABS"|"$HOME_ABS"/*)
+      echo "REFUSED: task $ID records tasktmp=$TASK_TMP, which is inside secondmate '$OWNER' home $WT." >&2
+      echo "This command never touches that home; correct the tasktmp= line in $META, then re-run." >&2
+      exit 1 ;;
+  esac
+fi
 
 # Every removal below is confined to this home's own state/ directory and to the
 # firstmate-owned files its records point at, in the order
 # bin/fm-task-record-lib.sh's contract requires: the refusing PR-check protocol
 # first, so its refusal leaves the whole record intact, then the turn-end
-# authorizations while the tokens naming them still exist, then the records.
+# authorizations and the temp root while the records naming them still exist,
+# then the records.
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 remove_grok_turnend_auth "$STATE" "$ID"
 remove_kimi_turnend_auth "$STATE" "$ID"
+remove_task_tmp_root "$TASK_TMP" "$ID" || exit 1
 
 # Enumerated rather than globbed on "$ID."*: a task id may contain a dot, so a
 # glob could reach a differently-named task's records.

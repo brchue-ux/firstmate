@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Removal of the side-effect artifacts a task record owns OUTSIDE state/<id>.meta.
 #
-# Deleting state/<id>.* is never the whole retirement. Two of those records are
+# Deleting state/<id>.* is never the whole retirement. Three of those records are
 # pointers into files that live elsewhere and outlive them:
 #
 #   - state/<id>.<harness>-turnend-token names a firstmate-owned authorization
@@ -13,22 +13,56 @@
 #     hardlink, cross-device or bad-mode artifact REFUSES and preserves task
 #     state rather than being force-removed) plus a quarantine directory a plain
 #     `rm -f` of the five state records leaves behind.
+#   - state/<id>.meta's `tasktmp=` line names the per-task temp root. The path
+#     exists only in that record, and bin/fm-tmp-sweep.sh's candidate glob does
+#     not match this root's shape, so unlinking the meta first orphans it with
+#     nothing left able to reclaim it.
 #
-# bin/fm-teardown.sh is the original owner of all four predicates and still their
+# bin/fm-teardown.sh is the original owner of these predicates and still their
 # only ordinary-lifecycle caller. They live here because
 # bin/fm-collided-record-clear.sh retires the one class of record teardown
 # refuses outright, and a second retirement path that only approximated this
 # would reintroduce exactly the dead-task-wake and orphaned-artifact classes the
 # originals exist to prevent.
 #
-# Ordering contract for every caller: run fm_task_record_remove_pr_poll_artifacts
-# FIRST, so its refusal preserves task state with nothing else already removed,
-# then the turn-end authorizations, and only then unlink state/<id>.*.
+# Ordering contract for every caller: run remove_pr_poll_artifacts FIRST, because
+# it is the only one of these that can REFUSE, and its refusal is meaningful only
+# while the rest of the task record is still intact; then the turn-end
+# authorizations and the temp root, while the records naming them still exist;
+# and only then unlink state/<id>.*.
 #
 # bin/fm-pr-lib.sh owns the PR-artifact safety predicates this consults. This
 # file is sourced and has no side effects on source.
 
 FM_TASK_RECORD_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Remove the per-task temp root bin/fm-spawn.sh recorded as `tasktmp=`.
+#
+# The path is read out of a file rather than computed, so its shape is proven
+# before an `rm -rf` acts on it: spawn builds it as <absolute root>/fm-<id> and
+# refuses a relative FM_TASK_TMP_ROOT for this exact reason, so anything that is
+# not an absolute path ending in the caller's own fm-<id>, and not a plain
+# directory, is refused and left in place rather than removed on trust.
+remove_task_tmp_root() {  # <task-tmp> <id>
+  local task_tmp=$1 id=$2
+  [ -n "$task_tmp" ] || return 0
+  case "$task_tmp" in
+    /*) ;;
+    *)
+      echo "REFUSED: recorded tasktmp=$task_tmp is not an absolute path; leaving it in place." >&2
+      return 1 ;;
+  esac
+  if [ "${task_tmp##*/}" != "fm-$id" ]; then
+    echo "REFUSED: recorded tasktmp=$task_tmp is not task $id's temp root (expected a directory named fm-$id); leaving it in place." >&2
+    return 1
+  fi
+  { [ -e "$task_tmp" ] || [ -L "$task_tmp" ]; } || return 0
+  if [ ! -d "$task_tmp" ] || [ -L "$task_tmp" ]; then
+    echo "REFUSED: recorded tasktmp=$task_tmp is not a plain directory; leaving it in place." >&2
+    return 1
+  fi
+  rm -rf -- "$task_tmp"
+}
 
 remove_grok_turnend_auth() {
   local state_dir=$1 id=$2 token hooks_dir

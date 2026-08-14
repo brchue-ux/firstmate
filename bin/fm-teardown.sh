@@ -1213,6 +1213,10 @@ elif [ "$BACKEND" = herdr ] \
      && { [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; }; then
   echo "warning: herdr presentation journal for $ID remains quarantined; no workspace cleanup was attempted" >&2
 fi
+# bin/fm-task-record-lib.sh's ordering contract: the one step that can REFUSE
+# runs before anything else in this phase is unlinked, so a refusal still leaves
+# a whole task record for the operator to act on.
+remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
   remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID"
@@ -1224,7 +1228,6 @@ fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 # Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
-remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 if [ "$FORCE" != "--force" ]; then
   # Decoration only, never a blocker: publishes the landed teardown into
   # herdr as a signal and durable metadata when the task's own meta names a
