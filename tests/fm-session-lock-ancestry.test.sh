@@ -226,6 +226,10 @@ install_autoarm_scripts() {
   local dir=$1
   mkdir -p "$dir/bin"
   cp "$ROOT/bin/fm-claude-stop-autoarm.sh" "$dir/bin/fm-claude-stop-autoarm.sh"
+  # This fork's hooks resolve FM_HOME through the anchor library, so the fixture
+  # has to carry it too; without it the hook aborts on the missing sibling and
+  # stands down (exit 0) instead of claiming the home and rewaking (exit 2).
+  cp "$ROOT/bin/fm-home-anchor-lib.sh" "$dir/bin/fm-home-anchor-lib.sh"
   cp "$ROOT/bin/fm-primary-scope-lib.sh" "$dir/bin/fm-primary-scope-lib.sh"
   cp "$ROOT/bin/fm-supervision-lib.sh" "$dir/bin/fm-supervision-lib.sh"
   cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/fm-wake-lib.sh"
