@@ -51,14 +51,15 @@
 # outcome still depends on whether supervision is genuinely absent, not on
 # whether this particular arm personally saw the reason: before reporting the
 # typed cycle-end failure it checks the durable evidence that the cycle is
-# accounted for - the wake queue advanced during the cycle (another arm relays
-# that reason), this home no longer needs supervision at all, or a live Stop
+# accounted for - this home no longer needs supervision at all, or a live Stop
 # auto-arm claim that is not this arm's own launcher already owns the next
-# cycle. Any of those is a normal cycle end and exits 0 quietly. This matters
-# because Claude's Stop hook arms the successor at the NEXT Stop
+# cycle. Either is a normal cycle end and exits 0 quietly. This matters because
+# Claude's Stop hook arms the successor at the NEXT Stop
 # (docs/watcher-continuity.md), so a successor is not merely unlikely inside the
 # confirmation window - it is guaranteed absent, which turned every observed
-# attached cycle end into a false FAILED.
+# attached cycle end into a false FAILED. An advanced wake-queue counter is
+# deliberately NOT such evidence; the delivery record above is the watcher-bound
+# form of that claim, and the counter is home-wide.
 #
 # Every observed watcher cycle appends one tab-separated lifecycle record to
 # state/.watch-cycle-exits.log. The arm layer owns that bounded ledger; it records
@@ -98,10 +99,6 @@ WATCH="$SCRIPT_DIR/fm-watch.sh"
 WATCH_LOCK="$STATE/.watch.lock"
 BEAT="$STATE/.last-watcher-beat"
 AUTOARM_LOCK="$STATE/.claude-autoarm.lock"
-# Monotonic across drains: fm-wake-drain.sh truncates the queue but never this
-# counter, so a comparison across one cycle proves whether that cycle enqueued a
-# wake, independently of whether firstmate has already consumed it.
-WAKE_SEQ_FILE="$STATE/.wake-queue.seq"
 # "Fresh" reuses the guard's threshold so there is one definition of liveness.
 GRACE=${FM_GUARD_GRACE:-300}
 # How long to wait for a freshly forked watcher to acquire the lock and beat.
@@ -145,16 +142,7 @@ cycle_watcher_identity=none
 cycle_origin=unknown
 cycle_started_at=0
 cycle_lock_before='pid:none|identity:none'
-cycle_wake_seq=0
 
-wake_seq_now() {
-  local seq
-  seq=$(cat "$WAKE_SEQ_FILE" 2>/dev/null || true)
-  case "$seq" in
-    ''|*[!0-9]*) seq=0 ;;
-  esac
-  printf '%s' "$seq"
-}
 
 cycle_begin() {
   cycle_watcher_pid=$1
@@ -162,7 +150,6 @@ cycle_begin() {
   cycle_watcher_identity=$3
   cycle_started_at=$(date +%s)
   cycle_lock_before=$(lock_snapshot)
-  cycle_wake_seq=$(wake_seq_now)
   cycle_active=1
 }
 
@@ -357,13 +344,14 @@ foreign_autoarm_claim() {
 FM_ARM_CYCLE_EXPLANATION=
 attached_cycle_end_is_explained() {
   FM_ARM_CYCLE_EXPLANATION=
-  if [ "$(wake_seq_now)" != "$cycle_wake_seq" ]; then
-    # The watcher enqueues its actionable wake before it prints and exits, so an
-    # advanced counter means this cycle ended with a reason the owning arm is
-    # relaying. Only the watcher appends to the queue.
-    FM_ARM_CYCLE_EXPLANATION=wake-enqueued
-    return 0
-  fi
+  # An advanced wake-queue counter is deliberately NOT accepted here. It used to
+  # stand in for "this cycle ended with a reason the owning arm is relaying",
+  # which reads the queue as if only the observed watcher could append to it.
+  # Anything home-wide advances the same counter - a process-event producer
+  # advances it while the observed watcher is uninvolved - so that inference
+  # swallows a genuine outage. The identity-bound delivery ledger consulted
+  # before this function is the watcher-bound evidence that claim needs, and it
+  # covers every case the counter used to stand in for.
   if ! fm_supervision_needed "$STATE" "$GRACE"; then
     FM_ARM_CYCLE_EXPLANATION=no-supervision-need
     return 0

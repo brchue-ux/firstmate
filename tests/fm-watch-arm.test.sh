@@ -223,6 +223,12 @@ test_attached_arm_still_fails_on_a_wake_it_did_not_deliver() {
   fakebin="$dir/fakebin"
   out="$dir/watch.out"
   armout="$dir/arm.out"
+  # Put work in flight so this home genuinely needs supervision. An arm only
+  # calls a cycle end a FAILURE when supervision is actually absent, so a case
+  # asserting the typed failure has to have something riding on the watcher;
+  # otherwise it passes on "nothing to supervise" and never tests the
+  # watcher-bound evidence it describes below.
+  printf 'project=x\n' > "$state/task.meta"
   start_seed_watcher "$state" "$fakebin" "$out"
   start_attached_arm "$state" "$fakebin" "$armout" 1
 
