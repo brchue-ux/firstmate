@@ -6,7 +6,8 @@
 # Coverage:
 #   - absent-file markers vs empty-but-present files in the context digest
 #   - the secondmate charter: printed, ordered before projects.md, listed in
-#     the closing re-read trailer; explicitly ABSENT in a primary home
+#     the closing re-read trailer; explicitly ABSENT in a primary home, and
+#     never called a primary home when .fm-secondmate-home says otherwise
 #   - the lock-refusal read-only path: banner leads, every mutating step is
 #     skipped (including bootstrap's six mutating sweeps, verified by their
 #     ABSENCE), the digest still completes
@@ -663,6 +664,38 @@ EOF
     "absent charter was reported as empty-but-present"
 
   pass "an absent charter prints an explicit ABSENT marker"
+}
+
+# A seeded secondmate home whose gitignored data/charter.md was lost still
+# carries the authoritative .fm-secondmate-home marker, so the digest must not
+# tell it that it is the primary, fleet-wide home.
+test_context_digest_charter_absent_in_marked_home() {
+  local rec root home fakebin out charter_section
+  rec=$(new_world context-digest-marked-no-charter)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+
+  printf '%s\n' 'budget' > "$home/.fm-secondmate-home"
+  printf '%s\n' '- demo [no-mistakes] - a demo project (added 2026-07-01)' > "$home/data/projects.md"
+  # data/charter.md deliberately absent: local state lost, marker intact.
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  charter_section=$(printf '%s\n' "$out" \
+    | awk '/^data\/charter\.md \(/{flag=1;next}/^data\//{flag=0}flag')
+  assert_contains "$charter_section" "ABSENT" \
+    "absent charter did not print the explicit ABSENT marker in a marked home"
+  assert_not_contains "$out" "$CHARTER_LABEL" \
+    "a marked secondmate home was told an absent charter means it is a primary home"
+  assert_contains "$out" ".fm-secondmate-home marks this a secondmate home" \
+    "charter label did not name the marker as the authority in a marked home"
+  assert_contains "$out" "the charter is missing and must be restored" \
+    "charter label did not say the missing charter must be restored"
+
+  pass "a marked secondmate home with no charter is not called a primary home"
 }
 
 # --- lock refusal: read-only path --------------------------------------------
@@ -1464,6 +1497,7 @@ EOF
 test_context_digest_absent_empty_present
 test_context_digest_charter_present
 test_context_digest_charter_absent
+test_context_digest_charter_absent_in_marked_home
 test_lock_refusal_read_only_path
 test_lock_write_failure_read_only_path
 test_session_lock_concurrent_single_winner

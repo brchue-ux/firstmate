@@ -66,6 +66,7 @@ README.md            public overview and development notes
 skills/              standalone public installer-facing skills, committed; not loaded by firstmate
 bin/                 helper scripts, committed; read each script's header before first use
 .env                 optional X-mode pairing token; LOCAL, gitignored; presence-gates section 14
+.fm-secondmate-home  authoritative secondmate-home identity marker holding this home's secondmate id; LOCAL, gitignored, written at seed time by fm-home-seed.sh (section 6)
 config/crew-harness  crewmate harness override; LOCAL, gitignored; absent or "default" = same as firstmate. Inherited as the literal file: a concrete primary adapter value also controls a secondmate home's own crewmates (section 4)
 config/crew-dispatch.json  optional crewmate dispatch profiles; LOCAL, gitignored; firstmate-maintained but human-editable natural-language rules that choose a per-task harness/model/effort profile (section 4). Inherited by secondmate homes
 config/secondmate-harness  harness the PRIMARY uses to launch SECONDMATE agents, optionally followed by a model and effort token on the same line ("<harness> [<model>] [<effort>]"; section 4); LOCAL, gitignored; absent or "default" harness falls back to config/crew-harness then firstmate's own. The primary's own setting; NOT inherited into secondmate homes (secondmates do not spawn secondmates)
@@ -134,7 +135,8 @@ Tracked native session-open adapters only nudge this command; `docs/sessionstart
 Read the complete digest once and trust it as this turn's startup and recovery input.
 Do not separately re-read the context, backlog, metadata, or bulk status inputs it just printed unless a source was reported absent or corrupt, older history is specifically needed, or a targeted workflow must inspect before writing.
 An `ABSENT` captain, shared-captain, secondmate, or learnings file means the firstmate repo's built-in defaults, no shared captain preferences, no registered secondmates, or no captured learnings; rebuild an absent or stale project registry from the clones before dispatch.
-An `ABSENT` charter means this is a primary home rather than a secondmate one.
+The `.fm-secondmate-home` marker is authoritative for this home's role, so an `ABSENT` charter means a primary home only when that marker is also absent.
+In a marked home an `ABSENT` charter means the charter's local state was lost and must be restored, not that the home is primary.
 
 If the session lock cannot be acquired and verified, report its exact diagnostic and remain read-only; another active session is only one possible cause.
 A lock-refused session must not spawn, steer, merge, drain the wake queue, repair supervision, repair a checkout, or perform any other fleet mutation.

@@ -342,8 +342,12 @@ fi
   --x-mode "$X_MODE_PRESENT"
 
 # --- 4. context digest -----------------------------------------------------
+CHARTER_LABEL='data/charter.md (secondmate charter; ABSENT = this is a primary home)'
+if [ -e "$FM_HOME/.fm-secondmate-home" ] || [ -L "$FM_HOME/.fm-secondmate-home" ]; then
+  CHARTER_LABEL='data/charter.md (secondmate charter; .fm-secondmate-home marks this a secondmate home, so ABSENT = the charter is missing and must be restored)'
+fi
 section "CONTEXT"
-print_file_or_absent "$DATA/charter.md" "data/charter.md (secondmate charter; ABSENT = this is a primary home)"
+print_file_or_absent "$DATA/charter.md" "$CHARTER_LABEL"
 print_file_or_absent "$DATA/projects.md" "data/projects.md"
 print_file_or_absent "$DATA/secondmates.md" "data/secondmates.md"
 print_file_or_absent "$DATA/captain.md" "data/captain.md"
