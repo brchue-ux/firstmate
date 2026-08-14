@@ -47,11 +47,14 @@
 #     once per run and every open item's pinned session name is protected.
 #     Session names are derived FROM ids through bin/fm-browser-session-lib.sh,
 #     never parsed back out of a name: a shortened name has no id to recover.
-#     The index must have read EVERY home to answer this. It succeeds on a
-#     partial read by design - a home with no readable backlog is reported as
-#     skipped and contributes no items, and a home whose registry cannot be read
-#     hides its whole secondmate subtree - so a partial answer is treated
-#     exactly as no answer, not as "that home has no open work"
+#     The index must have determined EVERY home's open work to answer this. It
+#     succeeds on a partial read by design - a backlog it cannot read or parse,
+#     a home it cannot resolve, and a registry it cannot enumerate all leave
+#     items[] short while the run still exits 0 - so a gap is treated exactly as
+#     no answer, not as "that home has no open work". Which homes are a gap is
+#     the index's own call, read from its per-home work_unknown; an ordinary
+#     skip such as a home with no backlog file at all, or a home already counted
+#     under an earlier registry id, is a complete answer and sweeps normally
 # Idle is measured from that state, not from process age: a bridge started two
 # days ago and used a minute ago is in use, and reporting it as an orphan is the
 # error that gets a live session killed.
@@ -59,9 +62,9 @@
 # The fleet index is a precondition for reporting, not a bonus. When it cannot
 # be consulted - no jq, no index script, a non-zero exit, a run that outlived
 # its time bound, output that is not an fm-fleet-work-index.v1 object, or a run
-# that did not read every home - this reports a whole-sweep skip naming the
-# reason and the homes it names, and flags nothing, exactly as it does when ps
-# is unusable. Falling back to flagging would trade a silent run for the one
+# that left any home's open work undetermined - this reports a whole-sweep skip
+# naming the reason and those homes, and flags nothing, exactly as it does when
+# ps is unusable. Falling back to flagging would trade a silent run for the one
 # outcome this sweep exists to avoid: an operator stopping a live worker's
 # browser. A home is never allowed to leave the answer silently, which is the
 # same property bin/fm-fleet-work-index.sh maintains on its own side.
@@ -185,18 +188,6 @@ note() {
   return 0
 }
 
-# The bridge record chrome-devtools-axi writes is {"pid":N,"port":P}. Only the
-# pid is read here, without a jq dependency, and anything that does not parse to
-# a plain number is treated as unreadable rather than guessed at.
-bridge_pid() {
-  local file=$1 pid
-  pid=$(sed -n 's/.*"pid"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$file" 2>/dev/null | head -n 1)
-  case "$pid" in
-    ''|*[!0-9]*) return 1 ;;
-  esac
-  printf '%s\n' "$pid"
-}
-
 # Whether ps can report on a running process at all. Without it a live bridge
 # cannot be told apart from a pid the OS has since reused, and every line this
 # sweep prints is an invitation to kill something - so the whole sweep says so
@@ -205,24 +196,6 @@ PS_USABLE=1
 if [ -z "$(ps -o args= -p $$ 2>/dev/null)" ]; then
   PS_USABLE=0
 fi
-
-# The marker is the BRIDGE entry point, not the package name: a plain
-# `chrome-devtools-axi <cmd>` CLI call carries the package name in its argv too,
-# and accepting one would let a stale bridge.pid whose number the OS has since
-# handed to that CLI be reported as an idle bridge - after which the printed
-# stop command SIGTERMs and SIGKILLs that unrelated process. This is the tool's
-# own definition of a bridge process.
-FM_BROWSER_SWEEP_BRIDGE_MARKER=chrome-devtools-axi-bridge
-
-is_bridge_process() {
-  local pid=$1 args
-  kill -0 "$pid" 2>/dev/null || return 1
-  args=$(ps -o args= -p "$pid" 2>/dev/null) || return 1
-  case "$args" in
-    *"$FM_BROWSER_SWEEP_BRIDGE_MARKER"*) return 0 ;;
-    *) return 1 ;;
-  esac
-}
 
 # Every open work item in the fleet, as the session name it would have pinned.
 #
@@ -272,25 +245,30 @@ load_fleet_task_sessions() {
     return 1
   }
 
-  # A home the index could not read contributes no items while the run still
-  # succeeds, and a home whose registry it could not read hides that home's
-  # whole secondmate subtree the same way. Either one turns "no open work owns
-  # this session" into "no open work we happened to see owns this session",
-  # which is the assumption that gets a live worker's browser stopped - so an
-  # incomplete answer is refused here and named, rather than mined for the ids
+  # A home whose open work the index could not determine contributes no items
+  # while the run still succeeds, which turns "no open work owns this session"
+  # into "no open work we happened to see owns this session" - the assumption
+  # that gets a live worker's browser stopped. So an answer with a genuine gap
+  # in it is refused here and the homes are named, rather than mined for the ids
   # it does carry.
+  #
+  # The index answers this itself, per home, with work_unknown. A skip on its
+  # own is not a gap and must not be read as one: a home with no backlog file at
+  # all has no open backlog rows, and a home reached twice through the registry
+  # graph is already counted under its first visit. Both are the ordinary
+  # steady state of a real fleet, and refusing on them would leave this sweep
+  # permanently unable to report anything. Anything absent or non-boolean counts
+  # as unknown, so an index that does not answer the question cannot pass for
+  # one that answered "complete".
   unread=$(printf '%s' "$json" | jq -r '
     if (.schema? == "fm-fleet-work-index.v1") and ((.items | type) == "array")
        and ((.homes | type) == "array")
     then
       ([ .homes[]
-         | select((.skipped == true) or (.subtree_reason != null))
+         | select(.work_unknown != false)
          | ((.home // .mate // "unnamed home") | tostring) + ": "
-           + ((.reason // .subtree_reason) | tostring) ]) as $named
-      | (if ($named | length) > 0 then $named
-         elif ((.totals.homes_skipped // 0) > 0)
-         then ["\(.totals.homes_skipped) home(s) went unread"]
-         else [] end) as $problems
+           + ((.reason // .subtree_reason // "open work could not be determined")
+              | tostring) ]) as $problems
       | if ($problems | length) == 0 then ""
         else ($problems[0:3] | join("; "))
              + (if ($problems | length) > 3
@@ -301,7 +279,7 @@ load_fleet_task_sessions() {
     return 1
   }
   if [ -n "$unread" ]; then
-    FLEET_INDEX_REASON="the cross-home work index could not read every home ($unread)"
+    FLEET_INDEX_REASON="the fleet's open work could not be determined for every home ($unread)"
     return 1
   fi
 
@@ -417,11 +395,11 @@ describe_idle() {
 examine() {
   local session=$1 dir=$2 pid_file="$2/bridge.pid" pid last now idle
   [ -f "$pid_file" ] || { note "$session: skipped: no bridge record"; return 0; }
-  if ! pid=$(bridge_pid "$pid_file"); then
+  if ! pid=$(fm_browser_session_bridge_pid "$pid_file"); then
     report "$session: skipped: bridge record names no readable pid ($pid_file)"
     return 0
   fi
-  if ! is_bridge_process "$pid"; then
+  if ! fm_browser_session_is_bridge "$pid"; then
     note "$session: skipped: recorded pid $pid is not a running bridge"
     return 0
   fi

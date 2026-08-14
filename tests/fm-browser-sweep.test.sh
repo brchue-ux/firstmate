@@ -61,11 +61,11 @@ EOF
 printf -- '- mate - owns alpha work (home: %s; scope: alpha; projects: alpha; added 2026-08-01)\n' \
   "$FLEET_MATE" > "$FLEET_MAIN/data/secondmates.md"
 
-# A second fixture fleet whose registered secondmate home has no readable
-# backlog. The index still exits 0 for this - a home it cannot read is reported
-# as skipped and simply contributes no open work - so this is the fleet that
-# proves the sweep refuses a partial answer instead of reading it as "that home
-# has nothing open".
+# A second fixture fleet whose registered secondmate home's backlog exists but
+# cannot be read. The index still exits 0 for this - it reports the home as
+# skipped and it simply contributes no open work - so this is the fleet that
+# proves the sweep refuses an answer with a real gap in it instead of reading it
+# as "that home has nothing open".
 FLEET_PARTIAL_MAIN="$TMP_ROOT/fleet-partial-main"
 FLEET_PARTIAL_MATE="$TMP_ROOT/fleet-partial-mate"
 mkdir -p "$FLEET_PARTIAL_MAIN/data" "$FLEET_PARTIAL_MATE/data"
@@ -78,6 +78,33 @@ cat > "$FLEET_PARTIAL_MAIN/data/backlog.md" <<'EOF'
 EOF
 printf -- '- mate - owns alpha work (home: %s; scope: alpha; projects: alpha; added 2026-08-01)\n' \
   "$FLEET_PARTIAL_MATE" > "$FLEET_PARTIAL_MAIN/data/secondmates.md"
+printf '# Backlog\n\n## In flight\n## Queued\n## Done\n' \
+  > "$FLEET_PARTIAL_MATE/data/backlog.md"
+chmod 000 "$FLEET_PARTIAL_MATE/data/backlog.md"
+FLEET_PARTIAL_READABLE=1
+# Running as a user who can read anything (root in a container) makes this
+# fixture unbuildable rather than failing; the case says so instead of passing
+# on a condition it never created.
+[ -r "$FLEET_PARTIAL_MATE/data/backlog.md" ] && FLEET_PARTIAL_READABLE=0
+
+# A third fixture fleet whose registered secondmate home has NO backlog file at
+# all, which is what bin/fm-home-seed.sh leaves behind until work is filed in a
+# home. The index reports it as skipped too, but nothing is missing: a home with
+# no backlog has no open backlog rows. This is the ordinary steady state of a
+# real fleet, so the sweep has to keep working normally against it.
+FLEET_BENIGN_MAIN="$TMP_ROOT/fleet-benign-main"
+FLEET_BENIGN_MATE="$TMP_ROOT/fleet-benign-mate"
+mkdir -p "$FLEET_BENIGN_MAIN/data" "$FLEET_BENIGN_MATE/data"
+cat > "$FLEET_BENIGN_MAIN/data/backlog.md" <<'EOF'
+# Backlog
+
+## In flight
+- [ ] benign-open-task - this home's own open work (repo: alpha) (since 2026-08-01)
+## Queued
+## Done
+EOF
+printf -- '- mate - owns alpha work (home: %s; scope: alpha; projects: alpha; added 2026-08-01)\n' \
+  "$FLEET_BENIGN_MATE" > "$FLEET_BENIGN_MAIN/data/secondmates.md"
 
 HELD_PIDS=()
 
@@ -243,9 +270,10 @@ cat <<'JSON'
 {"schema":"fm-fleet-work-index.v1",
  "totals":{"homes":2,"homes_read":2,"homes_skipped":0,"items":1},
  "homes":[{"mate":"main","home":"/fixture/main","skipped":false,"reason":null,
-           "subtree_reason":null},
+           "subtree_reason":null,"work_unknown":false},
           {"mate":"mate","home":"/fixture/mate","skipped":false,"reason":null,
-           "subtree_reason":"secondmate registry is unreadable, so this home's secondmates could not be enumerated"}],
+           "subtree_reason":"secondmate registry is unreadable, so this home's secondmates could not be enumerated",
+           "work_unknown":true}],
  "skipped":[],
  "items":[{"mate":"main","home":"/fixture/main","id":"visible-task","state":"in_flight"}]}
 JSON
@@ -360,6 +388,10 @@ test_unconsultable_fleet_index_reports_nothing_idle() {
 # nothing to repair.
 test_partially_read_fleet_index_reports_nothing_idle() {
   local root pid dir out
+  [ "$FLEET_PARTIAL_READABLE" -eq 1 ] || {
+    pass "fm-browser-sweep: unreadable-backlog fleet skipped, this user can read a mode-000 file"
+    return 0
+  }
   root=$(new_root partial-index)
   pid=$(start_fake_bridge "$root/proc")
   dir=$(write_session "$root" fm-nobody-task "$pid")
@@ -378,7 +410,43 @@ test_partially_read_fleet_index_reports_nothing_idle() {
     "the whole-sweep skip did not name the home that went unread"
   assert_not_contains "$out" "idle:" \
     "a session was reported idle while a home's open work was unreadable"
-  pass "fm-browser-sweep: a fleet index that read only some homes skips the whole sweep and names the home that went unread"
+  pass "fm-browser-sweep: a fleet index that could not read a home's backlog skips the whole sweep and names that home"
+}
+
+# A skip is not by itself a gap. A seeded secondmate home carries no
+# data/backlog.md until work is filed in it, so most real fleets are skipped
+# homes in the steady state - and refusing on those would leave this sweep
+# permanently unable to report the orphans it exists to surface, with the digest
+# telling the operator to go repair perfectly healthy homes.
+test_benign_index_skips_still_sweep_normally() {
+  local root pid dir out
+  root=$(new_root benign-index)
+  pid=$(start_fake_bridge "$root/proc")
+  dir=$(write_session "$root" fm-nobody-task "$pid")
+  age_out "$dir/bridge.pid" "$dir/snapshot-generation"
+
+  out=$(run_sweep_in_home "$FLEET_BENIGN_MAIN" "$root" --age-hours 12)
+  assert_contains "$out" "fm-nobody-task: idle:" \
+    "a fleet whose only skipped home simply has no backlog file went silent instead of reporting an orphan"
+  assert_not_contains "$out" "skipped:" \
+    "an ordinary backlog-less home was reported as a gap in the fleet's open work"
+  pass "fm-browser-sweep: a fleet whose only skips are ordinary still reports an orphaned bridge"
+}
+
+# The same distinction seen from the other side: the benign fleet's own open
+# work must still be read and still protect its session, so narrowing the
+# refusal cannot have narrowed the protection with it.
+test_benign_index_skips_still_protect_open_work() {
+  local root pid dir out
+  root=$(new_root benign-index-protects)
+  pid=$(start_fake_bridge "$root/proc")
+  dir=$(write_session "$root" fm-benign-open-task "$pid")
+  age_out "$dir/bridge.pid" "$dir/snapshot-generation"
+
+  out=$(run_sweep_in_home "$FLEET_BENIGN_MAIN" "$root" --age-hours 12)
+  assert_not_contains "$out" "fm-benign-open-task" \
+    "an in-flight task's session was reported once the fleet had an ordinary skipped home"
+  pass "fm-browser-sweep: open work is still read and still protected in a fleet that has ordinary skipped homes"
 }
 
 # The other half of an incomplete answer: every home was read, but one home's
@@ -534,6 +602,8 @@ test_live_task_session_is_protected
 test_open_work_in_another_home_is_never_reported
 test_unconsultable_fleet_index_reports_nothing_idle
 test_partially_read_fleet_index_reports_nothing_idle
+test_benign_index_skips_still_sweep_normally
+test_benign_index_skips_still_protect_open_work
 test_unenumerated_secondmate_subtree_reports_nothing_idle
 test_slow_fleet_index_is_bounded_and_reports_nothing_idle
 test_dead_and_reused_pids_are_not_reported

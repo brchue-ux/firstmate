@@ -51,6 +51,14 @@ export FM_HOME_BINDING=test-harness
 # sweep's own suite sets its fixture root explicitly.
 export FM_BROWSER_SWEEP_ROOT=/nonexistent/fm-test-no-browser-state
 
+# The same hermeticity for the other reader of that state root:
+# bin/fm-browser-session-lib.sh checks whether a task's session still has a live
+# bridge before bin/fm-teardown.sh stops it. Without this a teardown case would
+# consult the developer's own browser state, so whether the case reached the
+# stop would depend on which sessions they happen to have open. Suites that
+# exercise the stop point this at their own fixture root.
+export FM_BROWSER_SESSION_ROOT=/nonexistent/fm-test-no-browser-state
+
 # Resolve the repo root from this library's own location. Consumed by sourcing
 # test files, not by this library, so it reads as "unused" here.
 # shellcheck disable=SC2034

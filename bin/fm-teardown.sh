@@ -910,11 +910,24 @@ safe_rm_rf() {
 # Failure is never fatal: the tool may not be installed, the task may never have
 # opened a browser, and a bridge that is already gone is the outcome we wanted.
 # It is time-bounded because a wedged bridge must not wedge cleanup.
+#
+# It is also gated on the session's record still naming a LIVE BRIDGE, because
+# the tool's own stop is not identity-guarded: it reads the recorded pid, checks
+# only that it is alive, and SIGTERMs then SIGKILLs it, with the bridge test
+# gating nothing but whether the process group goes too. A bridge that crashed
+# or was killed rather than stopped leaves its bridge.pid behind, so a stale
+# record is the ordinary case, and once that pid is reused this would kill an
+# unrelated process with no operator in the loop. That is the same invariant
+# bin/fm-browser-sweep.sh holds before it so much as REPORTS a session, and it
+# has one owner in bin/fm-browser-session-lib.sh rather than a second spelling
+# here. Nothing is given up by asking: with no record or a dead pid, the tool's
+# own stop does nothing anyway.
 stop_task_browser_session() {
   local task_id=$1 session
   [ -n "$task_id" ] || return 0
   command -v chrome-devtools-axi >/dev/null 2>&1 || return 0
   session=$(fm_browser_session_name "$task_id") || return 0
+  fm_browser_session_has_live_bridge "$session" || return 0
   if command -v timeout >/dev/null 2>&1; then
     CHROME_DEVTOOLS_AXI_SESSION="$session" timeout 20 chrome-devtools-axi stop >/dev/null 2>&1 || true
   else

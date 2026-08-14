@@ -40,6 +40,19 @@
 # fact is attached to the home itself rather than standing in for a home.
 # Silence is never how a home leaves this index.
 #
+# A skip is not by itself a gap in the answer, and a consumer must not read it
+# as one: most skips are ordinary. A seeded secondmate home has no
+# data/backlog.md until work is filed in it, and a home reached twice through
+# the registry graph is already counted under its first visit - both are
+# skipped=true over items[] that are genuinely complete. Each home record
+# therefore carries work_unknown, the one machine-readable answer to "may this
+# home's absence from items[] be read as nothing open here?". It is true when a
+# backlog exists but cannot be read or parsed, when the home cannot be resolved
+# or found at all, and whenever subtree_reason is non-null, since an
+# unenumerable registry hides a whole subtree of homes and their work. It is
+# false for the two ordinary skips above. `reason` stays the operator-readable
+# text and is unchanged; nothing downstream should match its wording.
+#
 # Open means a structured backlog row under `## In flight` or `## Queued` whose
 # checkbox is unticked; a ticked row in a current section is already finished and
 # is left out. data/backlog.md's markdown shape has one parser owner,
@@ -172,7 +185,7 @@ registry_rows() { # <registry-path>
 
 # One home's open items as a JSON object:
 #   {mate, home, backlog, registry, skipped, reason, subtree_reason,
-#    unstructured, items[]}
+#    work_unknown, unstructured, items[]}
 # A home that cannot be read yields skipped=true with a reason and no items,
 # which is a normal result here, never an error. subtree_reason is about this
 # home's SECONDMATES rather than its own work, so it rides on the home's own
@@ -180,27 +193,49 @@ registry_rows() { # <registry-path>
 # must stay exactly one home. Every path a record carries is a path this run
 # actually inspected; a path that does not exist stays null rather than being
 # synthesized into something a reader could go looking for.
-home_index_json() { # <mate> <home-dir> [<skip-reason>] [<subtree-reason>]
-  local mate=$1 home=$2 preskip=${3:-} subtree=${4:-} backlog="" registry="" raw
+#
+# work_unknown answers the one question a machine consumer has that `reason`
+# cannot: may this home's absence from items[] be read as "nothing open here"?
+# skipped alone cannot say, because most skips are ordinary - a seeded
+# secondmate home has no data/backlog.md until work is filed in it
+# (bin/fm-home-seed.sh writes none), and a home reached twice through the
+# registry graph is already counted under its first visit. Both of those are
+# skipped=true with items[] that are genuinely complete. It is `reason` that
+# stays the operator-readable text; this is the predicate a consumer acts on,
+# so nothing downstream has to match reason strings to tell the two apart.
+home_index_json() { # <mate> <home-dir> [<skip-reason>] [<subtree-reason>] [<skip-work-unknown>]
+  local mate=$1 home=$2 preskip=${3:-} subtree=${4:-} preskip_unknown=${5:-true}
+  local backlog="" registry="" raw unknown
   if [ -n "$home" ]; then
     backlog="$home/data/backlog.md"
     [ -e "$home/data/secondmates.md" ] && registry="$home/data/secondmates.md"
   fi
 
+  # A registry this run could not enumerate hides a whole subtree of homes and
+  # every open item in it, so this home's own readable backlog cannot make the
+  # answer complete.
+  unknown=false
+  [ -z "$subtree" ] || unknown=true
+
   if [ -n "$preskip" ]; then
-    home_skip_json "$mate" "$home" "$backlog" "$preskip" "$registry" "$subtree"
+    [ "$preskip_unknown" = false ] || unknown=true
+    home_skip_json "$mate" "$home" "$backlog" "$preskip" "$registry" "$subtree" "$unknown"
     return 0
   fi
+  # No backlog file is not a gap in the answer: a home with no backlog has no
+  # open backlog rows, which is exactly what a consumer needs to know.
   if [ ! -e "$backlog" ]; then
-    home_skip_json "$mate" "$home" "$backlog" "no backlog file" "$registry" "$subtree"
+    home_skip_json "$mate" "$home" "$backlog" "no backlog file" "$registry" "$subtree" "$unknown"
     return 0
   fi
+  # A backlog that exists but cannot be read or parsed is a real gap: its rows
+  # may name open work nobody here can see.
   if [ ! -f "$backlog" ] || [ ! -r "$backlog" ]; then
-    home_skip_json "$mate" "$home" "$backlog" "backlog file is not readable" "$registry" "$subtree"
+    home_skip_json "$mate" "$home" "$backlog" "backlog file is not readable" "$registry" "$subtree" true
     return 0
   fi
   if ! raw=$(backlog_json "$backlog" 2>/dev/null) || [ -z "$raw" ]; then
-    home_skip_json "$mate" "$home" "$backlog" "backlog could not be parsed" "$registry" "$subtree"
+    home_skip_json "$mate" "$home" "$backlog" "backlog could not be parsed" "$registry" "$subtree" true
     return 0
   fi
 
@@ -210,6 +245,7 @@ home_index_json() { # <mate> <home-dir> [<skip-reason>] [<subtree-reason>]
     --arg backlog "$backlog" \
     --arg registry "$registry" \
     --arg subtree "$subtree" \
+    --argjson work_unknown "$unknown" \
     --argjson now "$NOW_EPOCH" \
     --argjson title_cap "$TITLE_CAP" \
     --argjson reason_cap "$REASON_CAP" '
@@ -253,11 +289,12 @@ home_index_json() { # <mate> <home-dir> [<skip-reason>] [<subtree-reason>]
        skipped: false,
        reason: null,
        subtree_reason: (if $subtree == "" then null else $subtree end),
+       work_unknown: $work_unknown,
        unstructured: $unstructured,
        items: $items}'
 }
 
-home_skip_json() { # <mate> <home-dir> <backlog-path-or-empty> <reason> [<registry-path-or-empty>] [<subtree-reason>]
+home_skip_json() { # <mate> <home-dir> <backlog-path-or-empty> <reason> [<registry-path-or-empty>] [<subtree-reason>] [<work-unknown>]
   jq -n \
     --arg mate "$1" \
     --arg home "$2" \
@@ -265,11 +302,13 @@ home_skip_json() { # <mate> <home-dir> <backlog-path-or-empty> <reason> [<regist
     --arg reason "$4" \
     --arg registry "${5:-}" \
     --arg subtree "${6:-}" \
+    --argjson work_unknown "${7:-true}" \
     '{mate:$mate,home:$home,
       backlog:(if $backlog == "" then null else $backlog end),
       registry:(if $registry == "" then null else $registry end),
       skipped:true,reason:$reason,
       subtree_reason:(if $subtree == "" then null else $subtree end),
+      work_unknown:$work_unknown,
       unstructured:0,items:[]}'
 }
 
@@ -279,7 +318,7 @@ home_skip_json() { # <mate> <home-dir> <backlog-path-or-empty> <reason> [<regist
 # The visited-path set is what terminates the walk: a cycle reaches an
 # already-visited path, which is reported as already indexed and not descended.
 collect_homes_json() {
-  local id home reason seen=" " resolved frontier next state subtree
+  local id home reason reason_unknown seen=" " resolved frontier next state subtree
   state=$(registry_state "$REGISTRY")
   subtree=""
   [ "$state" != unreadable ] || subtree=$UNENUMERABLE_REASON
@@ -293,6 +332,9 @@ collect_homes_json() {
     while IFS=$'\t' read -r id home; do
       [ -n "$id" ] || continue
       reason=""
+      # A registered home this run could not reach at all keeps whatever open
+      # work it holds invisible, so its skip is a genuine gap by default.
+      reason_unknown=true
       if [ -z "$home" ]; then
         reason="registry entry records no home"
       else
@@ -310,7 +352,12 @@ collect_homes_json() {
       fi
       if [ -z "$reason" ]; then
         case "$seen" in
-          *" $home "*) reason="home already indexed under another registry id" ;;
+          # Reached twice through the registry graph. Its items are already in
+          # this index under the first visit, so nothing is missing here.
+          *" $home "*)
+            reason="home already indexed under another registry id"
+            reason_unknown=false
+            ;;
           *) seen="$seen$home " ;;
         esac
       fi
@@ -322,7 +369,7 @@ collect_homes_json() {
         state=$(registry_state "$home/data/secondmates.md")
         [ "$state" != unreadable ] || subtree=$UNENUMERABLE_REASON
       fi
-      home_index_json "$id" "$home" "$reason" "$subtree"
+      home_index_json "$id" "$home" "$reason" "$subtree" "$reason_unknown"
       [ "$state" != readable ] || next="$next$(registry_rows "$home/data/secondmates.md")"$'\n'
     done <<< "$frontier"
     frontier=$(printf '%s' "$next" | sed '/^$/d')
@@ -359,7 +406,7 @@ index_json() {
                 in_flight: ([$items[] | select(.state == "in_flight")] | length),
                 queued: ([$items[] | select(.state == "queued")] | length)},
        homes: ($homes | map(del(.items)) + ($skipped | map(del(.items)))),
-       skipped: ($skipped | map({mate, home, backlog, registry, reason, subtree_reason})),
+       skipped: ($skipped | map({mate, home, backlog, registry, reason, subtree_reason, work_unknown})),
        items: $items}'
 }
 
