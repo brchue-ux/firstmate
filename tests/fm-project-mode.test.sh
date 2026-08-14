@@ -17,6 +17,10 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 MODE="$ROOT/bin/fm-project-mode.sh"
+# The spawn case below builds a real git repo and worktree, so pin an identity:
+# a host (a CI runner) with no configured user.email cannot auto-detect one, and
+# the fixture commit would fail before the behavior under test ever ran.
+fm_git_identity fmtest fmtest@example.invalid
 TMP_ROOT=$(fm_test_tmproot fm-project-mode)
 HOME_N=0
 
@@ -115,9 +119,11 @@ test_spawn_records_uncorrupted_posture_for_a_base_remote_project() {
     > "$home/data/projects.md"
   proj="$home/projects/forked"
   git init -q -b main "$proj"
-  git -C "$proj" commit -q --allow-empty -m init
+  git -C "$proj" commit -q --allow-empty -m init || fail "fixture repo has no commit"
   # fm-spawn refuses a non-isolated worktree, so give it a real linked one.
-  git -C "$proj" worktree add -q --detach "$home/wt" >/dev/null 2>&1
+  # Fail here rather than let a broken fixture masquerade as a spawn refusal.
+  git -C "$proj" worktree add -q --detach "$home/wt" >/dev/null \
+    || fail "fixture worktree was not created"
 
   fakebin=$(fm_fakebin "$home/fake")
   cat > "$fakebin/tmux" <<'SH'
