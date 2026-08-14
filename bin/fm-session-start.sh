@@ -4,8 +4,9 @@
 # Collapses AGENTS.md sections 3 (bootstrap) and 5 (recovery) into ONE script
 # producing ONE ordered digest, so a session starts in one or two turns
 # instead of the six-plus separate reads the old docs required: run
-# fm-bootstrap.sh, then separately read data/projects.md, data/secondmates.md,
-# data/captain.md, data/captain-shared.md, data/learnings.md, then run
+# fm-bootstrap.sh, then separately read data/charter.md, data/projects.md,
+# data/secondmates.md, data/captain.md, data/captain-shared.md,
+# data/learnings.md, then run
 # fm-lock.sh, fm-wake-drain.sh, then read data/backlog.md, every state/*.meta,
 # and every state/*.status.
 # Every one of those reads is UNCONDITIONAL at every session start, so they
@@ -36,9 +37,16 @@
 #                       only when locked.
 #   3. wake-drain     - mutates the durable wake queue, so it also only runs
 #                       when locked.
-#   4. context digest - data/projects.md, data/secondmates.md, data/captain.md,
+#   4. context digest - data/charter.md, data/projects.md,
+#                       data/secondmates.md, data/captain.md,
 #                       data/captain-shared.md, data/learnings.md: read-only,
-#                       always safe, always runs.
+#                       always safe, always runs. The charter prints FIRST
+#                       because it answers "who am I", which governs how
+#                       everything printed after it is read; its label is
+#                       keyed off the .fm-secondmate-home marker, the single
+#                       authority for this home's role, so a marked home
+#                       missing its charter and an unmarked home carrying a
+#                       stale one are each named for what they are.
 #   5. fleet digest   - a compact data/backlog.md identity/metadata listing,
 #                       every state/*.meta, a bounded state/*.status tail,
 #                       state/.afk, and a cheap per-task endpoint-liveness read:
@@ -338,7 +346,14 @@ fi
   --x-mode "$X_MODE_PRESENT"
 
 # --- 4. context digest -----------------------------------------------------
+CHARTER_LABEL='data/charter.md (secondmate charter; ABSENT = this is a primary home)'
+if [ -e "$FM_HOME/.fm-secondmate-home" ] || [ -L "$FM_HOME/.fm-secondmate-home" ]; then
+  CHARTER_LABEL='data/charter.md (secondmate charter; .fm-secondmate-home marks this a secondmate home, so ABSENT = the charter is missing and must be restored)'
+elif [ -f "$DATA/charter.md" ]; then
+  CHARTER_LABEL='data/charter.md (no .fm-secondmate-home marker, so this is a primary home and the charter below is stale or inherited local state that does not make it a secondmate)'
+fi
 section "CONTEXT"
+print_file_or_absent "$DATA/charter.md" "$CHARTER_LABEL"
 print_file_or_absent "$DATA/projects.md" "data/projects.md"
 print_file_or_absent "$DATA/secondmates.md" "data/secondmates.md"
 print_file_or_absent "$DATA/captain.md" "data/captain.md"
@@ -431,7 +446,7 @@ EOF
 fi
 cat <<'EOF'
 The digest above is complete for this session start. Do NOT re-read
-data/projects.md, data/secondmates.md, data/captain.md,
+data/charter.md, data/projects.md, data/secondmates.md, data/captain.md,
 data/captain-shared.md, data/learnings.md,
 or state/*.meta now - they were just printed in full.
 Do NOT bulk-read data/backlog.md now either: the compact identity/metadata
