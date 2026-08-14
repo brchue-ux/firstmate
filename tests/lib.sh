@@ -43,20 +43,14 @@ export FM_GATE_REFUSE_BYPASS=1
 # launch line so it cannot follow a crewmate out of the suite.
 export FM_HOME_BINDING=test-harness
 
-# Hermetic browser-bridge sweep. bin/fm-browser-sweep.sh reads the developer's
-# real chrome-devtools-axi state root by default, so without this any browser
-# session of their own left idle past the window would print a BROWSER_SWEEP
-# line into every suite that asserts bootstrap silence - a failure caused by the
-# host, not the change under test. Pointed at a path that cannot exist; the
-# sweep's own suite sets its fixture root explicitly.
-export FM_BROWSER_SWEEP_ROOT=/nonexistent/fm-test-no-browser-state
-
-# The same hermeticity for the other reader of that state root:
-# bin/fm-browser-session-lib.sh checks whether a task's session still has a live
-# bridge before bin/fm-teardown.sh stops it. Without this a teardown case would
-# consult the developer's own browser state, so whether the case reached the
-# stop would depend on which sessions they happen to have open. Suites that
-# exercise the stop point this at their own fixture root.
+# Hermetic browser state, for both readers of it at once. Left alone, the sweep
+# (bin/fm-browser-sweep.sh) reads the developer's real chrome-devtools-axi root,
+# so a browser session of their own left idle past the window would print a
+# BROWSER_SWEEP line into every suite that asserts bootstrap silence, and
+# bin/fm-teardown.sh would decide from that same real state whether a task's
+# stop is worth invoking. Both go through bin/fm-browser-session-lib.sh, which
+# owns where that state lives, so this one variable moves both; a suite that
+# needs a real fixture root sets it there. Pointed at a path that cannot exist.
 export FM_BROWSER_SESSION_ROOT=/nonexistent/fm-test-no-browser-state
 
 # Resolve the repo root from this library's own location. Consumed by sourcing

@@ -69,6 +69,18 @@
 # browser. A home is never allowed to leave the answer silently, which is the
 # same property bin/fm-fleet-work-index.sh maintains on its own side.
 #
+# RUN THIS FROM THE FLEET ROOT. The index walks strictly downward from the home
+# it is run in, through that home's data/secondmates.md and onward; it has no
+# parent pointer, so run from a secondmate home it returns that home's own
+# subtree and reports it as a COMPLETE answer. Nothing in the output can mark
+# that gap, because from down there the rest of the fleet is not visible to be
+# missed. A sweep run from a secondmate home therefore knows nothing about the
+# primary's open work while reading the same host-global bridge state, and would
+# report a live sibling worker's browser as an orphan. bin/fm-bootstrap.sh runs
+# this in the main home only for exactly that reason, and the main home's run
+# covers the whole host on every home's behalf. This is a caveat on where a
+# manual run is meaningful, not a refusal: the script stays runnable anywhere.
+#
 # Scope limit, narrowed but not gone: the index knows a task by its backlog row,
 # so a session pinned to work that another home tracks only in state/<id>.meta,
 # with no open row anywhere, is still reported. The lines are advisory, and the
@@ -124,9 +136,31 @@ die() {
   exit 1
 }
 
+SCRIPT_DIR="$(cd "$(dirname "$SELF")" && pwd)"
+
+# Portable mtime has one owner in this repo; a second copy would drift.
+# shellcheck source=bin/fm-supervision-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-supervision-lib.sh"
+# The task-id-to-session-name derivation has one owner too: bin/fm-brief.sh
+# writes the name, bin/fm-teardown.sh stops it, and this derives it back for
+# every open task in the fleet. A second copy would drift into names that never
+# match, which here means reporting a live worker's browser. That same library
+# owns where chrome-devtools-axi keeps its state, which is why it is sourced
+# before the default below rather than after the argument parsing.
+# shellcheck source=bin/fm-browser-session-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-browser-session-lib.sh"
+
+FLEET_INDEX_CMD="$SCRIPT_DIR/fm-fleet-work-index.sh"
+
 AGE_HOURS=${FM_BROWSER_SWEEP_AGE_HOURS:-12}
 AGE_MINUTES_OPT=${FM_BROWSER_SWEEP_AGE_MINUTES:-}
-ROOT_DIR=${FM_BROWSER_SWEEP_ROOT:-${HOME:-}/.chrome-devtools-axi}
+# The state root has ONE owner, and it is the library above - the same one
+# bin/fm-teardown.sh reads through fm_browser_session_has_live_bridge. A second
+# independent default here is how a caller redirects this sweep and still leaves
+# teardown reading the real ~/.chrome-devtools-axi. FM_BROWSER_SWEEP_ROOT stays
+# as the sweep's own documented override, but redirecting the library's variable
+# alone is enough to move both readers together.
+ROOT_DIR=${FM_BROWSER_SWEEP_ROOT:-$(fm_browser_session_root)}
 PROTECT_HOMES=${FM_BROWSER_SWEEP_HOMES:-}
 FLEET_INDEX_TIMEOUT=${FM_BROWSER_SWEEP_INDEX_TIMEOUT:-20}
 VERBOSE=0
@@ -164,20 +198,6 @@ fi
 case "$FLEET_INDEX_TIMEOUT" in
   ''|*[!0-9]*) die "FM_BROWSER_SWEEP_INDEX_TIMEOUT must be a whole number of seconds" ;;
 esac
-
-SCRIPT_DIR="$(cd "$(dirname "$SELF")" && pwd)"
-
-# Portable mtime has one owner in this repo; a second copy would drift.
-# shellcheck source=bin/fm-supervision-lib.sh disable=SC1091
-. "$SCRIPT_DIR/fm-supervision-lib.sh"
-# The task-id-to-session-name derivation has one owner too: bin/fm-brief.sh
-# writes the name, bin/fm-teardown.sh stops it, and this derives it back for
-# every open task in the fleet. A second copy would drift into names that never
-# match, which here means reporting a live worker's browser.
-# shellcheck source=bin/fm-browser-session-lib.sh disable=SC1091
-. "$SCRIPT_DIR/fm-browser-session-lib.sh"
-
-FLEET_INDEX_CMD="$SCRIPT_DIR/fm-fleet-work-index.sh"
 
 report() {
   printf '%s\n' "$1"

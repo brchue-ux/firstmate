@@ -262,6 +262,15 @@ tmp_usage_check() {
   echo "TMP_USAGE: $out"
 }
 
+# Whether this home carries a secondmate marker at all. Deliberately broader
+# than fm_root_is_secondmate_home's validity test, because every caller here
+# GATES primary-only behavior on it: a marker that is a symlink, empty, or
+# malformed must still keep a secondmate home out of the primary's role rather
+# than promoting it on a technicality.
+home_is_secondmate() {
+  [ -e "$FM_HOME/.fm-secondmate-home" ] || [ -L "$FM_HOME/.fm-secondmate-home" ]
+}
+
 browser_sweep() {
   # The chrome-devtools-axi bridge detaches itself from the pane that started
   # it, so no teardown, worktree return, or process-group kill can reach it;
@@ -1081,7 +1090,7 @@ startup_memory_budget_setup() {
   # Primary bootstrap owns default publication. A secondmate is deliberately
   # passive here because its setting must converge from the primary through the
   # inherited-local-material contract rather than becoming a local authority.
-  if [ -e "$FM_HOME/.fm-secondmate-home" ] || [ -L "$FM_HOME/.fm-secondmate-home" ]; then
+  if home_is_secondmate; then
     return 0
   fi
   if ! fm_startup_memory_budget_materialize "$CONFIG"; then
@@ -1120,8 +1129,14 @@ fi
 # the lock: it only measures.
 tmp_usage_check
 # Same class of shared-host pressure, same read-only contract: report browser
-# bridges no task is using any more.
-browser_sweep
+# bridges no task is using any more. Main home only: the sweep's cross-home work
+# index walks strictly downward from the home running it, so only the fleet root
+# can answer "is any task in the fleet still using this bridge?" - the question
+# the sweep must answer before it reports anything. A secondmate would get a
+# confident answer about its own subtree alone and flag the primary's live
+# workers, and the browser state is host-global, so the main home's sweep
+# already covers every home's bridges on their behalf.
+home_is_secondmate || browser_sweep
 
 if [ "$BACKEND_VALID" -eq 0 ]; then
   echo "BACKEND_INVALID: $BACKEND (known: $FM_BACKEND_KNOWN)"
