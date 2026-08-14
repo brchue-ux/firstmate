@@ -29,10 +29,13 @@
 #   callers must surface it instead of silently retrying another backend.
 #   Secondmate homes and disposable task worktrees come from the SAME treehouse
 #   pool, kept apart only by the home's durable lease, so a ship or scout spawn
-#   guards that boundary twice through bin/fm-leased-home-lib.sh. Before
-#   acquiring, it refuses when any registered home in this pool has lost its
-#   lease, which is the state in which an ordinary `treehouse get` can be handed
-#   a home; pool state that cannot be read warns and does not block. After
+#   guards that boundary twice through bin/fm-leased-home-lib.sh. Before the
+#   backend endpoint is created at all, it refuses when any registered home in
+#   this pool has lost its lease, which is the state in which an ordinary
+#   `treehouse get` can be handed a home; raising that refusal any later would
+#   leak the window or tab the backend had already opened, since
+#   spawn_abort_cleanup closes only orca endpoints. Pool state that cannot be
+#   read warns and does not block. After
 #   acquiring, validate_spawn_worktree refuses any worktree that is a secondmate
 #   home, before the agent launches and takes that home's session lock.
 #   bin/fm-leased-home-audit.sh reports which homes are currently unprotected.
@@ -1023,6 +1026,14 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
   esac
 }
 
+# Runs before the backend endpoint exists: spawn_abort_cleanup only tears down
+# orca worktrees and locks, so a refusal raised after the case block below would
+# leave an orphan window, tab, or task behind on every attempt. The check needs
+# nothing the backend creates.
+if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+  assert_pool_has_no_unprotected_home "$PROJ"
+fi
+
 W="fm-$ID"
 case "$BACKEND" in
   tmux)
@@ -1323,7 +1334,6 @@ kimi_spawn_fail() {  # <detail>
 }
 
 if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
-  assert_pool_has_no_unprotected_home "$PROJ"
   spawn_send_text_line "$WT_TARGET" 'treehouse get'
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.

@@ -974,7 +974,15 @@ families_for_changed_path() {
     bin/fm-gate-refuse*|bin/fm-lock*)
       printf '%s\n' session-bootstrap
       ;;
-    bin/fm-pr-*|bin/fm-merge-local.sh|bin/fm-teardown.sh|bin/fm-review-diff.sh|\
+    bin/fm-teardown.sh)
+      printf '%s\n' pr-forge
+      # Teardown owns the most consequential layer of the secondmate-home guard:
+      # its treehouse return is what releases another agent's durable lease. The
+      # bin/* basename fallback would only reach fm-teardown*.test.sh, so select
+      # the guard suite by name.
+      printf '%s\n' "__script__:fm-leased-home.test.sh"
+      ;;
+    bin/fm-pr-*|bin/fm-merge-local.sh|bin/fm-review-diff.sh|\
     bin/fm-x-*|bin/fm-check*)
       printf '%s\n' pr-forge
       ;;

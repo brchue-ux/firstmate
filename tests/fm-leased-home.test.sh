@@ -16,6 +16,12 @@
 #   (c) --force does not bypass the home guard                    -> REFUSE, no return
 #   (d) teardown of an ordinary task worktree                     -> ALLOW  (no regression)
 #   (e) a secondmate retiring its own home                        -> ALLOW  (no regression)
+#
+# Spawn guards the same boundary from the other side, in two layers:
+#   (t) a pool holding a registered home that lost its lease  -> REFUSE, no window
+#   (u) pool state that cannot be read at all                 -> WARN, spawn proceeds
+#   (v) an acquired worktree that carries a home marker       -> REFUSE before launch
+#
 #   (f) audit: home leased to its own id                          -> OK, exit 0
 #   (g) audit: home in the live pool but unleased                 -> LOST_LEASE, exit 1
 #   (h) audit: home leased to a different id                      -> HOLDER_MISMATCH, exit 1
@@ -148,8 +154,16 @@ pass "fm-teardown.sh: refuses a task worktree registered as a secondmate home"
 
 # (c) --force skips the dirty and landed-work checks but must not skip this one:
 # the home belongs to another agent, so there is no work here to discard.
+# --force is also the path that reaches the branch deletion and the turn-end hook
+# removal, both of which run ahead of the treehouse return: a guard that refused
+# only at the return would still have silenced this secondmate's turn-end wakes
+# and dropped its branch first, so the refusal has to leave all of that intact.
 case_dir=$(make_teardown_case forced-home dictate)
 mark_secondmate_home "$case_dir/wt"
+mkdir -p "$case_dir/wt/.claude" "$case_dir/wt/.opencode/plugins"
+printf '{"hooks":{"Stop":[]}}\n' > "$case_dir/wt/.claude/settings.local.json"
+printf 'export const FmTurnEnd = {}\n' > "$case_dir/wt/.opencode/plugins/fm-turn-end.js"
+printf 'token=dictate.grok-turnend-token\n' > "$case_dir/wt/.fm-grok-turnend"
 fm_write_meta "$case_dir/state/task-x1.meta" \
   "window=firstmate:fm-task-x1" "endpoint_task_id=task-x1" \
   "worktree=$case_dir/wt" "project=$case_dir/project" \
@@ -159,6 +173,12 @@ expect_code 1 "$rc" "forced-home teardown"
 assert_contains "$out" "REFUSED" "--force still refuses a secondmate home"
 assert_no_return_ran "$case_dir" "forced-home"
 assert_present "$case_dir/wt/.fm-secondmate-home" "forced-home: the home marker survived"
+for f in .claude/settings.local.json .opencode/plugins/fm-turn-end.js .fm-grok-turnend; do
+  assert_present "$case_dir/wt/$f" \
+    "forced-home: the home's $f was removed before the refusal printed"
+done
+[ "$(git -C "$case_dir/wt" rev-parse --abbrev-ref HEAD 2>/dev/null)" = fm/task-x1 ] \
+  || fail "forced-home: the home's branch was detached or deleted before the refusal printed"
 pass "fm-teardown.sh: --force does not bypass the secondmate-home guard"
 
 # (d) An ordinary task worktree is untouched by the guard.
@@ -184,6 +204,139 @@ out=$(run_teardown "$case_dir" dictate --force 2>&1); rc=$?
 expect_code 0 "$rc" "self-retire teardown"$'\n'"--- output ---"$'\n'"$out"
 assert_not_contains "$out" "REFUSED" "a secondmate retiring its own home is not refused"
 pass "fm-teardown.sh: a secondmate can still retire its own home"
+
+# --- spawn refusal cases ----------------------------------------------------
+
+SPAWN="$ROOT/bin/fm-spawn.sh"
+
+# A home, a project, and one pool-shaped worktree cut from it, plus a tmux stub
+# that LOGS every call. The log is what separates the two spawn layers: the
+# pre-allocation gate must refuse with no `new-window` in it at all, while the
+# post-allocation refusal happens after the window exists.
+make_spawn_case() {  # <name> <task-id>
+  local name=$1 id=$2 case_dir fakebin
+  case_dir="$TMP_ROOT/$name"
+  fakebin="$case_dir/fakebin"
+  mkdir -p "$case_dir/home/data/$id" "$case_dir/home/projects" "$case_dir/home/state" \
+    "$case_dir/home/config" "$fakebin" "$case_dir/.treehouse/pool-a/1"
+  printf 'codex\n' > "$case_dir/home/config/crew-harness"
+  printf 'brief for %s\n' "$id" > "$case_dir/home/data/$id/brief.md"
+  touch "$case_dir/home/state/.last-watcher-beat"
+  fm_git_init_commit "$case_dir/project"
+  git -C "$case_dir/project" worktree add -q --detach "$case_dir/.treehouse/pool-a/1/project"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf '%s\n' "$*" >> "${FM_TMUX_LOG:-/dev/null}"
+case "$*" in
+  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+esac
+case "${1:-}" in
+  display-message) printf 'firstmate\n'; exit 0 ;;
+  list-windows) exit 0 ;;
+  has-session|new-session|new-window|kill-window) exit 0 ;;
+  send-keys) exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  fm_fake_exit0 "$fakebin" sleep gh-axi gh
+  : > "$case_dir/tmux.log"
+  printf '%s\n' "$case_dir"
+}
+
+# Stand in for `treehouse status --json`. With no entries the pool reads clean;
+# with `fail` the command errors, which is the "pool state cannot be read" case.
+fake_spawn_treehouse() {  # <case-dir> <fail|entry-json>
+  local case_dir=$1 body=$2
+  if [ "$body" = fail ]; then
+    cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = status ] && exit 1
+exit 0
+SH
+  else
+    cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = status ]; then
+  printf '%s\n' '[$body]'
+  exit 0
+fi
+exit 0
+SH
+  fi
+  chmod +x "$case_dir/fakebin/treehouse"
+}
+
+run_spawn() {  # <case-dir> <task-id> <settled-pane-path>
+  local case_dir=$1 id=$2 pane=$3
+  FM_ROOT_OVERRIDE='' FM_HOME="$case_dir/home" \
+  FM_STATE_OVERRIDE="$case_dir/home/state" FM_DATA_OVERRIDE="$case_dir/home/data" \
+  FM_PROJECTS_OVERRIDE="$case_dir/home/projects" FM_CONFIG_OVERRIDE="$case_dir/home/config" \
+  FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
+  FM_FAKE_PANE_PATH="$pane" FM_TMUX_LOG="$case_dir/tmux.log" \
+  PATH="$case_dir/fakebin:$PATH" \
+    "$SPAWN" "$id" "$case_dir/project" 2>&1
+}
+
+# (t) A pool that currently holds an unleased registered home can hand that home
+# to the next ordinary acquisition, so the whole spawn is refused - and refused
+# before any endpoint exists, since nothing here would close an orphan window.
+if command -v jq >/dev/null 2>&1; then
+  case_dir=$(make_spawn_case spawn-pool-unleased pool-gate-task)
+  home="$case_dir/.treehouse/pool-a/1/project"
+  fake_spawn_treehouse "$case_dir" \
+    "{\"name\":\"1\",\"path\":\"$home\",\"status\":\"in-use\",\"lease_holder\":\"\"}"
+  register_secondmate "$case_dir/home/data/secondmates.md" dictate "$home"
+  out=$(run_spawn "$case_dir" pool-gate-task "$home"); rc=$?
+  expect_code 1 "$rc" "spawn into a pool holding an unleased home"
+  assert_contains "$out" "REFUSED" "the pool gate refuses the spawn"
+  assert_contains "$out" "dictate" "the refusal names the secondmate whose home is exposed"
+  assert_no_grep "new-window" "$case_dir/tmux.log" \
+    "spawn-pool-unleased: a window was created before the refusal"
+  assert_absent "$case_dir/home/state/pool-gate-task.meta" \
+    "spawn-pool-unleased: a task record survived the refusal"
+  pass "fm-spawn.sh: refuses to allocate from a pool holding an unleased secondmate home"
+else
+  pass "fm-spawn.sh: pool-lease gate case skipped (jq not installed)"
+fi
+
+# (u) Pool state that cannot be read is unknown, not safe - but it must not be
+# fatal either: the unconditional guarantees are the teardown guard and the
+# post-allocation assertion, so a missing or broken optional tool only warns.
+case_dir=$(make_spawn_case spawn-pool-unreadable warn-task)
+fake_spawn_treehouse "$case_dir" fail
+# A registered home elsewhere in the same pool: whether it still holds its lease
+# is exactly what the unreadable pool state hides.
+register_secondmate "$case_dir/home/data/secondmates.md" dictate \
+  "$case_dir/.treehouse/pool-a/2/project"
+out=$(run_spawn "$case_dir" warn-task "$case_dir/.treehouse/pool-a/1/project"); rc=$?
+expect_code 0 "$rc" "spawn with unreadable pool state"$'\n'"--- output ---"$'\n'"$out"
+assert_contains "$out" "warning" "unreadable pool state is reported"
+assert_contains "$out" "skipping the secondmate-home lease check" \
+  "the warning says which check was skipped"
+assert_not_contains "$out" "REFUSED" "unreadable pool state must not block the spawn"
+assert_present "$case_dir/home/state/warn-task.meta" \
+  "spawn-pool-unreadable: the spawn did not complete"
+pass "fm-spawn.sh: unreadable pool state warns and does not block a spawn"
+
+# (v) The post-allocation half: whatever the pool reported, a worktree that turns
+# out to be a marked home is refused before the agent launches into it and takes
+# that home's session lock.
+case_dir=$(make_spawn_case spawn-acquired-home marker-task)
+home="$case_dir/.treehouse/pool-a/1/project"
+printf '%s\n' dictate > "$home/.fm-secondmate-home"
+fake_spawn_treehouse "$case_dir" ""
+out=$(run_spawn "$case_dir" marker-task "$home"); rc=$?
+expect_code 1 "$rc" "spawn handed a marked secondmate home"
+assert_contains "$out" "REFUSED" "the acquired home is refused"
+assert_contains "$out" "dictate" "the refusal names the secondmate whose home was acquired"
+assert_absent "$case_dir/home/state/marker-task.meta" \
+  "spawn-acquired-home: a task record survived the refusal"
+assert_grep "new-window" "$case_dir/tmux.log" \
+  "spawn-acquired-home: expected this layer to refuse AFTER the window exists, unlike the pool gate"
+assert_present "$home/.fm-secondmate-home" "spawn-acquired-home: the home marker survived"
+pass "fm-spawn.sh: refuses a worktree that is a secondmate home before launching into it"
 
 # --- endpoint-collision cases -----------------------------------------------
 

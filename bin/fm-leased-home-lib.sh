@@ -47,12 +47,16 @@ fm_leased_home_abs() {  # <path>
 
 # Print the secondmate id recorded by a directory's own home marker.
 # A symlinked, empty, or syntactically invalid marker is not an identity.
+# A marker whose last line has no trailing newline still identifies the home:
+# `read` reports failure at EOF even though it filled the variable, and every
+# pre-existing reader of this marker uses `cat`, so a stricter read here would
+# make the safety predicate fail OPEN on a hand-written marker.
 fm_leased_home_marker_id() {  # <dir>
   local dir=$1 marker id
   marker="$dir/$FM_LEASED_HOME_MARKER"
   [ -L "$marker" ] && return 1
   [ -f "$marker" ] || return 1
-  IFS= read -r id < "$marker" 2>/dev/null || return 1
+  IFS= read -r id < "$marker" 2>/dev/null || [ -n "$id" ] || return 1
   id=${id//[[:space:]]/}
   [ -n "$id" ] || return 1
   case "$id" in
@@ -64,10 +68,28 @@ fm_leased_home_marker_id() {  # <dir>
 # Print "<id><TAB><home>" for every registered secondmate in a registry file.
 # The `(home: <path>;` field is matched anywhere on the line, so a charter
 # description carrying its own parentheses cannot hide the home path.
+# awk, not sed: `\t` in a sed replacement is a GNU extension that BSD/macOS sed
+# emits as a literal "t", which would collapse both fields into one and silently
+# make every consumer of this list - the registry half of the ownership guard,
+# the spawn gate, and the whole audit - see no registered homes at all.
+# An entry with an empty home path is dropped rather than emitted, so a reader
+# can never be handed a record whose path field is missing.
 fm_leased_home_registry_entries() {  # <registry>
   local registry=$1
   [ -f "$registry" ] || return 0
-  sed -n 's/^- \([A-Za-z0-9._-][A-Za-z0-9._-]*\) .*(home: \([^;)]*\);.*/\1\t\2/p' "$registry"
+  awk '
+    /^- [A-Za-z0-9._-]+[ \t]/ {
+      id = substr($0, 3)
+      sub(/[ \t].*$/, "", id)
+      if (match($0, /\(home:[ \t]*[^;)]+;/) == 0) next
+      home = substr($0, RSTART, RLENGTH)
+      sub(/^\(home:[ \t]*/, "", home)
+      sub(/;$/, "", home)
+      sub(/[ \t]+$/, "", home)
+      if (home == "") next
+      printf "%s\t%s\n", id, home
+    }
+  ' "$registry"
 }
 
 # Identify <path> as a secondmate home. Prints the owning secondmate id and

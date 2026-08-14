@@ -53,9 +53,12 @@
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
 #
-# Foreign-home refusal: every treehouse return here first passes through
-# bin/fm-leased-home-lib.sh's ownership guard, because `treehouse return`
-# releases a durable lease for any caller that does not pass a lease
+# Foreign-home refusal: an ordinary task's recorded worktree= is checked against
+# bin/fm-leased-home-lib.sh's ownership guard before ANY command touches that
+# path - ahead of the stale-lock cleanup, the branch deletion, and the turn-end
+# hook removal, not only ahead of the treehouse return - and every treehouse
+# return passes through the same guard again as a backstop, because `treehouse
+# return` releases a durable lease for any caller that does not pass a lease
 # precondition. A recorded worktree= can name a pool slot that was reallocated
 # and then leased as a secondmate home, so teardown refuses when its target is a
 # secondmate home that this task does not own - identified by the home's own
@@ -159,6 +162,18 @@ KIND=$(grep '^kind=' "$META" | cut -d= -f2- || true)
 [ -n "$KIND" ] || KIND=ship
 MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 [ -n "$MODE" ] || MODE=no-mistakes
+
+# A recorded worktree= can name a pool slot that was later leased as a secondmate
+# home. Refuse here, before the first command that touches that path at all - the
+# stale-lock cleanup, the branch deletion, and the removal of the turn-end hook
+# artifacts all run ahead of the treehouse return, so a guard placed only at the
+# return would refuse after the home had already lost its hooks. An ordinary task
+# owns no home, hence the empty owner id; a kind=secondmate teardown targets its
+# OWN home and is guarded by id inside teardown_treehouse_return instead.
+# --force does not reach this: it authorizes discarding THIS task's work only.
+if [ "$KIND" != secondmate ]; then
+  fm_leased_home_guard "$WT" "" "teardown of task $ID" "$SECONDMATE_REG" || exit 1
+fi
 
 default_branch() {
   local ref branch
@@ -615,8 +630,11 @@ teardown_treehouse_return() {
 
   # `treehouse return` releases a durable lease for any caller, so a stale or
   # mistaken path that now names a live secondmate home would kill that
-  # secondmate's processes and hand its home back to the pool. Refuse before the
-  # first destructive command; see bin/fm-leased-home-lib.sh.
+  # secondmate's processes and hand its home back to the pool. The ordinary-task
+  # path is already refused near the top of the script, before anything touches
+  # the target; this is the backstop that covers every other caller of this
+  # function - the child-worktree path and home retirement. See
+  # bin/fm-leased-home-lib.sh.
   fm_leased_home_guard "$dir" "$owner_id" "teardown of $label" "$SECONDMATE_REG" || return 1
 
   # Capture stdout+stderr so non-lock failures stay visible and lock failures can
