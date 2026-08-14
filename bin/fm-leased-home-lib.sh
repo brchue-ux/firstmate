@@ -189,8 +189,16 @@ fm_leased_home_is_linked_worktree() {  # <dir>
 # consulted at all - no jq, or no state file to read. A caller must keep those
 # two apart: "untracked" is a definite claim about pool state, so making it on
 # the strength of a missing optional tool is a false alarm on every home.
+#
+# jq's own status is mapped rather than returned verbatim, because it does not
+# split the same way: `-e` reports 4 when the filter produced no output (a valid
+# state file that simply does not list this home - a real answer) and 1 when the
+# last output was null or false, but a runtime error exits 5, and a state file
+# caught mid-write or carrying no .worktrees key errors exactly that way. Passing
+# 5 through as "no record" would let a file this function never managed to read
+# be reported as a definite untracked slot.
 fm_leased_home_pool_state_record() {  # <home>
-  local home=$1 abs pool_dir state
+  local home=$1 abs pool_dir state rc=0
   command -v jq >/dev/null 2>&1 || return 2
   abs=$(fm_leased_home_abs "$home") || return 2
   pool_dir=$(dirname "$(dirname "$abs")")
@@ -201,7 +209,12 @@ fm_leased_home_pool_state_record() {  # <home>
     | [(if (.leased // false) then "leased" else "unleased" end),
        (if (.lease_holder // "") == "" then "-" else .lease_holder end)]
     | @tsv
-  ' "$state" 2>/dev/null
+  ' "$state" 2>/dev/null || rc=$?
+  case "$rc" in
+    0) return 0 ;;
+    1|4) return 1 ;;
+    *) return 2 ;;
+  esac
 }
 
 # Print "<id><TAB><home>" for every registered secondmate home that sits in the

@@ -26,6 +26,14 @@
 #   (B) a record naming an ordinary worktree    -> REFUSE
 #   (C) a secondmate's record naming its own home -> REFUSE
 #
+# Clearing a record is not just unlinking state/<id>.*: two of those records are
+# pointers into files that outlive them, and this command is the only remaining
+# owner of a collided id, so its cleanup has to match teardown's rather than
+# approximate it (bin/fm-task-record-lib.sh owns both):
+#   (G) a grok/kimi token record       -> its authorization file goes too
+#   (H) an unsafe PR-check artifact    -> REFUSE, whole record preserved
+#   (I) quarantined PR-check artifacts -> swept with the record
+#
 # Spawn guards the same boundary from the other side, in two layers:
 #   (t) a pool holding a registered home that lost its lease  -> REFUSE, no window
 #   (w) a pool whose registered home is still leased to it    -> ALLOW  (no regression)
@@ -64,6 +72,7 @@
 # And the audit that every one of those refusals names as the diagnostic must not
 # answer with a false alarm when it cannot read pool state at all:
 #   (F) neither the live listing nor the pool's own records answered -> UNKNOWN
+#   (J) a pool state file that errors mid-read rather than not matching -> UNKNOWN
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -368,6 +377,94 @@ expect_code 1 "$rc" "clear-own-home run"
 assert_contains "$out" "REFUSED" "a secondmate's own home record is refused"
 assert_present "$case_dir/state/dictate.meta" "clear-own-home: a live home record was deleted"
 pass "fm-collided-record-clear.sh: refuses a secondmate's record for its own home"
+
+# (G) The grok and kimi turn-end tokens are pointers into an authorization file
+# under the harness's global hooks dir, and the token string exists ONLY in the
+# record. Unlinking the record without the file it names would strand an
+# authorization that still permits a turn-end touch for a dead task id, with
+# nothing left anywhere able to find that file again. The pointer inside the
+# foreign home is deliberately left alone - that home is off limits - which is
+# precisely why the authorization has to go.
+case_dir=$(make_teardown_case clear-turnend-auth dictate)
+mark_secondmate_home "$case_dir/wt"
+fake_home="$case_dir/fakehome"
+grok_auth="$fake_home/.grok/hooks/fm-turn-end.d"
+kimi_auth="$fake_home/.kimi-code/fm-turn-end.d"
+mkdir -p "$grok_auth" "$kimi_auth"
+printf '%s\n' "$case_dir/state/task-x1.turn-ended" > "$grok_auth/fm.aaaabbbbcccc"
+printf '%s\n' "$case_dir/state/task-x1.turn-ended" > "$kimi_auth/fm.ddddeeeeffff"
+printf 'fm.aaaabbbbcccc\n' > "$case_dir/state/task-x1.grok-turnend-token"
+printf 'fm.ddddeeeeffff\n' > "$case_dir/state/task-x1.kimi-turnend-token"
+printf 'token=fm.aaaabbbbcccc\n' > "$case_dir/wt/.fm-grok-turnend"
+fm_write_meta "$case_dir/state/task-x1.meta" \
+  "window=firstmate:fm-task-x1" "endpoint_task_id=task-x1" \
+  "worktree=$case_dir/wt" "project=$case_dir/project" \
+  "harness=grok" "kind=ship" "yolo=off"
+out=$(FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_DATA_OVERRIDE="$case_dir/data" FM_CONFIG_OVERRIDE="$case_dir/config" \
+  HOME="$fake_home" GROK_HOME="$fake_home/.grok" \
+  PATH="$case_dir/fakebin:$PATH" "$CLEAR" task-x1 2>&1); rc=$?
+expect_code 0 "$rc" "clear-turnend-auth run"$'\n'"--- output ---"$'\n'"$out"
+assert_absent "$grok_auth/fm.aaaabbbbcccc" \
+  "clear-turnend-auth: the grok turn-end authorization outlived the token record"
+assert_absent "$kimi_auth/fm.ddddeeeeffff" \
+  "clear-turnend-auth: the kimi turn-end authorization outlived the token record"
+assert_absent "$case_dir/state/task-x1.grok-turnend-token" \
+  "clear-turnend-auth: the grok token record survived"
+assert_present "$case_dir/wt/.fm-grok-turnend" \
+  "clear-turnend-auth: the foreign home's hook pointer was touched"
+pass "fm-collided-record-clear.sh: removes the turn-end authorization its token record named"
+
+# (H) The PR-check artifacts have one hardened removal protocol in this repo, and
+# an artifact that is a symlink is refused rather than force-removed. Because the
+# refusal preserves task state, it has to be raised before anything at all is
+# unlinked - a partial clear would leave a record nothing can finish retiring.
+case_dir=$(make_teardown_case clear-unsafe-pr-artifact dictate)
+mark_secondmate_home "$case_dir/wt"
+fm_write_meta "$case_dir/state/task-x1.meta" \
+  "window=firstmate:fm-task-x1" "endpoint_task_id=task-x1" \
+  "worktree=$case_dir/wt" "project=$case_dir/project" \
+  "harness=echo" "kind=ship" "yolo=off"
+: > "$case_dir/state/task-x1.status"
+: > "$case_dir/elsewhere-pr-poll"
+ln -s "$case_dir/elsewhere-pr-poll" "$case_dir/state/task-x1.pr-poll"
+out=$(run_clear "$case_dir" task-x1 2>&1); rc=$?
+expect_code 1 "$rc" "clear-unsafe-pr-artifact run"
+assert_contains "$out" "REFUSED" "an unsafe PR-check artifact is refused"
+assert_contains "$out" "preserving task state" "the refusal says the record is preserved"
+for suffix in meta status pr-poll; do
+  assert_present "$case_dir/state/task-x1.$suffix" \
+    "clear-unsafe-pr-artifact: $suffix was removed despite the refusal"
+done
+assert_present "$case_dir/elsewhere-pr-poll" \
+  "clear-unsafe-pr-artifact: the symlink target outside state/ was followed and removed"
+pass "fm-collided-record-clear.sh: refuses an unsafe PR-check artifact and preserves the record"
+
+# (I) A clean PR-check artifact set goes through the same protocol, quarantine
+# included: teardown now refuses a collided record outright, so anything this
+# command leaves behind has no other owner left to remove it.
+case_dir=$(make_teardown_case clear-pr-artifacts dictate)
+mark_secondmate_home "$case_dir/wt"
+fm_write_meta "$case_dir/state/task-x1.meta" \
+  "window=firstmate:fm-task-x1" "endpoint_task_id=task-x1" \
+  "worktree=$case_dir/wt" "project=$case_dir/project" \
+  "harness=echo" "kind=ship" "yolo=off"
+printf 'check\n' > "$case_dir/state/task-x1.check.sh"
+printf 'poll\n' > "$case_dir/state/task-x1.pr-poll"
+quarantine="$case_dir/state/.pr-check-quarantine"
+mkdir -p "$quarantine"
+chmod 700 "$quarantine"
+printf 'quarantined\n' > "$quarantine/task-x1.diagnostic"
+chmod 600 "$quarantine/task-x1.diagnostic"
+out=$(run_clear "$case_dir" task-x1 2>&1); rc=$?
+expect_code 0 "$rc" "clear-pr-artifacts run"$'\n'"--- output ---"$'\n'"$out"
+for suffix in meta check.sh pr-poll; do
+  assert_absent "$case_dir/state/task-x1.$suffix" \
+    "clear-pr-artifacts: $suffix survived the clear"
+done
+assert_absent "$quarantine/task-x1.diagnostic" \
+  "clear-pr-artifacts: a quarantined artifact was orphaned with no owner left to remove it"
+pass "fm-collided-record-clear.sh: sweeps the PR-check artifacts and quarantine with the record"
 
 # --- spawn refusal cases ----------------------------------------------------
 
@@ -909,6 +1006,29 @@ out=$(run_audit "$case_dir" 2>&1); rc=$?
 expect_code 1 "$rc" "collision audit"
 assert_contains "$out" "COLLISION: task scout-task" "an occupied home is reported"
 pass "fm-leased-home-audit.sh: reports a task already recorded inside a home"
+
+# (J) The pool's own state file is read with jq, and jq does not report "this
+# file lists no such home" and "I could not read this file" the same way: a valid
+# file with no matching entry is a real answer, but a file caught mid-write by
+# treehouse, or one whose schema moved on, is an error. Reporting the second as
+# UNTRACKED would assert a fact about pool state the audit never read - on the
+# one diagnostic every home refusal points operators at.
+case_dir=$(make_audit_case pool-state-unreadable)
+home=$(add_pool_slot "$case_dir" pool-a 1)
+printf '%s\n' '{"schema":"moved-on"}' > "$case_dir/.treehouse/pool-a/treehouse-state.json"
+cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = status ] && exit 1
+exit 0
+SH
+chmod +x "$case_dir/fakebin/treehouse"
+register_secondmate "$case_dir/data/secondmates.md" dictate "$home"
+out=$(run_audit "$case_dir" 2>&1); rc=$?
+expect_code 1 "$rc" "pool-state-unreadable audit"
+assert_contains "$out" "UNKNOWN: dictate" "a state file that errors on read is reported as unknown"
+assert_not_contains "$out" "UNTRACKED" \
+  "an unreadable state file was reported as a definite untracked-slot claim"
+pass "fm-leased-home-audit.sh: a pool state file that errors on read is UNKNOWN, not UNTRACKED"
 
 # (l) A home seeded at an explicit path is a plain clone with no lease to lose.
 case_dir=$(make_audit_case plain-clone)

@@ -9,11 +9,21 @@
 # out - and hand-editing state/<id>.meta is the exact repair that produced the
 # original collision. This command is that way out, and nothing more.
 #
-# What it removes: this home's own state/<id>.* task records. Nothing else.
-# It never touches the home the record names - not its files, not its processes,
-# not its treehouse lease - and it never touches the backend endpoint. Closing a
-# window the cleared record used to name is the operator's call afterwards; the
-# recorded endpoint is printed so it can be found.
+# What it removes: this home's own state/<id>.* task records, plus the two
+# classes of artifact those records are pointers into - the harness turn-end
+# authorization file and the PR-check artifacts - through the same hardened
+# helpers bin/fm-teardown.sh uses, which bin/fm-task-record-lib.sh owns. That
+# sharing is the point: a token record unlinked without its authorization file
+# strands a turn-end wake for a task id that no longer exists, and this command
+# is the ONLY remaining owner of a collided record's id.
+# Nothing else. It never touches the home the record names - not its files, not
+# its processes, not its treehouse lease - and it never touches the backend
+# endpoint. Closing a window the cleared record used to name is the operator's
+# call afterwards; the recorded endpoint is printed so it can be found.
+#
+# A PR-check artifact that is a symlink, is hardlinked, or sits on a different
+# device REFUSES and preserves the whole task record, exactly as in teardown; the
+# refusal is raised before anything at all is removed.
 #
 # It refuses unless the recorded worktree= really does resolve to a secondmate
 # home that this task does not own, decided by bin/fm-leased-home-lib.sh from the
@@ -41,13 +51,15 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 SECONDMATE_REG="$DATA/secondmates.md"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-task-record-lib.sh
+. "$SCRIPT_DIR/fm-task-record-lib.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-leased-home-lib.sh
 . "$SCRIPT_DIR/fm-leased-home-lib.sh"
 
 case "${1:-}" in
-  -h|--help) sed -n '2,31p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  -h|--help) sed -n '2,41p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
 esac
 
 [ "$#" -eq 1 ] || { echo "usage: fm-collided-record-clear.sh <task-id>" >&2; exit 2; }
@@ -80,13 +92,19 @@ fi
 ENDPOINT=$(sed -n 's/^window=//p' "$META" | head -1)
 [ -n "$ENDPOINT" ] || ENDPOINT=$(sed -n 's/^terminal=//p' "$META" | head -1)
 
-# Every removal below is confined to this home's own state/ directory, and the
-# suffix set is the one bin/fm-teardown.sh removes for a task it retires
-# normally. Enumerated rather than globbed on "$ID."*: a task id may contain a
-# dot, so a glob could reach a differently-named task's records.
+# Every removal below is confined to this home's own state/ directory and to the
+# firstmate-owned files its records point at, in the order
+# bin/fm-task-record-lib.sh's contract requires: the refusing PR-check protocol
+# first, so its refusal leaves the whole record intact, then the turn-end
+# authorizations while the tokens naming them still exist, then the records.
+remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
+remove_grok_turnend_auth "$STATE" "$ID"
+remove_kimi_turnend_auth "$STATE" "$ID"
+
+# Enumerated rather than globbed on "$ID."*: a task id may contain a dot, so a
+# glob could reach a differently-named task's records.
 for suffix in status turn-ended meta pi-ext.ts grok-turnend-token \
-  kimi-turnend-token herdr-presentation check.sh pr-poll pr-poll-registration \
-  pr-poll-retirement check-trust; do
+  kimi-turnend-token herdr-presentation; do
   record="$STATE/$ID.$suffix"
   { [ -e "$record" ] || [ -L "$record" ]; } || continue
   rm -f -- "$record"
