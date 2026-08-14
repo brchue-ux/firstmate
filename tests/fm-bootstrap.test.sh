@@ -372,7 +372,11 @@ test_no_mistakes_staleness_is_reported_beyond_the_floor() {
     mkdir -p "$case_dir/home/config"
     printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
     fakebin=$(make_fake_toolchain "$case_dir")
-    add_tasks_axi "$fakebin" "0.1.1"
+    # At the current tasks-axi floor on purpose: these rows assert bootstrap's
+    # exact output for the no-mistakes staleness report, so any other tool left
+    # below its own floor would add a second MISSING line and fail the case for
+    # a reason it does not test.
+    add_tasks_axi "$fakebin" "0.2.4"
     out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
       FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_NO_MISTAKES_VERSION="$version" \
       FM_FAKE_NO_MISTAKES_BANNER="$banner" FM_FAKE_NO_MISTAKES_BANNER_STREAM="$stream" \

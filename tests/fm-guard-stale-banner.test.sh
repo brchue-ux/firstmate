@@ -548,7 +548,7 @@ test_autoarm_stale_episode_is_stable() {
     || fail "first auto-arm stale call did not print the full banner: $out1"
   [ "$(count_text "$out2" "WATCHER DOWN - SUPERVISION IS OFF")" -eq 0 ] \
     || fail "auto-arm stale episode re-printed the full banner instead of deduping: $out2"
-  assert_contains "$out2" "full banner already printed this episode" \
+  assert_contains "$out2" "full banner already printed at this escalation level" \
     "second auto-arm stale call did not print the concise reminder"
   pass "fm-guard stale banner: auto-arm stale episode stays one episode across calls"
 }
@@ -584,7 +584,7 @@ test_persistent_no_watcher_episode_survives_beacon_touch() {
   out2=$(run_guard_case "$dir")
   [ "$(count_text "$out2" "WATCHER DOWN - SUPERVISION IS OFF")" -eq 0 ] \
     || fail "advancing the beacon mtime with no live watcher re-printed the banner: $out2"
-  assert_contains "$out2" "full banner already printed this episode" \
+  assert_contains "$out2" "full banner already printed at this escalation level" \
     "same no-watcher episode did not print the concise reminder after a beacon touch"
   pass "fm-guard stale banner: a no-watcher episode survives a beacon mtime change"
 }

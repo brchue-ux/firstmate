@@ -697,7 +697,7 @@ test_legitimacy_preamble_and_isolation_wording() {
   home="$TMP_ROOT/legitimacy-home"
   mkdir -p "$home/data"
 
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-legit-ship-r1 firstmate \
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-legit-ship-r1 firstmate --mode no-mistakes \
     --pr-repo brchue-ux/firstmate --pr-base main >/dev/null 2>&1
   brief="$home/data/brief-legit-ship-r1/brief.md"
   assert_grep "This is your own real first message, delivered to you by firstmate through its normal internal handoff." "$brief" \
@@ -755,7 +755,7 @@ test_herdr_repo_bakes_in_fork_base_check() {
   home="$TMP_ROOT/herdr-fork-base-home"
   mkdir -p "$home/data"
 
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" herdr-ship herdr \
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" herdr-ship herdr --mode no-mistakes \
     --pr-repo brchue-ux/herdr --pr-base master >/dev/null 2>&1 \
     || fail "fm-brief.sh herdr ship scaffold exited non-zero"
   brief="$home/data/herdr-ship/brief.md"
@@ -773,7 +773,7 @@ test_herdr_repo_bakes_in_fork_base_check() {
     || fail "herdr scout brief missing the fork/master base check"
 
   # A non-herdr repo must not pick up herdr-specific base instructions.
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" other-ship some-proj \
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" other-ship some-proj --mode no-mistakes \
     --pr-repo owner/some-proj --pr-base main >/dev/null 2>&1 \
     || fail "fm-brief.sh non-herdr ship scaffold exited non-zero"
   brief="$home/data/other-ship/brief.md"
@@ -796,7 +796,7 @@ test_ship_pr_target_is_explicit() {
   # direct-PR mode: the worker runs gh-axi itself, so the command must be
   # fully explicit (this is the exact incident shape: "push your branch and
   # open a PR with `gh-axi`" with no target, which defaulted to herdrdev/herdr).
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" herdr-pr-target direct-proj \
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" herdr-pr-target direct-proj --mode direct-PR \
     --pr-repo brchue-ux/herdr --pr-base master >/dev/null 2>&1 \
     || fail "fm-brief.sh direct-PR scaffold with --pr-repo exited non-zero"
   brief="$home/data/herdr-pr-target/brief.md"
@@ -810,7 +810,7 @@ test_ship_pr_target_is_explicit() {
   # no-mistakes mode: the pipeline owns the actual push and PR, but the brief
   # must still name the explicit target for any manual gh-axi fallback
   # (this is the exact incident shape: brchue-ux/firstmate -> kunchenguid/firstmate).
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" firstmate-pr-target firstmate \
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" firstmate-pr-target firstmate --mode no-mistakes \
     --pr-repo brchue-ux/firstmate --pr-base main >/dev/null 2>&1 \
     || fail "fm-brief.sh firstmate scaffold with --pr-repo exited non-zero"
   brief="$home/data/firstmate-pr-target/brief.md"
@@ -823,13 +823,13 @@ test_ship_pr_target_is_explicit() {
 
   # Omitting --pr-repo/--pr-base must fail loudly rather than scaffold a brief
   # with a bare, mis-targetable `gh pr create`.
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" herdr-no-target herdr >/dev/null 2>&1; status=$?
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" herdr-no-target herdr --mode no-mistakes >/dev/null 2>&1; status=$?
   expect_code 1 "$status" "a ship brief that opens a PR without --pr-repo/--pr-base must fail"
   assert_absent "$home/data/herdr-no-target/brief.md" \
     "loud-failure ship brief still wrote a file"
 
   # local-only never opens a PR, so it needs no explicit target.
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" local-no-target local-proj >/dev/null 2>&1; status=$?
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" local-no-target local-proj --mode local-only >/dev/null 2>&1; status=$?
   expect_code 0 "$status" "local-only brief must not require --pr-repo/--pr-base"
 
   pass "fm-brief.sh: ship briefs that open a PR always name an explicit target repo and base branch"
