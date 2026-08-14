@@ -203,4 +203,5 @@ If `treehouse return` fails for a leased home, teardown stops with state intact 
 
 With `--force`, teardown is the explicit discard path.
 It kills child windows, discards child work and state inside the secondmate home, removes the route, releases the lease, and removes the retired secondmate home.
+It authorizes discarding THIS secondmate's work only, so it never reaches the home guard above: a child record whose `worktree=` names a different secondmate's home is skipped whole, and the retirement then fails rather than reporting success, until that record is cleared with `bin/fm-collided-record-clear.sh`.
 Never use `--force` unless the captain explicitly said to discard the work.
