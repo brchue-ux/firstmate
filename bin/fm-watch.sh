@@ -45,6 +45,11 @@
 #                          inspection only - never an automatic interrupt,
 #                          signal, or restart of the worker or its tool process.
 #   check: <script>: <out> authenticated check output, always actionable
+#   check: process-event result captured: <keys>
+#                          a durably captured process-to-event result is queued
+#                          and has not been surfaced yet; reported once per
+#                          captured generation, never again while that record
+#                          stays queued and never once it is acknowledged
 #   check: rejected unauthenticated state checks: <paths>
 #                          unsafe state checks were refused without execution
 #   check: rejected unauthenticated PR poll retirement receipts: <paths>
@@ -55,6 +60,9 @@
 #   heartbeat: reclaimed <id>[, <id>...]
 #                          the heartbeat's idle sweep actually reclaimed those
 #                          finished tasks; handled as an ordinary heartbeat
+#   check: inactive-outcome bounded poll-loop reconciliation found a suspicious
+#                          inactive terminal outcome that still lacks its durable
+#                          upstream receipt
 # Every heartbeat tick also runs bin/fm-idle-sweep.sh to reclaim finished tasks
 # that still hold a pane or worktree. Only a completed reclaim reaches this
 # reason; skips and refusals stay in the triage log. See idle_sweep_tick.
@@ -76,7 +84,10 @@ mkdir -p "$STATE"
 # The native event fast-path and only its true dependencies have one narrow
 # production owner. The Herdr event-wait smoke test consumes this same owner
 # without sourcing the entire watcher graph.
-# shellcheck source=bin/fm-push-transition-lib.sh
+# The shared transition owner is a canonical lint root itself. Stop duplicate
+# source-graph expansion here: following its backend graph from this large
+# runtime can exceed the bounded CI lint worker while adding no uncovered file.
+# shellcheck source=/dev/null
 . "$SCRIPT_DIR/fm-push-transition-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
@@ -89,9 +100,12 @@ mkdir -p "$STATE"
 # cheap when no records exist and never scrapes secondmate conversation.
 # shellcheck source=bin/fm-pending-reply-lib.sh
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
+# shellcheck source=bin/fm-busy-lib.sh
+. "$SCRIPT_DIR/fm-busy-lib.sh"
 
 WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
+WATCHER_DOWNTIME_MARKER="$STATE/.watcher-down"
 WATCHER_STALE_GRACE=${FM_WATCHER_STALE_GRACE:-${FM_GUARD_GRACE:-300}}
 # The singleton-lock acquisition, EXIT trap, and the blocking supervision loop
 # all live below the source guard at the very bottom of this file (see "Main
@@ -109,11 +123,13 @@ WATCHER_STALE_GRACE=${FM_WATCHER_STALE_GRACE:-${FM_GUARD_GRACE:-300}}
 # watcher mid-cycle. Detect the platform once and pick the right form.
 if [ "$(uname)" = Darwin ]; then
   stat_mtime() { stat -f %m "$1" 2>/dev/null; }        # epoch seconds of mtime
-  stat_sig()   { stat -f '%z:%Fm' "$1" 2>/dev/null; }   # size:mtime signature
 else
   stat_mtime() { stat -c %Y "$1" 2>/dev/null; }
-  stat_sig()   { stat -c '%s:%Y' "$1" 2>/dev/null; }
 fi
+# The size:mtime signal signature and .seen-* marker format are owned by
+# bin/fm-wake-lib.sh (fm_wake_signal_sig, fm_wake_signal_seen_path), shared
+# with the drain's annotation staleness check and this home's own bookkeeping
+# writers' guarded self-announced append.
 
 POLL=${FM_POLL:-15}                   # seconds between cycles
 HEARTBEAT=${FM_HEARTBEAT:-600}        # base seconds between heartbeat scans
@@ -123,14 +139,9 @@ CHECK_TIMEOUT=${FM_CHECK_TIMEOUT:-30}     # seconds allowed per *.check.sh
 SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trailing
                                       # signals (a status write, then the same turn's
                                       # turn-end hook) coalesce into one wake
-# Busy signatures are selected by recorded harness unless FM_BUSY_REGEX globally
-# overrides them.
-# claude/codex: "esc to interrupt"; opencode: "esc interrupt"; pi: "Working...";
-# grok: "Ctrl+c:cancel". Claude's current spinner signature is matched only for
-# a recorded Claude task because an ellipsis followed by elapsed time is not a
-# safe shared signature for arbitrary harness output. Kimi's moon-plus-middot
-# spinner signature is likewise matched only for a recorded Kimi task.
-BUSY_REGEX=${FM_BUSY_REGEX:-'esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'}
+# Busy state is decided by the semantic contract in bin/fm-busy-lib.sh, which
+# is the single owner of per-harness sources, source attribution, and the one
+# remaining rendered-text fallback (Grok only).
 # Always-on wake triage: most wakes during a long crew validation are benign (a
 # working: note or turn-end while a pipeline runs, a no-change heartbeat). Rather
 # than wake firstmate's LLM for each, this watcher classifies every wake in bash
@@ -193,29 +204,24 @@ hash_pane() {
   if command -v md5 >/dev/null 2>&1; then md5 -q; else md5sum | cut -d' ' -f1; fi
 }
 
-# window_is_busy: 0 (busy) iff the task's harness is actively working. Prefers
-# a backend's native semantic busy state (fm_backend_busy_state - herdr's
-# agent.get; herdr-addendum "busy state" row, "the first backend where
-# fm_session_busy_state gets real semantics"); when the backend reports unknown,
-# falls back to the recorded harness's verified pane-tail signature. <tail40> is
-# the same bounded capture already read for hashing, so this adds no extra
-# backend calls on the regex-fallback path.
+# window_is_busy: 0 (busy) iff the task's harness is PROVABLY working, through
+# the semantic busy-state contract (bin/fm-busy-lib.sh). Only an exact busy
+# verdict returns 0: idle, unknown, and dead all return 1, so a converted
+# adapter whose semantic state is missing, malformed, stale, or unverified is
+# treated as not-provably-working and surfaces rather than being absorbed.
+# <tail40> is the same bounded capture already read for hashing and is
+# consumed only by the Grok-scoped fallback inside the contract.
 window_is_busy() {  # <window> <tail40>
-  local w=$1 tail40=$2 bs harness lines
-  bs=$(fm_backend_busy_state "$(window_backend "$w")" "$w" 2>/dev/null)
-  case "$bs" in
-    busy) return 0 ;;
-    idle) return 1 ;;
-    *)
-      lines=$(printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -12)
-      harness=$(window_harness "$w")
-      if [ -n "${FM_BUSY_REGEX:-}" ]; then
-        printf '%s' "$lines" | grep -qiE "$BUSY_REGEX"
-      else
-        printf '%s' "$lines" | fm_busy_lines_match "$harness"
-      fi
-      ;;
-  esac
+  local w=$1 tail40=$2 task meta verdict
+  task=$(window_to_task "$w" "$STATE")
+  meta="$STATE/$task.meta"
+  if [ -n "$task" ] && [ -f "$meta" ]; then
+    verdict=$(fm_busy_classify_meta "$meta" "$task" "$STATE" "$tail40")
+  else
+    verdict=$(fm_busy_classify "$(window_backend "$w")" "$w" "$(window_harness "$w")" \
+      "${task:-unknown}" "$STATE" "$tail40")
+  fi
+  [ "${verdict%% *}" = busy ]
 }
 
 window_kind() {
@@ -536,13 +542,64 @@ scan_signals() {
   local f sig sf
   for f in "$STATE"/*.status "$STATE"/*.turn-ended; do
     [ -e "$f" ] || continue
-    sig=$(stat_sig "$f") || continue
-    sf="$STATE/.seen-$(basename "$f" | tr '.' '_')"
+    sig=$(fm_wake_signal_sig "$f") || continue
+    [ -n "$sig" ] || continue
+    sf=$(fm_wake_signal_seen_path "$STATE" "$f")
     if [ "$sig" != "$(cat "$sf" 2>/dev/null)" ]; then
       printf '%s\t%s\t%s\n' "$sf" "$sig" "$f"
     fi
   done
   return 0
+}
+
+# Deliver a durably queued process-event result to firstmate. Publication is
+# owned by bin/fm-procevent.sh - by the runner at capture time and by reconcile's
+# re-announcement - so this decides only whether a queued check record has been
+# surfaced yet, then reports it through the same actionable exit every other wake
+# uses. Without it a captured result sits on the queue until something else
+# happens to wake firstmate, which is exactly the missed delivery this repairs.
+# Dedup uses the same .seen-* discipline as scan_signals: the durable record is
+# always written before its marker, so nothing is suppressed before it is queued,
+# and re-announcement, drain-time deduplication, and the handled acknowledgement
+# keep their existing owners untouched.
+procevent_surfaced_marker() {  # <queue-key>
+  printf '%s/.seen-procevent-%s' "$STATE" "$(printf '%s' "$1" | LC_ALL=C od -An -tx1 | tr -d ' \n')"
+}
+
+procevent_surface_after_output() {
+  local output_status=$1 key marker tmp status=0
+  if [ "$output_status" -eq 0 ]; then
+    for key in $PROCEVENT_SURFACED; do
+      marker=$(procevent_surfaced_marker "$key")
+      tmp=$(umask 077; mktemp "$STATE/.seen-procevent.XXXXXX") || { status=1; continue; }
+      if ! mv -f -- "$tmp" "$marker"; then
+        rm -f -- "$tmp"
+        status=1
+      fi
+    done
+  fi
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+  return "$status"
+}
+
+procevent_surface_queued() {
+  local key reason
+  PROCEVENT_SURFACED=
+  [ -s "$FM_WAKE_QUEUE" ] || return 0
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
+  while IFS= read -r key; do
+    case "$key" in procevent:*) ;; *) continue ;; esac
+    [ -e "$(procevent_surfaced_marker "$key")" ] && continue
+    PROCEVENT_SURFACED="$PROCEVENT_SURFACED $key"
+  done < <(fm_wake_queued_keys_locked check)
+  if [ -z "$PROCEVENT_SURFACED" ]; then
+    fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+    return 0
+  fi
+  reason="check: process-event result captured:$PROCEVENT_SURFACED"
+  # shellcheck disable=SC2034 # Consumed by wake() in the separately linted transition owner.
+  FM_WAKE_POST_OUTPUT_ACTION=procevent_surface_after_output
+  wake "$reason"
 }
 
 run_check_process() {
@@ -808,11 +865,37 @@ if ! fm_lock_try_acquire "$WATCH_LOCK"; then
   fi
   exit 0
 fi
+WATCHER_RECOVERY_PENDING=0
+if [ -n "${FM_LOCK_RECOVERED_PID:-}" ]; then
+  WATCHER_RECOVERY_PENDING=1
+fi
+if ! fm_recovery_marker_arm_check "$WATCHER_DOWNTIME_MARKER"; then
+  echo "watcher: recovery state could not be consumed safely; retaining stale lock evidence" >&2
+  exit 1
+fi
+if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" = 1 ]; then
+  WATCHER_RECOVERY_PENDING=0
+elif [ "$FM_RECOVERY_MARKER_ACTION" = recover ]; then
+  WATCHER_RECOVERY_PENDING=1
+fi
 watcher_cleanup() {
-  fm_active_check_stop || return 1
+  local cleanup_status=0 owns_lock=0 transition=release-lock
+  if [ "$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)" = "${WATCHER_PID:-}" ]; then
+    owns_lock=1
+    if [ "${WATCHER_RECOVERY_PENDING:-0}" -eq 1 ] \
+      && [ "${FM_WATCH_DELIVERED_REASON:-}" = "check: rearm-resurface" ]; then
+      transition=release-lock-existing
+    fi
+  fi
+  fm_active_check_stop || cleanup_status=1
   fm_check_output_cleanup
   fm_custom_check_snapshot_cleanup
-  fm_lock_release "$WATCH_LOCK"
+  if [ "$owns_lock" -eq 1 ] \
+    && ! fm_recovery_transition "$WATCHER_DOWNTIME_MARKER" "$transition" "$WATCH_LOCK" downtime; then
+    echo "watcher: recovery state could not be persisted; retaining stale lock evidence" >&2
+    cleanup_status=1
+  fi
+  return "$cleanup_status"
 }
 trap watcher_cleanup EXIT
 trap 'exit 1' HUP INT TERM
@@ -822,7 +905,10 @@ trap 'exit 1' HUP INT TERM
 WATCHER_PID=${BASHPID:-$$}
 printf '%s\n' "$FM_HOME" > "$WATCH_LOCK/fm-home" || true
 printf '%s\n' "$WATCH_PATH" > "$WATCH_LOCK/watcher-path" || true
-fm_pid_identity "$WATCHER_PID" > "$WATCH_LOCK/pid-identity" 2>/dev/null || true
+# shellcheck disable=SC2034 # Consumed by wake() in the separately linted transition owner.
+FM_WATCH_DELIVERY_PID=$WATCHER_PID
+FM_WATCH_DELIVERY_IDENTITY=$(fm_pid_identity "$WATCHER_PID" 2>/dev/null || true)
+printf '%s\n' "$FM_WATCH_DELIVERY_IDENTITY" > "$WATCH_LOCK/pid-identity" 2>/dev/null || true
 
 [ -e "$STATE/.last-heartbeat" ] || touch "$STATE/.last-heartbeat"
 
@@ -834,6 +920,32 @@ if ! fm_pr_poll_retirement_recover_all "$STATE" "$SCRIPT_DIR/fm-pr-poll.sh"; the
   fm_wake_append check pr-poll-retirement "$reason" || exit 1
   touch "$STATE/.last-check"
   wake "$reason"
+fi
+
+resurface_after_downtime() {
+  if [ "$WATCHER_RECOVERY_PENDING" -ne 1 ]; then
+    if ! fm_recovery_marker_arm_check "$WATCHER_DOWNTIME_MARKER"; then
+      echo "watcher: recovery state could not be consumed safely" >&2
+      exit 1
+    fi
+    [ "$FM_RECOVERY_MARKER_ACTION" = recover ] || return 0
+  fi
+  wake "check: rearm-resurface"
+}
+
+if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" = 1 ]; then
+  touch "$STATE/.last-watcher-beat"
+  handling_wait=0
+  while [ "$handling_wait" -lt 600 ]; do
+    fm_recovery_marker_snapshot "$WATCHER_DOWNTIME_MARKER" || true
+    case "$FM_RECOVERY_MARKER_TOKEN" in
+      pending:downtime:*) ;;
+      *) break ;;
+    esac
+    sleep 0.05
+    handling_wait=$((handling_wait + 1))
+  done
+  [ "$handling_wait" -lt 600 ] || WATCHER_RECOVERY_PENDING=1
 fi
 
 while :; do
@@ -856,6 +968,34 @@ while :; do
   # repost after grace, and escalate once if the recovery turn is also missed.
   # No conversation scraping; unresolved records are never silently expired.
   fm_pending_reply_tick "$STATE" || true
+
+  # Process-to-event liveness repair. This never discovers a result by polling:
+  # each registered source has its own child blocking on that source, and this
+  # only republishes results already captured durably and restarts a source
+  # whose owner is gone. It is a no-op with nothing registered.
+  if [ -d "$STATE/procevent" ]; then
+    FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent.sh" reconcile >/dev/null 2>&1 || true
+  fi
+  # Then deliver any queued-but-unsurfaced result, including one a runner
+  # published while this watcher was between cycles.
+  procevent_surface_queued
+
+  # A process-event result carries richer adapter-owned wake context than the
+  # generic recovery reason, so give that owner first refusal.
+  resurface_after_downtime
+
+  # The existing poll loop also owns the bounded inactive-outcome cadence.
+  # This is mechanical and silent unless a durable terminal-outcome obligation
+  # was created, so quiet cycles never wake firstmate or consume model tokens.
+  inactive_out=
+  if inactive_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    "$SCRIPT_DIR/fm-inactive-reconcile.sh" scan 2>/dev/null); then
+    if [ -n "$inactive_out" ]; then
+      wake "check: inactive-outcome"
+    fi
+  else
+    triage_log "inactive-outcome reconciliation unavailable"
+  fi
 
   # Slow per-task checks (firstmate writes these, e.g. a merged-PR poll).
   # Time-based via .last-check mtime so the cadence survives watcher restarts.
@@ -1091,8 +1231,9 @@ EOF
           #     merely stepped out - so absorb on the same bounded cadence but
           #     frame the eventual resurface as confirmed dead, never plain
           #     paused;
-          #   - none: no running pipeline, idle pane, no busy signature, no declared
-          #     pause - the crew has STOPPED. Surface immediately so firstmate peeks
+          #   - none: no running pipeline, no exact busy verdict, no declared
+          #     pause - the crew has STOPPED. Surface immediately so firstmate
+          #     inspects the inconclusive state
           #     (it may be done via an interactive menu that wrote no done: status,
           #     waiting on a decision, or wedged) instead of leaving the finish to
           #     wait out the timer.

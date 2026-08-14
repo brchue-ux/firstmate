@@ -47,6 +47,8 @@ fm_home_anchor_resolve "$FM_ROOT" || exit 1
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 # shellcheck source=bin/fm-x-lib.sh
 . "$SCRIPT_DIR/fm-x-lib.sh"
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 

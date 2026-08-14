@@ -440,18 +440,23 @@ test_allow_is_silent_both_modes() {
 # --- harness wiring: each adapter invokes the shared checker -----------------
 
 # --- shellcheck (belt-and-suspenders; CI/CONTRIBUTING.md also runs this) -----
+#
+# Delegated to bin/fm-lint.sh rather than calling shellcheck directly, because
+# that script is the single owner of the lint definition - the file set, the
+# pinned version, and the options, including --external-sources. Calling the
+# linter directly here would be a second, weaker copy of that definition, and it
+# disagreed with the owner the moment this checker sourced a shared library.
 
 test_shellcheck_clean() {
+  local out
   command -v shellcheck >/dev/null 2>&1 || { pass "shellcheck not installed, skipping"; return; }
   # bin/fm-lint.sh owns the lint definition and resolves `# shellcheck source=`
-  # directives, so this check must ask the same question it does. Bare shellcheck
-  # asks a different one: it reports every sourced lib as unfollowed, which turns
-  # any script that grows a `.` line into a false failure here while the owner,
-  # CI, and the pre-push gate all still pass. --source-path keeps that resolution
-  # working from whatever directory this suite happens to run in.
-  shellcheck --norc --external-sources --source-path="$ROOT" "$CHECK" >/dev/null 2>&1 \
-    || fail "bin/fm-arm-pretool-check.sh is not shellcheck-clean"
-  pass "bin/fm-arm-pretool-check.sh is shellcheck-clean"
+  # directives, so this check asks the owner rather than re-deriving the
+  # question. Bare shellcheck asks a different one: it reports every sourced lib
+  # as unfollowed, which turns any script that grows a `.` line into a false
+  # failure here while the owner, CI, and the pre-push gate all still pass.
+  out=$("$ROOT/bin/fm-lint.sh" "$CHECK" 2>&1)     || fail "bin/fm-arm-pretool-check.sh is not lint-clean under the pinned definition: $out"
+  pass "bin/fm-arm-pretool-check.sh is clean under bin/fm-lint.sh"
 }
 
 test_full_acceptance_matrix
