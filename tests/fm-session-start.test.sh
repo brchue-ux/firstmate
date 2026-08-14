@@ -7,7 +7,8 @@
 #   - absent-file markers vs empty-but-present files in the context digest
 #   - the secondmate charter: printed, ordered before projects.md, listed in
 #     the closing re-read trailer; explicitly ABSENT in a primary home, and
-#     never called a primary home when .fm-secondmate-home says otherwise
+#     labeled from .fm-secondmate-home in both divergent states - a marked home
+#     that lost its charter, and an unmarked home carrying a stale one
 #   - the lock-refusal read-only path: banner leads, every mutating step is
 #     skipped (including bootstrap's six mutating sweeps, verified by their
 #     ABSENCE), the digest still completes
@@ -609,7 +610,9 @@ EOF
 # printed, and printed BEFORE projects.md: it answers "who am I", which governs
 # how everything after it is read.
 
-CHARTER_LABEL='data/charter.md (secondmate charter; ABSENT = this is a primary home)'
+CHARTER_LABEL_PRIMARY='data/charter.md (secondmate charter; ABSENT = this is a primary home)'
+CHARTER_LABEL_MARKED='data/charter.md (secondmate charter; .fm-secondmate-home marks this a secondmate home, so ABSENT = the charter is missing and must be restored)'
+CHARTER_LABEL_STALE='data/charter.md (no .fm-secondmate-home marker, so this is a primary home and the charter below is stale or inherited local state that does not make it a secondmate)'
 
 test_context_digest_charter_present() {
   local rec root home fakebin out charter_line projects_line
@@ -620,16 +623,19 @@ EOF
   make_fake_toolchain "$fakebin"
   make_fake_ps_claude "$fakebin"
 
+  printf '%s\n' 'budget' > "$home/.fm-secondmate-home"
   printf '%s\n' 'Your domain is the budget app (home_budget_app).' > "$home/data/charter.md"
   printf '%s\n' '- home_budget_app [no-mistakes] - the budget app (added 2026-07-01)' > "$home/data/projects.md"
 
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
 
-  assert_contains "$out" "$CHARTER_LABEL" "digest did not label the charter section"
+  assert_contains "$out" "$CHARTER_LABEL_MARKED" "digest did not label the charter section"
   assert_contains "$out" "Your domain is the budget app (home_budget_app)." \
     "digest did not print the charter body"
+  assert_not_contains "$out" "$CHARTER_LABEL_PRIMARY" \
+    "a seeded secondmate home saw the primary-home charter label"
 
-  charter_line=$(printf '%s\n' "$out" | grep -n -F -x -- "$CHARTER_LABEL" | head -1 | cut -d: -f1)
+  charter_line=$(printf '%s\n' "$out" | grep -n -F -x -- "$CHARTER_LABEL_MARKED" | head -1 | cut -d: -f1)
   projects_line=$(printf '%s\n' "$out" | grep -n -x -- 'data/projects\.md' | head -1 | cut -d: -f1)
   [ -n "$charter_line" ] && [ -n "$projects_line" ] \
     || fail "could not locate both context labels: charter='$charter_line' projects='$projects_line': $out"
@@ -640,6 +646,36 @@ EOF
     "closing do-NOT-re-read trailer did not list data/charter.md"
 
   pass "context digest prints the charter first and lists it in the re-read trailer"
+}
+
+# A charter copied into a home that carries no marker is stale or inherited
+# local state: the marker, not the charter, decides the home's role, so the
+# digest must say so rather than let the charter body speak for itself.
+test_context_digest_charter_present_without_marker() {
+  local rec root home fakebin out
+  rec=$(new_world context-digest-charter-no-marker)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+
+  printf '%s\n' 'Your domain is the budget app (home_budget_app).' > "$home/data/charter.md"
+  printf '%s\n' '- home_budget_app [no-mistakes] - the budget app (added 2026-07-01)' > "$home/data/projects.md"
+  # .fm-secondmate-home deliberately absent: a charter with no marker.
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  assert_contains "$out" "$CHARTER_LABEL_STALE" \
+    "an unmarked home carrying a charter was not told the charter is stale or inherited"
+  assert_contains "$out" "Your domain is the budget app (home_budget_app)." \
+    "digest did not print the charter body"
+  assert_not_contains "$out" "$CHARTER_LABEL_PRIMARY" \
+    "the ABSENT-only primary-home gloss was printed above a present charter"
+  assert_not_contains "$out" "$CHARTER_LABEL_MARKED" \
+    "an unmarked home was told the marker makes it a secondmate home"
+
+  pass "a charter without the marker is labeled stale or inherited local state"
 }
 
 test_context_digest_charter_absent() {
@@ -656,7 +692,7 @@ EOF
 
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
 
-  assert_contains "$out" "$CHARTER_LABEL" "digest silently skipped the absent charter section"
+  assert_contains "$out" "$CHARTER_LABEL_PRIMARY" "digest silently skipped the absent charter section"
   charter_section=$(printf '%s\n' "$out" \
     | awk '/^data\/charter\.md \(/{flag=1;next}/^data\//{flag=0}flag')
   assert_contains "$charter_section" "ABSENT" "absent charter did not print the explicit ABSENT marker"
@@ -688,7 +724,7 @@ EOF
     | awk '/^data\/charter\.md \(/{flag=1;next}/^data\//{flag=0}flag')
   assert_contains "$charter_section" "ABSENT" \
     "absent charter did not print the explicit ABSENT marker in a marked home"
-  assert_not_contains "$out" "$CHARTER_LABEL" \
+  assert_not_contains "$out" "$CHARTER_LABEL_PRIMARY" \
     "a marked secondmate home was told an absent charter means it is a primary home"
   assert_contains "$out" ".fm-secondmate-home marks this a secondmate home" \
     "charter label did not name the marker as the authority in a marked home"
@@ -1496,6 +1532,7 @@ EOF
 
 test_context_digest_absent_empty_present
 test_context_digest_charter_present
+test_context_digest_charter_present_without_marker
 test_context_digest_charter_absent
 test_context_digest_charter_absent_in_marked_home
 test_lock_refusal_read_only_path

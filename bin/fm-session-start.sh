@@ -42,7 +42,11 @@
 #                       data/captain-shared.md, data/learnings.md: read-only,
 #                       always safe, always runs. The charter prints FIRST
 #                       because it answers "who am I", which governs how
-#                       everything printed after it is read.
+#                       everything printed after it is read; its label is
+#                       keyed off the .fm-secondmate-home marker, the single
+#                       authority for this home's role, so a marked home
+#                       missing its charter and an unmarked home carrying a
+#                       stale one are each named for what they are.
 #   5. fleet digest   - a compact data/backlog.md identity/metadata listing,
 #                       every state/*.meta, a bounded state/*.status tail,
 #                       state/.afk, and a cheap per-task endpoint-liveness read:
@@ -345,6 +349,8 @@ fi
 CHARTER_LABEL='data/charter.md (secondmate charter; ABSENT = this is a primary home)'
 if [ -e "$FM_HOME/.fm-secondmate-home" ] || [ -L "$FM_HOME/.fm-secondmate-home" ]; then
   CHARTER_LABEL='data/charter.md (secondmate charter; .fm-secondmate-home marks this a secondmate home, so ABSENT = the charter is missing and must be restored)'
+elif [ -f "$DATA/charter.md" ]; then
+  CHARTER_LABEL='data/charter.md (no .fm-secondmate-home marker, so this is a primary home and the charter below is stale or inherited local state that does not make it a secondmate)'
 fi
 section "CONTEXT"
 print_file_or_absent "$DATA/charter.md" "$CHARTER_LABEL"
