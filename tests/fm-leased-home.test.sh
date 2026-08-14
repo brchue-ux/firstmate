@@ -16,9 +16,11 @@
 #   (c) --force does not bypass the home guard                    -> REFUSE, no return
 #   (d) teardown of an ordinary task worktree                     -> ALLOW  (no regression)
 #   (e) a secondmate retiring its own home                        -> ALLOW  (no regression)
+#   (x) a swept child whose worktree= names another's home        -> SKIP, never removed
 #
 # Spawn guards the same boundary from the other side, in two layers:
 #   (t) a pool holding a registered home that lost its lease  -> REFUSE, no window
+#   (w) a pool whose registered home is still leased to it    -> ALLOW  (no regression)
 #   (u) pool state that cannot be read at all                 -> WARN, spawn proceeds
 #   (v) an acquired worktree that carries a home marker       -> REFUSE before launch
 #
@@ -205,6 +207,41 @@ expect_code 0 "$rc" "self-retire teardown"$'\n'"--- output ---"$'\n'"$out"
 assert_not_contains "$out" "REFUSED" "a secondmate retiring its own home is not refused"
 pass "fm-teardown.sh: a secondmate can still retire its own home"
 
+# (x) A forced secondmate teardown sweeps its home's own children, and a child
+# whose recorded worktree= names ANOTHER secondmate's home has to be skipped
+# outright: that sweep answers a failed return with `rm -rf`, so an ownership
+# refusal it cannot tell apart from a failure would delete the very home the
+# guard exists to protect - and the hook removal it runs first would silence that
+# home's turn-end wakes on the way there.
+case_dir=$(make_teardown_case child-foreign-home dictate)
+mark_secondmate_home "$case_dir/wt"
+register_secondmate "$case_dir/data/secondmates.md" dictate "$case_dir/wt"
+git -C "$case_dir/project" worktree add -q --detach "$case_dir/foreign-home"
+printf '%s\n' explore > "$case_dir/foreign-home/.fm-secondmate-home"
+mkdir -p "$case_dir/foreign-home/.claude" "$case_dir/foreign-home/.opencode/plugins"
+printf '{"hooks":{"Stop":[]}}\n' > "$case_dir/foreign-home/.claude/settings.local.json"
+printf 'export const FmTurnEnd = {}\n' > "$case_dir/foreign-home/.opencode/plugins/fm-turn-end.js"
+printf 'token=explore.grok-turnend-token\n' > "$case_dir/foreign-home/.fm-grok-turnend"
+fm_write_meta "$case_dir/wt/state/child-a.meta" \
+  "window=firstmate:fm-child-a" "endpoint_task_id=child-a" \
+  "worktree=$case_dir/foreign-home" "project=$case_dir/project" \
+  "harness=echo" "kind=ship" "yolo=off"
+fm_write_secondmate_meta "$case_dir/state/dictate.meta" "$case_dir/wt" \
+  "firstmate:fm-dictate" alpha echo
+: > "$case_dir/treehouse.log"
+out=$(run_teardown "$case_dir" dictate --force 2>&1); rc=$?
+assert_contains "$out" "REFUSED" "the child sweep refuses a child recorded inside a foreign home"
+assert_contains "$out" "explore" "the refusal names the secondmate whose home the child recorded"
+assert_present "$case_dir/foreign-home/.fm-secondmate-home" \
+  "child-foreign-home: the foreign home was removed by the child sweep"
+for f in .claude/settings.local.json .opencode/plugins/fm-turn-end.js .fm-grok-turnend; do
+  assert_present "$case_dir/foreign-home/$f" \
+    "child-foreign-home: the foreign home's $f was removed by the child sweep"
+done
+assert_no_grep "return --force $case_dir/foreign-home" "$case_dir/treehouse.log" \
+  "child-foreign-home: the foreign home was returned to the pool"
+pass "fm-teardown.sh: a child recorded inside a foreign home is skipped, never removed"
+
 # --- spawn refusal cases ----------------------------------------------------
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
@@ -268,15 +305,15 @@ SH
   chmod +x "$case_dir/fakebin/treehouse"
 }
 
-run_spawn() {  # <case-dir> <task-id> <settled-pane-path>
-  local case_dir=$1 id=$2 pane=$3
+run_spawn() {  # <case-dir> <task-id> <settled-pane-path> [project-arg]
+  local case_dir=$1 id=$2 pane=$3 project_arg=${4:-$1/project}
   FM_ROOT_OVERRIDE='' FM_HOME="$case_dir/home" \
   FM_STATE_OVERRIDE="$case_dir/home/state" FM_DATA_OVERRIDE="$case_dir/home/data" \
   FM_PROJECTS_OVERRIDE="$case_dir/home/projects" FM_CONFIG_OVERRIDE="$case_dir/home/config" \
   FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
   FM_FAKE_PANE_PATH="$pane" FM_TMUX_LOG="$case_dir/tmux.log" \
   PATH="$case_dir/fakebin:$PATH" \
-    "$SPAWN" "$id" "$case_dir/project" 2>&1
+    "$SPAWN" "$id" "$project_arg" 2>&1
 }
 
 # (t) A pool that currently holds an unleased registered home can hand that home
@@ -297,8 +334,45 @@ if command -v jq >/dev/null 2>&1; then
   assert_absent "$case_dir/home/state/pool-gate-task.meta" \
     "spawn-pool-unleased: a task record survived the refusal"
   pass "fm-spawn.sh: refuses to allocate from a pool holding an unleased secondmate home"
+
+  # (w) The other side of that comparison: a home still leased to its own id is
+  # protected, so the pool is safe to allocate from. treehouse reports a leased
+  # slot as status "leased" even while its processes run, and if that comparison
+  # ever drifted this gate would hard-fail every spawn into any pool that holds a
+  # secondmate home at all.
+  case_dir=$(make_spawn_case spawn-pool-leased leased-pool-task)
+  home="$case_dir/.treehouse/pool-a/1/project"
+  wt="$case_dir/.treehouse/pool-a/2/project"
+  git -C "$case_dir/project" worktree add -q --detach "$wt"
+  fake_spawn_treehouse "$case_dir" \
+    "{\"name\":\"1\",\"path\":\"$home\",\"status\":\"leased\",\"lease_holder\":\"dictate\"},{\"name\":\"2\",\"path\":\"$wt\",\"status\":\"in-use\",\"lease_holder\":\"\"}"
+  register_secondmate "$case_dir/home/data/secondmates.md" dictate "$home"
+  out=$(run_spawn "$case_dir" leased-pool-task "$wt"); rc=$?
+  expect_code 0 "$rc" "spawn into a pool whose home is properly leased"$'\n'"--- output ---"$'\n'"$out"
+  assert_not_contains "$out" "REFUSED" "a home leased to its own id must not refuse the spawn"
+  assert_present "$case_dir/home/state/leased-pool-task.meta" \
+    "spawn-pool-leased: the spawn did not complete"
+  pass "fm-spawn.sh: a pool whose secondmate home is still leased allocates normally"
+
+  # (y) The documented spawn form names a project as `projects/<name>`, which is
+  # only a directory after it is resolved against the home's projects dir. The
+  # gate has to read the pool of the project actually being spawned into, not of
+  # a path that happens to resolve relative to the caller's cwd - otherwise it
+  # warns that pool state is unreadable on every such spawn and protects nothing.
+  case_dir=$(make_spawn_case spawn-relative-project rel-proj-task)
+  home="$case_dir/.treehouse/pool-a/1/project"
+  ln -s "$case_dir/project" "$case_dir/home/projects/proj"
+  fake_spawn_treehouse "$case_dir" \
+    "{\"name\":\"1\",\"path\":\"$home\",\"status\":\"in-use\",\"lease_holder\":\"\"}"
+  register_secondmate "$case_dir/home/data/secondmates.md" dictate "$home"
+  out=$(run_spawn "$case_dir" rel-proj-task "$home" "projects/proj"); rc=$?
+  expect_code 1 "$rc" "spawn named by projects/<name> into a pool holding an unleased home"
+  assert_contains "$out" "REFUSED" "the gate refuses a spawn named by its projects/<name> form"
+  assert_not_contains "$out" "could not read the treehouse pool" \
+    "the gate read the resolved project dir, not the raw argument"
+  pass "fm-spawn.sh: the pool gate resolves the projects/<name> spawn form"
 else
-  pass "fm-spawn.sh: pool-lease gate case skipped (jq not installed)"
+  pass "fm-spawn.sh: pool-lease gate cases skipped (jq not installed)"
 fi
 
 # (u) Pool state that cannot be read is unknown, not safe - but it must not be

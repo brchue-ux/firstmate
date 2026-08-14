@@ -64,7 +64,9 @@
 # secondmate home that this task does not own - identified by the home's own
 # .fm-secondmate-home marker or by data/secondmates.md. Only the matching
 # secondmate id may return its own home. --force does NOT bypass this: it
-# authorizes discarding THIS task's work, never another agent's home.
+# authorizes discarding THIS task's work, never another agent's home. A child
+# swept from a retiring home is skipped whole when its recorded worktree= names a
+# foreign home, because that sweep answers a failed return with `rm -rf`.
 # bin/fm-leased-home-audit.sh reports homes whose lease is already lost.
 # Usage: fm-teardown.sh <task-id> [--force]
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
@@ -560,6 +562,10 @@ fi
 STALE_WORKTREE_LOCK_RETRY_WAIT_SECS=$TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS
 TEARDOWN_TREEHOUSE_LOCK_REFUSED=2
 TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED=3
+# A foreign-home ownership refusal must be distinguishable from a failed return:
+# the child-worktree path answers a failed return with `rm -rf`, which would turn
+# the guard that protects another secondmate's home into the thing that deletes it.
+TEARDOWN_FOREIGN_HOME_REFUSED=4
 
 # True when treehouse/git stderr shows the transient index.lock "File exists" race.
 # Other return failures must not enter the retry path.
@@ -635,7 +641,8 @@ teardown_treehouse_return() {
   # the target; this is the backstop that covers every other caller of this
   # function - the child-worktree path and home retirement. See
   # bin/fm-leased-home-lib.sh.
-  fm_leased_home_guard "$dir" "$owner_id" "teardown of $label" "$SECONDMATE_REG" || return 1
+  fm_leased_home_guard "$dir" "$owner_id" "teardown of $label" "$SECONDMATE_REG" \
+    || return "$TEARDOWN_FOREIGN_HOME_REFUSED"
 
   # Capture stdout+stderr so non-lock failures stay visible and lock failures can
   # be matched by signature even when the lock file is already gone mid-check.
@@ -963,7 +970,7 @@ EOF
 }
 
 remove_firstmate_home() {
-  local home=$1 label=$2 expected_id=${3:-} abs_home_path
+  local home=$1 label=$2 expected_id=${3:-} abs_home_path return_rc
   [ -n "$home" ] || return 0
   [ -e "$home" ] || return 0
   abs_home_path=$(validate_firstmate_home_for_removal "$home" "$label" "$expected_id") || return 1
@@ -974,6 +981,10 @@ remove_firstmate_home() {
       return 1
     }
     teardown_treehouse_return "$abs_home_path" "$FM_ROOT" "$label" "" "$expected_id" || {
+      return_rc=$?
+      if [ "$return_rc" -eq "$TEARDOWN_FOREIGN_HOME_REFUSED" ]; then
+        return "$return_rc"
+      fi
       echo "error: treehouse return failed for $label $abs_home_path; lease may still be held" >&2
       return 1
     }
@@ -1025,6 +1036,17 @@ cleanup_firstmate_home_children() {
     child_proj=$(meta_value "$child_meta" project)
     child_kind=$(meta_value "$child_meta" kind)
     [ -n "$child_kind" ] || child_kind=ship
+    # A child's recorded worktree= can name a DIFFERENT secondmate's home, which
+    # is the same stale-record class this guard exists to close. Decide ownership
+    # before anything here touches that path - the endpoint kill, the removal of
+    # the turn-end hook artifacts, and the treehouse return that a failure answers
+    # with `rm -rf` all come after. A kind=secondmate child is retired through
+    # remove_firstmate_home, which checks its marker against the expected id.
+    if [ "$child_kind" != secondmate ] \
+       && ! fm_leased_home_guard "$child_wt" "" "teardown of child task $child_id" "$SECONDMATE_REG"; then
+      echo "Leaving child task $child_id and its recorded worktree in place; retire that home through its own secondmate id." >&2
+      continue
+    fi
     child_backend=$(fm_backend_of_meta "$child_meta")
     if [ "$child_backend" = orca ]; then
       child_t=$(meta_value "$child_meta" terminal)
@@ -1069,7 +1091,8 @@ cleanup_firstmate_home_children() {
           :
         else
           child_return_rc=$?
-          if [ "$child_return_rc" -eq "$TEARDOWN_TREEHOUSE_LOCK_REFUSED" ]; then
+          if [ "$child_return_rc" -eq "$TEARDOWN_TREEHOUSE_LOCK_REFUSED" ] \
+             || [ "$child_return_rc" -eq "$TEARDOWN_FOREIGN_HOME_REFUSED" ]; then
             return "$child_return_rc"
           fi
           safe_rm_rf_child_worktree "$child_wt" "$child_proj"

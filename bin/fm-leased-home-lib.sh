@@ -52,11 +52,11 @@ fm_leased_home_abs() {  # <path>
 # pre-existing reader of this marker uses `cat`, so a stricter read here would
 # make the safety predicate fail OPEN on a hand-written marker.
 fm_leased_home_marker_id() {  # <dir>
-  local dir=$1 marker id
+  local dir=$1 marker id=''
   marker="$dir/$FM_LEASED_HOME_MARKER"
   [ -L "$marker" ] && return 1
   [ -f "$marker" ] || return 1
-  IFS= read -r id < "$marker" 2>/dev/null || [ -n "$id" ] || return 1
+  IFS= read -r id 2>/dev/null < "$marker" || [ -n "$id" ] || return 1
   id=${id//[[:space:]]/}
   [ -n "$id" ] || return 1
   case "$id" in

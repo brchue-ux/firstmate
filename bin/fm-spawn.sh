@@ -1031,7 +1031,7 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
 # leave an orphan window, tab, or task behind on every attempt. The check needs
 # nothing the backend creates.
 if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
-  assert_pool_has_no_unprotected_home "$PROJ"
+  assert_pool_has_no_unprotected_home "$PROJ_ABS"
 fi
 
 W="fm-$ID"
