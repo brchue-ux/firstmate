@@ -1,12 +1,17 @@
 #!/usr/bin/env bash
-# Resolve a project's delivery mode and yolo flag from the data/projects.md registry.
-# Prints two words to stdout: "<mode> <yolo>" where mode is one of
-# no-mistakes|direct-PR|local-only and yolo is on|off.
+# Resolve a project's delivery mode, yolo flag, and base remote from the
+# data/projects.md registry.
+# Prints three words to stdout: "<mode> <yolo> <base>" where mode is one of
+# no-mistakes|direct-PR|local-only, yolo is on|off, and base is the git remote
+# that carries the project's real working line (default "origin").
 #
 # Registry line format (data/projects.md):
-#   - <name> - <desc> (added <date>)                  -> no-mistakes off  (legacy default)
-#   - <name> [<mode>] - <desc> (added <date>)          -> <mode> off
-#   - <name> [<mode> +yolo] - <desc> (added <date>)    -> <mode> on
+#   - <name> - <desc> (added <date>)                    -> no-mistakes off origin  (legacy default)
+#   - <name> [<mode>] - <desc> (added <date>)           -> <mode> off origin
+#   - <name> [<mode> +yolo] - <desc> (added <date>)     -> <mode> on origin
+#   - <name> [<mode> base=<remote>] - <desc> ...        -> <mode> off <remote>
+# Tokens inside the bracket group are whitespace-separated and order-independent;
+# the first token that is neither "+yolo" nor "base=<remote>" is the mode.
 #
 # mode = how a finished change reaches main:
 #   no-mistakes  full pipeline -> PR -> captain merge (default)
@@ -15,9 +20,14 @@
 # yolo (orthogonal) = when on, firstmate may make routine approval decisions itself.
 #   AGENTS.md section 7 is the single owner of authority exceptions, including
 #   ask-user contract expansion and stronger captain boundaries.
+# base (orthogonal) = the remote a clone's default branch actually tracks, for the
+#   project whose "origin" is not its working line (a fork-of-upstream clone whose
+#   real base is the fork). bin/fm-fleet-sync.sh syncs and measures against it, so
+#   a fork-line clone stops being compared to a remote nobody pushes to.
 #
-# An unknown/missing project or unknown mode falls back to "no-mistakes off" and warns
-# to stderr, so a typo never silently drops the gate.
+# An unknown/missing project, unknown mode, or malformed base falls back to
+# "no-mistakes off origin" / "origin" and warns to stderr, so a typo never
+# silently drops the gate or redirects a sync to an unusable remote.
 # Usage: fm-project-mode.sh <project-name>
 set -eu
 
@@ -34,37 +44,51 @@ NAME=${1:?usage: fm-project-mode.sh <project-name>}
 
 if [ ! -f "$REG" ]; then
   echo "warn: no registry at $REG; defaulting $NAME to no-mistakes off" >&2
-  echo "no-mistakes off"
+  echo "no-mistakes off origin"
   exit 0
 fi
 
-# awk emits "<mode> <yolo>" (one line) or nothing if the project is absent.
+# awk emits "<mode> <yolo> <base>" (one line) or nothing if the project is absent.
 parsed=$(awk -v n="$NAME" '
   $1=="-" && $2==n {
-    mode="no-mistakes"; yolo="off";
+    mode=""; yolo="off"; base="origin";
     if ($3 ~ /^\[/) {
       s="";
       for (i=3; i<=NF; i++) { s = s (s==""?"":" ") $i; if ($i ~ /\]$/) break }
       gsub(/^\[|\]$/, "", s);           # strip the surrounding brackets
       k = split(s, a, " ");
-      if (a[1] != "" && a[1] != "+yolo") mode = a[1];
-      for (j=1; j<=k; j++) if (a[j]=="+yolo") yolo="on";
+      for (j=1; j<=k; j++) {
+        if (a[j] == "+yolo") { yolo="on"; continue }
+        if (a[j] ~ /^base=/) { base=substr(a[j], 6); continue }
+        if (mode == "") mode = a[j];
+      }
     }
-    print mode, yolo; exit
+    if (mode == "") mode="no-mistakes";
+    print mode, yolo, base; exit
   }
 ' "$REG")
 
 if [ -z "$parsed" ]; then
   echo "warn: project \"$NAME\" not in registry; defaulting to no-mistakes off" >&2
-  echo "no-mistakes off"
+  echo "no-mistakes off origin"
   exit 0
 fi
 
-mode=${parsed%% *}
-yolo=${parsed##* }
+read -r mode yolo base <<EOF
+$parsed
+EOF
 case "$mode" in
   no-mistakes|direct-PR|local-only) ;;
   *) echo "warn: unknown mode \"$mode\" for $NAME; defaulting to no-mistakes off" >&2; mode=no-mistakes; yolo=off ;;
 esac
 case "$yolo" in on|off) ;; *) yolo=off ;; esac
-echo "$mode $yolo"
+# A base remote is passed straight to git, so keep it to a plain remote name: no
+# leading dash (which git would read as an option) and no path or shell characters.
+case "$base" in
+  origin) ;;
+  ''|-*|*[!A-Za-z0-9._-]*)
+    echo "warn: invalid base remote \"$base\" for $NAME; defaulting to origin" >&2
+    base=origin
+    ;;
+esac
+echo "$mode $yolo $base"

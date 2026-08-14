@@ -45,6 +45,9 @@ The optional `+yolo` posture changes routine approval authority but does not cha
 Default it off, and enable it only on the captain's explicit instruction.
 `AGENTS.md` section 7 owns the complete authority boundary and exceptions when it is on.
 
+When a clone's `origin` is not the line it actually works on - a fork of a third-party upstream, where `origin` is upstream and the real base is a fork remote - record that remote as `base=<remote>` in the same bracket group.
+Without it, clone refreshes fetch and measure against upstream forever, so the clone silently falls behind its own working line and its "commits behind" count can never reach zero.
+
 ## Add or clone an existing project
 
 Confirm the source URL, local project name, delivery mode, and autonomy posture.

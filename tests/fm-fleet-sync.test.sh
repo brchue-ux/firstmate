@@ -12,6 +12,13 @@
 # The pre-existing fast-forward / already-current / local-only / no-origin paths
 # must be unchanged, and bootstrap must relay the new outcomes as FLEET_SYNC lines.
 #
+# It also pins the registry's base remote (bin/fm-project-mode.sh's "base=<remote>"):
+# a project whose real working line is a fork is fetched, fast-forwarded, and
+# measured against that remote while origin is still fetched for comparison; a
+# recorded base remote the clone does not have is skipped by name rather than
+# silently falling back to origin; and a project with no base= behaves exactly as
+# before, following origin and leaving any other remote untouched.
+#
 # It also pins the orphaned .git/packed-refs.lock recovery in the fetch step
 # (fetch_with_packed_refs_lock_guard, backed by bin/fm-lock-lib.sh's shared
 # staleness proof): a provably-stale lock is retried then removed and the clone
@@ -79,6 +86,39 @@ advance_origin() {
   work="$home/work-$name"
   commit_file "$work" file.txt "$msg" "$msg"
   git -C "$work" push -q origin main
+}
+
+# add_fork_remote <home> <name>: give an existing pair a second remote "fork",
+# seeded from the same history as origin, plus a "work-fork-<name>" repo for
+# advancing it. This is the fork-line shape: origin is an upstream the clone
+# never pushes to, and the real working line lives on the fork.
+add_fork_remote() {
+  local home=$1 name=$2 fork_remote fork_abs clone
+  clone="$home/projects/$name"
+  fork_remote="$home/remotes/$name-fork.git"
+  git clone --quiet --bare "$home/work-$name" "$fork_remote"
+  fork_abs=$(cd "$fork_remote" && pwd)
+  git -C "$clone" remote add fork "file://$fork_abs"
+  git -C "$clone" fetch fork --quiet
+  git clone --quiet "file://$fork_abs" "$home/work-fork-$name"
+}
+
+# advance_fork <home> <name> <msg>: push one more commit to <name>'s fork remote,
+# so the clone (until it fetches fork) is one commit behind fork/main.
+advance_fork() {
+  local home=$1 name=$2 msg=$3 work
+  work="$home/work-fork-$name"
+  commit_file "$work" file.txt "$msg" "$msg"
+  git -C "$work" push -q origin main
+}
+
+# register_project <home> <name> <bracket>: write a one-line registry entry, e.g.
+# register_project "$home" kappa 'direct-PR base=fork'
+register_project() {
+  local home=$1 name=$2 bracket=$3
+  mkdir -p "$home/data"
+  printf -- '- %s [%s] - test project (added 2026-08-13)\n' "$name" "$bracket" \
+    >> "$home/data/projects.md"
 }
 
 head_sha() { git -C "$1" rev-parse HEAD; }
@@ -470,6 +510,91 @@ test_bootstrap_relays_recovered_and_stuck() {
   pass "bootstrap relays recovered: and STUCK: fleet-sync outcomes"
 }
 
+# --- base remote tests ------------------------------------------------------
+
+test_base_remote_syncs_against_base_not_origin() {
+  local home clone out
+  home=$(new_home)
+  clone=$(build_pair "$home" forkline)
+  add_fork_remote "$home" forkline
+  register_project "$home" forkline 'direct-PR base=fork'
+  # Both lines move, from the same base, to different commits: only a sync that
+  # honors base=fork can fast-forward the clone at all.
+  advance_fork "$home" forkline F1
+  advance_origin "$home" forkline O1
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "forkline: synced" "a base=fork project syncs against its fork line"
+  assert_not_contains "$out" "STUCK" "a base=fork project is not flagged STUCK"
+  [ "$(head_sha "$clone")" = "$(git -C "$clone" rev-parse fork/main)" ] \
+    || fail "clone was not fast-forwarded to fork/main"
+  [ "$(head_sha "$clone")" != "$(git -C "$clone" rev-parse origin/main)" ] \
+    || fail "clone was fast-forwarded to origin/main despite base=fork"
+  # Upstream stays readable for comparison: origin is fetched too when it is not
+  # the base, so origin/main is the advanced upstream commit, not the stale one.
+  [ "$(git -C "$clone" log -1 --format=%s origin/main)" = "O1" ] \
+    || fail "origin was not fetched alongside a non-origin base remote"
+  pass "a base=<remote> project is fetched and fast-forwarded against that remote"
+}
+
+test_base_remote_stuck_measures_against_base() {
+  local home clone out before
+  home=$(new_home)
+  clone=$(build_pair "$home" forkstuck)
+  add_fork_remote "$home" forkstuck
+  register_project "$home" forkstuck 'direct-PR base=fork'
+  advance_fork "$home" forkstuck F1
+  advance_fork "$home" forkstuck F2
+  printf 'dirty\n' >> "$clone/file.txt"
+  before=$(head_sha "$clone")
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "forkstuck: STUCK:" "a dirty base=fork clone is reported STUCK"
+  assert_contains "$out" "2 commits behind fork/main - needs attention" \
+    "STUCK counts commits behind the base remote, not origin"
+  assert_not_contains "$out" "behind origin/main" "STUCK never measures a fork line against origin"
+  [ "$(head_sha "$clone")" = "$before" ] || fail "dirty base=fork clone was moved"
+  pass "STUCK measures a base=<remote> clone against that remote"
+}
+
+test_missing_base_remote_is_skipped_not_silently_origin() {
+  local home clone out before
+  home=$(new_home)
+  clone=$(build_pair "$home" forkmissing)
+  register_project "$home" forkmissing 'direct-PR base=fork'
+  advance_origin "$home" forkmissing O1
+  before=$(head_sha "$clone")
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "forkmissing: skipped: no fork remote" "a missing base remote is reported by name"
+  [ "$(head_sha "$clone")" = "$before" ] \
+    || fail "clone was synced against origin despite a recorded base remote it lacks"
+  pass "a recorded base remote that the clone lacks is skipped, never silently origin"
+}
+
+test_no_base_remote_recorded_still_uses_origin() {
+  local home clone out fork_before
+  home=$(new_home)
+  clone=$(build_pair "$home" forkless)
+  add_fork_remote "$home" forkless
+  register_project "$home" forkless 'direct-PR'
+  advance_fork "$home" forkless F1
+  advance_origin "$home" forkless O1
+  fork_before=$(git -C "$clone" rev-parse fork/main)
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "forkless: synced" "a project with no base= still syncs"
+  [ "$(head_sha "$clone")" = "$(git -C "$clone" rev-parse origin/main)" ] \
+    || fail "clone with no base= was not fast-forwarded to origin/main"
+  [ "$(git -C "$clone" rev-parse fork/main)" = "$fork_before" ] \
+    || fail "clone with no base= fetched a remote other than origin"
+  pass "a project with no base= is unaffected: origin is fetched and followed as before"
+}
+
 # --- packed-refs.lock guard tests -------------------------------------------
 
 test_orphaned_stale_packed_refs_lock_recovers() {
@@ -620,6 +745,10 @@ test_single_project_by_projects_relative_name_ignores_cwd_shadow
 test_single_project_unresolvable_name_still_skips
 test_whole_fleet_form
 test_bootstrap_relays_recovered_and_stuck
+test_base_remote_syncs_against_base_not_origin
+test_base_remote_stuck_measures_against_base
+test_missing_base_remote_is_skipped_not_silently_origin
+test_no_base_remote_recorded_still_uses_origin
 test_orphaned_stale_packed_refs_lock_recovers
 test_live_packed_refs_lock_is_never_removed
 test_live_git_cwd_in_clone_dir_blocks_removal

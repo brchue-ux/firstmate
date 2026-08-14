@@ -1476,7 +1476,9 @@ if [ "$KIND" = secondmate ]; then
   SECONDMATE_PROJECTS=$(secondmate_registry_value "$ID" projects || true)
 else
   PROJ_NAME=$(basename "$PROJ_ABS")
-  read -r MODE YOLO <<EOF
+  # Trailing fields (the registry's base remote) are meta for fleet sync, not for
+  # a task's delivery posture, so they are discarded here.
+  read -r MODE YOLO _ <<EOF
 $("$FM_ROOT/bin/fm-project-mode.sh" "$PROJ_NAME")
 EOF
 fi

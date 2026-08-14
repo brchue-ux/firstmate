@@ -468,6 +468,41 @@ seeded_origin_url() {
   normalize_origin_url "$dst" "$url"
 }
 
+# sync_project_registry copies the captain's project line into the sub-home
+# verbatim, base=<remote> token included, so a project whose working line is not
+# origin needs that remote in the seeded clone too: without it bin/fm-fleet-sync.sh
+# skips the seeded clone by name on every run and it never refreshes again.
+# Purely additive, so it is safe on a clone this seed did not create: a remote
+# that is already present is never rewritten, and nothing else in the clone is
+# touched. A present-but-divergent base remote is refused exactly like a
+# divergent origin, because syncing a clone against the wrong remote is the
+# failure this token exists to prevent. bin/fm-project-mode.sh has already
+# validated the name as a plain remote.
+copy_base_remote() {
+  local project=$1 base=$2 src=$3 dst=$4 url dst_url
+  case "$base" in ''|origin) return 0 ;; esac
+  dst_url=$(git -C "$dst" remote get-url "$base" 2>/dev/null || true)
+  url=$(git -C "$src" remote get-url "$base" 2>/dev/null || true)
+  if [ -z "$url" ]; then
+    if [ -z "$dst_url" ]; then
+      echo "warn: project $project records base remote $base but $src has no such remote; seeded clone will not refresh until it is added" >&2
+    fi
+    return 0
+  fi
+  url=$(normalize_origin_url "$src" "$url")
+  if [ -n "$dst_url" ]; then
+    dst_url=$(normalize_origin_url "$dst" "$dst_url")
+    [ "$dst_url" = "$url" ] || {
+      echo "error: seeded project $project at $dst has base remote $base $dst_url; expected $url" >&2
+      return 1
+    }
+    return 0
+  fi
+  git -C "$dst" remote add "$base" "$url" || return 1
+  git -C "$dst" fetch --quiet "$base" \
+    || echo "warn: seeded project $project could not fetch base remote $base from $url" >&2
+}
+
 acquire_treehouse_home() {
   local id=$1 home
   # Durably lease a firstmate worktree from the pool. The lease persists with no
@@ -538,7 +573,7 @@ EOF
 }
 
 clone_project() {
-  local project=$1 home=$2 src dst url dst_url mode caller_home
+  local project=$1 home=$2 src dst url dst_url mode base caller_home
   src="$PROJECTS/$project"
   dst=$(validate_project_destination "$home" "$project") || return 1
   [ -d "$src" ] || { echo "error: project $project not found at $src" >&2; return 1; }
@@ -546,7 +581,7 @@ clone_project() {
   # Read once so the binding cannot be read out of the assignment prefix that is
   # setting FM_HOME in the same command. This is our own home, not $home.
   caller_home=$FM_HOME
-  read -r mode _ <<EOF
+  read -r mode _ base <<EOF
 $(FM_HOME="$caller_home" FM_HOME_BINDING="$caller_home" FM_DATA_OVERRIDE="$DATA" "$FM_ROOT/bin/fm-project-mode.sh" "$project")
 EOF
   if [ "$mode" = local-only ]; then
@@ -562,10 +597,12 @@ EOF
       echo "error: seeded project $project at $dst has origin $dst_url; expected $url" >&2
       return 1
     }
-    return 0
+    copy_base_remote "$project" "$base" "$src" "$dst"
+    return
   fi
   url=$(source_origin_url "$project" "$mode" "$src") || return 1
   git clone --quiet "$url" "$dst"
+  copy_base_remote "$project" "$base" "$src" "$dst"
 }
 
 validate_seed_project() {
