@@ -66,6 +66,7 @@ Read that guarantee as conditional on the lease still being held, because it is 
 `bin/fm-leased-home-lib.sh` is the guard: teardown refuses to return, and spawn refuses to launch into, any home the caller does not own, decided from the `.fm-secondmate-home` marker and `data/secondmates.md` rather than from lease state, so a home that has ALREADY lost its lease is still protected.
 Run `bin/fm-leased-home-audit.sh` when a home's protection is in question; it reports every registered home that is unleased, leased to the wrong id, untracked by its pool, or already occupied by a task record, and exits non-zero when any of those hold.
 Repair what it reports by re-seeding or retiring through this skill, never by hand-editing pool state.
+The one exception is a `COLLISION` line, where the stale thing is a task record rather than the home: `bin/fm-collided-record-clear.sh <task-id>` retires that record alone and refuses unless the recorded worktree really is another agent's home, so the collided record never has to be cleared by hand and the teardown refusal never needs a bypass.
 
 `bin/fm-home-seed.sh` copies the charter into the secondmate home as `data/charter.md`.
 It also writes the required `.fm-secondmate-home` identity marker, which is gitignored and must remain in place for home validation.

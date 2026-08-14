@@ -14,8 +14,11 @@
 # exist. When two live task records in this home name the SAME endpoint, at most
 # one is right and nothing in firstmate's records says which, so fm-send names
 # both records and refuses rather than typing one task's instruction into the
-# other's session. This is decided before any backend is consulted, so it holds
-# for every backend; reconcile the stale record, then re-send.
+# other's session. It refuses on both resolution paths - naming the task and
+# naming the endpoint itself - because the explicit-endpoint path answers with
+# the first record that matches in glob order, which is the same silent guess.
+# This is decided before any backend is consulted, so it holds for every backend;
+# reconcile the stale record, then re-send.
 # Special keys instead of text: fm-send.sh <target> --key Enter
 # Key support is backend-specific: tmux/herdr support Escape, Enter, and C-c;
 # Orca currently supports Enter and C-c only, and rejects Escape.
@@ -131,6 +134,12 @@ fm_send_count_colons() {  # <string>
 # right and firstmate cannot tell which from its own records, so a message
 # addressed to one task would be typed into the other's session. Print the
 # conflicting meta and let the caller refuse rather than guess.
+#
+# fm_send_assert_unique_endpoint below is the single refusal, applied on BOTH
+# resolution branches: naming the task and naming the endpoint you can see reach
+# the same ambiguous pair, and the explicit-endpoint branch resolves through
+# fm_backend_meta_for_window, which answers with the FIRST matching record in
+# glob order - exactly the silent guess this refusal exists to prevent.
 fm_send_conflicting_meta_for_target() {  # <target> <own-meta>
   local target=$1 own=$2 meta other
   [ -n "$target" ] || return 1
@@ -145,8 +154,16 @@ fm_send_conflicting_meta_for_target() {  # <target> <own-meta>
   return 1
 }
 
+fm_send_assert_unique_endpoint() {  # <target> <own-meta> <tried>
+  local target=$1 own=$2 tried=$3 conflict
+  conflict=$(fm_send_conflicting_meta_for_target "$target" "$own" || true)
+  [ -n "$conflict" ] || return 0
+  echo "error: endpoint $target is recorded by both $own and $conflict, so a message for one task would land in the other's live session; reconcile the stale record before steering (tried $tried)" >&2
+  return 1
+}
+
 fm_send_resolve_target() {  # <raw-target>
-  local raw=$1 meta pane_meta target backend assumed colons id session hint conflict
+  local raw=$1 meta pane_meta target backend assumed colons id session hint
 
   RESOLVED_TARGET=""
   TARGET_BACKEND=""
@@ -164,11 +181,7 @@ fm_send_resolve_target() {  # <raw-target>
       echo "error: no backend target recorded in $meta (tried $RESOLUTION_TRIED)" >&2
       return 1
     fi
-    conflict=$(fm_send_conflicting_meta_for_target "$target" "$meta" || true)
-    if [ -n "$conflict" ]; then
-      echo "error: endpoint $target is recorded by both $meta and $conflict, so a message for one task would land in the other's live session; reconcile the stale record before steering (tried $RESOLUTION_TRIED)" >&2
-      return 1
-    fi
+    fm_send_assert_unique_endpoint "$target" "$meta" "$RESOLUTION_TRIED" || return 1
     backend=$(fm_backend_of_meta "$meta")
     RESOLVED_TARGET=$target
     TARGET_BACKEND=$backend
@@ -203,8 +216,11 @@ fm_send_resolve_target() {  # <raw-target>
       echo "error: no backend target recorded in $meta (tried explicit target '$raw' via recorded window/terminal; backend=from-meta)" >&2
       return 1
     fi
+    backend=$(fm_backend_of_meta "$meta")
+    fm_send_assert_unique_endpoint "$target" "$meta" \
+      "explicit target '$raw' matched $meta; backend=$backend" || return 1
     RESOLVED_TARGET=$target
-    TARGET_BACKEND=$(fm_backend_of_meta "$meta")
+    TARGET_BACKEND=$backend
     TARGET_META=$meta
     TARGET_HARNESS=$(fm_meta_get "$meta" harness)
     RESOLUTION_TRIED="explicit target '$raw' matched $meta; backend=$TARGET_BACKEND"

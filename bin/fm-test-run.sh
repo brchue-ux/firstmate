@@ -951,7 +951,7 @@ families_for_changed_path() {
     bin/fm-config-inherit-lib.sh|bin/fm-config-push.sh|bin/fm-shared*)
       printf '%s\n' secondmate
       ;;
-    bin/fm-leased-home*|bin/fm-turnend-artifact-lib.sh)
+    bin/fm-leased-home*|bin/fm-collided-record-clear.sh|bin/fm-turnend-artifact-lib.sh)
       # The home guard runs inside teardown's return path and spawn's worktree
       # acquisition, so a change here can refuse either lifecycle, not only the
       # secondmate unit that owns the predicate.

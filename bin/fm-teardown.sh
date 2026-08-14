@@ -66,8 +66,12 @@
 # secondmate id may return its own home. --force does NOT bypass this: it
 # authorizes discarding THIS task's work, never another agent's home. A child
 # swept from a retiring home is skipped whole when its recorded worktree= names a
-# foreign home, because that sweep answers a failed return with `rm -rf`.
-# bin/fm-leased-home-audit.sh reports homes whose lease is already lost.
+# foreign home, because that sweep answers a failed return with `rm -rf`, and the
+# home retirement then fails rather than reporting success for declined work.
+# bin/fm-leased-home-audit.sh reports homes whose lease is already lost, and
+# bin/fm-collided-record-clear.sh is the only supported way to retire an
+# already-collided task record - it clears the record alone and never touches the
+# home, so this refusal never needs a bypass.
 # Usage: fm-teardown.sh <task-id> [--force]
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
@@ -174,7 +178,10 @@ MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 # OWN home and is guarded by id inside teardown_treehouse_return instead.
 # --force does not reach this: it authorizes discarding THIS task's work only.
 if [ "$KIND" != secondmate ]; then
-  fm_leased_home_guard "$WT" "" "teardown of task $ID" "$SECONDMATE_REG" || exit 1
+  fm_leased_home_guard "$WT" "" "teardown of task $ID" "$SECONDMATE_REG" || {
+    echo "This task record is already collided and cannot be retired here at all. Clear the record alone - leaving that home untouched - with bin/fm-collided-record-clear.sh $ID." >&2
+    exit 1
+  }
 fi
 
 default_branch() {
@@ -1027,6 +1034,7 @@ validate_firstmate_home_children_removal() {
 
 cleanup_firstmate_home_children() {
   local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_return_rc
+  local foreign_refused=0
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
@@ -1042,9 +1050,15 @@ cleanup_firstmate_home_children() {
     # the turn-end hook artifacts, and the treehouse return that a failure answers
     # with `rm -rf` all come after. A kind=secondmate child is retired through
     # remove_firstmate_home, which checks its marker against the expected id.
+    # The retiring home's OWN registry is consulted alongside the primary's, the
+    # same fallback validate_firstmate_home_for_removal uses: a home can register
+    # grandchild homes the primary's registry has never seen, and the registry is
+    # the independent second source for a home whose marker was lost.
     if [ "$child_kind" != secondmate ] \
-       && ! fm_leased_home_guard "$child_wt" "" "teardown of child task $child_id" "$SECONDMATE_REG"; then
-      echo "Leaving child task $child_id and its recorded worktree in place; retire that home through its own secondmate id." >&2
+       && ! fm_leased_home_guard "$child_wt" "" "teardown of child task $child_id" \
+            "$SECONDMATE_REG" "$home/data/secondmates.md"; then
+      echo "Leaving the home it names, and child task $child_id's record in $sub_state, exactly as they are; retire that home through its own secondmate id, then reconcile the child record." >&2
+      foreign_refused=1
       continue
     fi
     child_backend=$(fm_backend_of_meta "$child_meta")
@@ -1108,6 +1122,14 @@ cleanup_firstmate_home_children() {
       "$sub_state/$child_id.meta" "$sub_state/$child_id.pi-ext.ts" \
       "$sub_state/$child_id.grok-turnend-token" "$sub_state/$child_id.kimi-turnend-token"
   done
+  # A skipped child is declined work, so this cannot report success. Failing here
+  # is also what makes the skip message true: the caller stops before returning
+  # THIS home to the pool, and a treehouse reset of the slot would otherwise take
+  # the very child record the operator was just told to reconcile with it.
+  [ "$foreign_refused" = 0 ] || {
+    echo "REFUSED: home $home cannot be retired while a child record in $sub_state names another secondmate's home." >&2
+    return 1
+  }
 }
 
 remove_secondmate_registry_entry() {

@@ -152,9 +152,10 @@ fm_leased_home_backing_repo() {  # <dir>
 # Print "<status><TAB><lease_holder><TAB><path>" for every worktree in the pool
 # that owns <project_dir>. Returns 1 when the pool cannot be read at all, which
 # callers must treat as "unknown", never as "no homes at risk".
-# An absent lease holder is emitted as a literal "-", never as an empty field:
-# tab is IFS whitespace, so `read` collapses consecutive tabs and an empty middle
-# field would silently shift the path out of its variable.
+# An absent status or lease holder is emitted as a literal "-", never as an empty
+# field: tab is IFS whitespace, so `read` collapses consecutive tabs and an empty
+# leading or middle field would silently shift the path out of its variable - and
+# a dropped entry reads as "this home is protected", the wrong direction to fail.
 fm_leased_home_pool_status() {  # <project-dir>
   local project=$1 out
   command -v treehouse >/dev/null 2>&1 || return 1
@@ -162,7 +163,7 @@ fm_leased_home_pool_status() {  # <project-dir>
   out=$( ( cd "$project" 2>/dev/null && treehouse status --json ) 2>/dev/null ) || return 1
   [ -n "$out" ] || return 1
   printf '%s' "$out" \
-    | jq -r '.[] | [.status, (if (.lease_holder // "") == "" then "-" else .lease_holder end), .path] | @tsv' 2>/dev/null
+    | jq -r '.[] | [(if (.status // "") == "" then "-" else .status end), (if (.lease_holder // "") == "" then "-" else .lease_holder end), .path] | @tsv' 2>/dev/null
 }
 
 # Return 0 when <dir> is a linked git worktree rather than a standalone clone.
@@ -184,14 +185,17 @@ fm_leased_home_is_linked_worktree() {  # <dir>
 # would otherwise be reported as unpooled - a false all-clear for a home that
 # really does sit in a recyclable slot. This reads the pool's own records
 # instead. Returns 1 when the pool has no record of the home, which means the
-# slot is untracked rather than protected.
+# slot is untracked rather than protected, and 2 when those records could not be
+# consulted at all - no jq, or no state file to read. A caller must keep those
+# two apart: "untracked" is a definite claim about pool state, so making it on
+# the strength of a missing optional tool is a false alarm on every home.
 fm_leased_home_pool_state_record() {  # <home>
   local home=$1 abs pool_dir state
-  command -v jq >/dev/null 2>&1 || return 1
-  abs=$(fm_leased_home_abs "$home") || return 1
+  command -v jq >/dev/null 2>&1 || return 2
+  abs=$(fm_leased_home_abs "$home") || return 2
   pool_dir=$(dirname "$(dirname "$abs")")
   state="$pool_dir/treehouse-state.json"
-  [ -f "$state" ] || return 1
+  [ -f "$state" ] || return 2
   jq -er --arg path "$abs" '
     .worktrees[] | select(.path == $path)
     | [(if (.leased // false) then "leased" else "unleased" end),

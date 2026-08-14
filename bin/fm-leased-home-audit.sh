@@ -30,7 +30,14 @@
 #   LOST_LEASE: <id> <home> is <status>, so an ordinary acquisition can take it
 #   HOLDER_MISMATCH: <id> <home> is leased to <holder>
 #   COLLISION: task <task-id> records worktree=<home>, the home of <id>
+#   UNKNOWN: <id> <home> home directory is missing
 #   UNKNOWN: <id> <home> pool state could not be read
+#
+# UNTRACKED is a definite claim about what the pool records say, so it is only
+# reported when at least one of the two readers actually answered. When neither
+# could be consulted - `treehouse` or `jq` missing, no pool state file to read -
+# the home is UNKNOWN instead, because this audit is the diagnostic every home
+# refusal points at and a fleet-wide false alarm there is worse than no answer.
 #
 # Exit status: 0 when every home is protected and uncollided, 1 otherwise, so it
 # can gate a script. Anything it reports is repaired through the
@@ -52,7 +59,7 @@ REGISTRIES=()
 for arg in "$@"; do
   case "$arg" in
     --quiet) QUIET=1 ;;
-    -h|--help) sed -n '2,37p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,44p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     -*) echo "fm-leased-home-audit.sh: unknown option $arg" >&2; exit 2 ;;
     *) REGISTRIES+=("$arg") ;;
   esac
@@ -75,8 +82,8 @@ report_ok() {
 # resolves to today, so a home in any other pool of that repo falls back to that
 # pool's own durable records rather than being called unpooled.
 audit_home() {  # <id> <home>
-  local id=$1 home=$2 abs backing pool status holder path record
-  local found_status="" found_holder=""
+  local id=$1 home=$2 abs backing pool status holder path record record_rc
+  local found_status="" found_holder="" consulted=0
   abs=$(fm_leased_home_abs "$home") || return 0
   if [ ! -d "$abs" ]; then
     report_problem "UNKNOWN: $id $abs home directory is missing"
@@ -90,6 +97,7 @@ audit_home() {  # <id> <home>
   fi
   if backing=$(fm_leased_home_backing_repo "$abs") \
      && pool=$(fm_leased_home_pool_status "$backing"); then
+    consulted=1
     while IFS=$'\t' read -r status holder path; do
       [ -n "$path" ] || continue
       path=$(fm_leased_home_abs "$path") || continue
@@ -98,10 +106,20 @@ audit_home() {  # <id> <home>
       found_holder=$holder
     done <<< "$pool"
   fi
-  if [ -z "$found_status" ] && record=$(fm_leased_home_pool_state_record "$abs"); then
-    IFS=$'\t' read -r found_status found_holder <<< "$record"
+  if [ -z "$found_status" ]; then
+    if record=$(fm_leased_home_pool_state_record "$abs"); then
+      consulted=1
+      IFS=$'\t' read -r found_status found_holder <<< "$record"
+    else
+      record_rc=$?
+      [ "$record_rc" -eq 2 ] || consulted=1
+    fi
   fi
   if [ -z "$found_status" ]; then
+    if [ "$consulted" = 0 ]; then
+      report_problem "UNKNOWN: $id $abs pool state could not be read"
+      return 0
+    fi
     report_problem "UNTRACKED: $id $abs is a pool worktree its pool has no record of, so its slot can be reallocated"
     return 0
   fi

@@ -17,6 +17,14 @@
 #   (d) teardown of an ordinary task worktree                     -> ALLOW  (no regression)
 #   (e) a secondmate retiring its own home                        -> ALLOW  (no regression)
 #   (x) a swept child whose worktree= names another's home        -> SKIP, never removed
+#   (z) same, registered only in the RETIRING home's own registry -> SKIP, never removed
+#
+# That refusal has no bypass, so the collided record needs its own way out.
+# bin/fm-collided-record-clear.sh is it, and it must stay unable to become a
+# general-purpose meta deleter:
+#   (A) a record naming another agent's home    -> record cleared, home untouched
+#   (B) a record naming an ordinary worktree    -> REFUSE
+#   (C) a secondmate's record naming its own home -> REFUSE
 #
 # Spawn guards the same boundary from the other side, in two layers:
 #   (t) a pool holding a registered home that lost its lease  -> REFUSE, no window
@@ -39,6 +47,7 @@
 # records, independently of which backend is in play:
 #   (m) two live task records naming the same endpoint  -> REFUSE the send
 #   (n) an endpoint recorded by one task only           -> ALLOW (no regression)
+#   (D) the same collision addressed by the endpoint itself -> REFUSE the send
 #
 # And it reaches the hook layer: a reused worktree can still hold the PREVIOUS
 # occupant's turn-end hook, which fires a wake for a task id that no longer
@@ -50,6 +59,11 @@
 #   (q) a grok/kimi token pointer for another task -> removed
 #   (r) this task's own hook                       -> kept
 #   (s) a settings.local.json with no firstmate hook -> kept
+#   (E) a hook a REAL prior spawn wrote, swept by a REAL later spawn -> removed
+#
+# And the audit that every one of those refusals names as the diagnostic must not
+# answer with a false alarm when it cannot read pool state at all:
+#   (F) neither the live listing nor the pool's own records answered -> UNKNOWN
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -230,6 +244,7 @@ fm_write_secondmate_meta "$case_dir/state/dictate.meta" "$case_dir/wt" \
   "firstmate:fm-dictate" alpha echo
 : > "$case_dir/treehouse.log"
 out=$(run_teardown "$case_dir" dictate --force 2>&1); rc=$?
+expect_code 1 "$rc" "child-foreign-home teardown reports declined work"$'\n'"--- output ---"$'\n'"$out"
 assert_contains "$out" "REFUSED" "the child sweep refuses a child recorded inside a foreign home"
 assert_contains "$out" "explore" "the refusal names the secondmate whose home the child recorded"
 assert_present "$case_dir/foreign-home/.fm-secondmate-home" \
@@ -240,7 +255,119 @@ for f in .claude/settings.local.json .opencode/plugins/fm-turn-end.js .fm-grok-t
 done
 assert_no_grep "return --force $case_dir/foreign-home" "$case_dir/treehouse.log" \
   "child-foreign-home: the foreign home was returned to the pool"
+# The skip message promises the child record survives, so the retirement of the
+# home holding it has to stop too: returning that home resets the slot and takes
+# the very record the operator was told to reconcile with it.
+assert_present "$case_dir/wt/state/child-a.meta" \
+  "child-foreign-home: the skipped child's record was deleted anyway"
+assert_no_grep "return --force $case_dir/wt" "$case_dir/treehouse.log" \
+  "child-foreign-home: the parent home was returned to the pool despite declined work"
 pass "fm-teardown.sh: a child recorded inside a foreign home is skipped, never removed"
+
+# (z) The same skip has to fire for a home registered ONLY in the retiring home's
+# own registry: a home can register grandchildren the primary has never seen, and
+# the registry is the independent second source for a home whose marker is gone.
+case_dir=$(make_teardown_case child-foreign-home-subregistry dictate)
+mark_secondmate_home "$case_dir/wt"
+register_secondmate "$case_dir/data/secondmates.md" dictate "$case_dir/wt"
+git -C "$case_dir/project" worktree add -q --detach "$case_dir/grandchild-home"
+# No marker of its own: the registry is the only thing that can identify it, and
+# the ONLY registry naming it is the retiring home's, not the primary's.
+rm -f "$case_dir/grandchild-home/.fm-secondmate-home"
+register_secondmate "$case_dir/wt/data/secondmates.md" wander "$case_dir/grandchild-home"
+fm_write_meta "$case_dir/wt/state/child-a.meta" \
+  "window=firstmate:fm-child-a" "endpoint_task_id=child-a" \
+  "worktree=$case_dir/grandchild-home" "project=$case_dir/project" \
+  "harness=echo" "kind=ship" "yolo=off"
+fm_write_secondmate_meta "$case_dir/state/dictate.meta" "$case_dir/wt" \
+  "firstmate:fm-dictate" alpha echo
+: > "$case_dir/treehouse.log"
+out=$(run_teardown "$case_dir" dictate --force 2>&1); rc=$?
+expect_code 1 "$rc" "child-foreign-home-subregistry teardown"$'\n'"--- output ---"$'\n'"$out"
+assert_contains "$out" "wander" "the refusal names the grandchild home's secondmate"
+assert_present "$case_dir/grandchild-home" \
+  "child-foreign-home-subregistry: the grandchild home was removed"
+assert_no_grep "return --force $case_dir/grandchild-home" "$case_dir/treehouse.log" \
+  "child-foreign-home-subregistry: the grandchild home was returned to the pool"
+pass "fm-teardown.sh: the child sweep consults the retiring home's own registry"
+
+# --- collided-record clearing -----------------------------------------------
+
+CLEAR="$ROOT/bin/fm-collided-record-clear.sh"
+
+run_clear() {  # <case-dir> <task-id>
+  local case_dir=$1 task_id=$2
+  FM_ROOT_OVERRIDE="$ROOT" \
+  FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_DATA_OVERRIDE="$case_dir/data" \
+  FM_CONFIG_OVERRIDE="$case_dir/config" \
+  PATH="$case_dir/fakebin:$PATH" \
+    "$CLEAR" "$task_id"
+}
+
+# (A) The way out of the teardown refusal: the record goes, the home stays. Every
+# file, the lease, and the turn-end hooks of the home it named are untouched,
+# which is the whole reason this is a separate command rather than a --force.
+case_dir=$(make_teardown_case clear-collided dictate)
+mark_secondmate_home "$case_dir/wt"
+mkdir -p "$case_dir/wt/.claude"
+printf '{"hooks":{"Stop":[]}}\n' > "$case_dir/wt/.claude/settings.local.json"
+printf 'token=dictate.grok-turnend-token\n' > "$case_dir/wt/.fm-grok-turnend"
+fm_write_meta "$case_dir/state/task-x1.meta" \
+  "window=firstmate:fm-task-x1" "endpoint_task_id=task-x1" \
+  "worktree=$case_dir/wt" "project=$case_dir/project" \
+  "harness=echo" "kind=ship" "yolo=off"
+: > "$case_dir/state/task-x1.status"
+: > "$case_dir/state/task-x1.turn-ended"
+: > "$case_dir/treehouse.log"
+# Teardown is the command an operator reaches for first, and it must keep saying
+# no - including under --force - and name this one instead.
+out=$(run_teardown "$case_dir" task-x1 --force 2>&1); rc=$?
+expect_code 1 "$rc" "clear-collided: teardown of a collided record"
+assert_contains "$out" "fm-collided-record-clear.sh task-x1" \
+  "the teardown refusal names the supported way out"
+out=$(run_clear "$case_dir" task-x1 2>&1); rc=$?
+expect_code 0 "$rc" "clear-collided run"$'\n'"--- output ---"$'\n'"$out"
+assert_contains "$out" "firstmate:fm-task-x1" "the cleared record's endpoint is reported"
+for suffix in meta status turn-ended; do
+  assert_absent "$case_dir/state/task-x1.$suffix" \
+    "clear-collided: the stale $suffix record survived"
+done
+assert_present "$case_dir/wt/.fm-secondmate-home" "clear-collided: the home marker was removed"
+assert_present "$case_dir/wt/.claude/settings.local.json" \
+  "clear-collided: the home's turn-end hook was removed"
+assert_present "$case_dir/wt/.fm-grok-turnend" "clear-collided: the home's hook pointer was removed"
+assert_no_return_ran "$case_dir" "clear-collided"
+[ "$(git -C "$case_dir/wt" rev-parse --abbrev-ref HEAD 2>/dev/null)" = fm/task-x1 ] \
+  || fail "clear-collided: the home's branch was touched"
+pass "fm-collided-record-clear.sh: clears the stale record and leaves the home alone"
+
+# (B) An ordinary task worktree is not a collision, so this must refuse: teardown
+# owns that record, and a command that cleared it would be a meta deleter.
+case_dir=$(make_teardown_case clear-ordinary)
+fm_write_meta "$case_dir/state/task-x1.meta" \
+  "window=firstmate:fm-task-x1" "endpoint_task_id=task-x1" \
+  "worktree=$case_dir/wt" "project=$case_dir/project" \
+  "harness=echo" "kind=ship" "yolo=off"
+out=$(run_clear "$case_dir" task-x1 2>&1); rc=$?
+expect_code 1 "$rc" "clear-ordinary run"
+assert_contains "$out" "REFUSED" "an ordinary worktree record is refused"
+assert_contains "$out" "fm-teardown.sh" "the refusal names the command that owns that record"
+assert_present "$case_dir/state/task-x1.meta" "clear-ordinary: an ordinary record was deleted"
+pass "fm-collided-record-clear.sh: refuses a record that names an ordinary worktree"
+
+# (C) A secondmate's own home is not a collision either; retiring it has to go
+# through teardown, which returns its lease.
+case_dir=$(make_teardown_case clear-own-home dictate)
+mark_secondmate_home "$case_dir/wt"
+register_secondmate "$case_dir/data/secondmates.md" dictate "$case_dir/wt"
+fm_write_secondmate_meta "$case_dir/state/dictate.meta" "$case_dir/wt" \
+  "firstmate:fm-dictate" alpha echo
+out=$(run_clear "$case_dir" dictate 2>&1); rc=$?
+expect_code 1 "$rc" "clear-own-home run"
+assert_contains "$out" "REFUSED" "a secondmate's own home record is refused"
+assert_present "$case_dir/state/dictate.meta" "clear-own-home: a live home record was deleted"
+pass "fm-collided-record-clear.sh: refuses a secondmate's record for its own home"
 
 # --- spawn refusal cases ----------------------------------------------------
 
@@ -305,15 +432,16 @@ SH
   chmod +x "$case_dir/fakebin/treehouse"
 }
 
-run_spawn() {  # <case-dir> <task-id> <settled-pane-path> [project-arg]
+run_spawn() {  # <case-dir> <task-id> <settled-pane-path> [project-arg] [extra-arg...]
   local case_dir=$1 id=$2 pane=$3 project_arg=${4:-$1/project}
+  shift $(( $# > 4 ? 4 : $# ))
   FM_ROOT_OVERRIDE='' FM_HOME="$case_dir/home" \
   FM_STATE_OVERRIDE="$case_dir/home/state" FM_DATA_OVERRIDE="$case_dir/home/data" \
   FM_PROJECTS_OVERRIDE="$case_dir/home/projects" FM_CONFIG_OVERRIDE="$case_dir/home/config" \
   FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
   FM_FAKE_PANE_PATH="$pane" FM_TMUX_LOG="$case_dir/tmux.log" \
   PATH="$case_dir/fakebin:$PATH" \
-    "$SPAWN" "$id" "$project_arg" 2>&1
+    "$SPAWN" "$id" "$project_arg" "$@" 2>&1
 }
 
 # (t) A pool that currently holds an unleased registered home can hand that home
@@ -495,6 +623,20 @@ expect_code 0 "$rc" "endpoint-unique send"$'\n'"--- output ---"$'\n'"$out"
 assert_grep "sess:fm-scraper" "$case_dir/tmux.log" "endpoint-unique: the message reached its own endpoint"
 pass "fm-send.sh: an unambiguous endpoint still receives its message"
 
+# (D) Addressing the pane you can see instead of the task takes the other
+# resolution branch, which answers with the FIRST record that matches in glob
+# order. That is the same silent guess, so it has to refuse the same way.
+case_dir=$(make_send_case endpoint-collision-explicit)
+: > "$case_dir/tmux.log"
+fm_write_meta "$case_dir/state/scraper.meta" "window=sess:fm-shared" "kind=secondmate"
+fm_write_meta "$case_dir/state/vectordb.meta" "window=sess:fm-shared" "kind=secondmate"
+out=$(run_send "$case_dir" sess:fm-shared "steer" 2>&1); rc=$?
+expect_code 1 "$rc" "endpoint-collision-explicit send"
+assert_contains "$out" "recorded by both" "the explicit-endpoint branch refuses an ambiguous endpoint"
+[ ! -s "$case_dir/tmux.log" ] \
+  || fail "endpoint-collision-explicit: text was typed despite the refusal"$'\n'"$(cat "$case_dir/tmux.log")"
+pass "fm-send.sh: refuses an ambiguous endpoint addressed by the endpoint itself"
+
 # --- stale turn-end hook cases ----------------------------------------------
 
 # shellcheck source=/dev/null
@@ -553,7 +695,65 @@ fm_turnend_clear_foreign "$wt" dictate 2>/dev/null
 assert_present "$wt/.claude/settings.local.json" "foreign-settings: a non-hook settings file was deleted"
 pass "fm-turnend-artifact-lib.sh: leaves a settings file carrying no turn-end hook alone"
 
+# (E) The cases above build their artifacts by hand, so nothing there ties the
+# reader to the writer: if bin/fm-spawn.sh ever changed the shape of the hook it
+# writes, the parser would stop matching, the sweep would silently clear nothing,
+# and those cases would still pass against the stale copy. This one drives the
+# real script on both ends - one spawn WRITES the hook, a later spawn into the
+# same reused slot has to sweep it - and it uses a different harness for the
+# second spawn on purpose, because writing your own hook only ever overwrites the
+# one artifact your own harness uses.
+case_dir=$(make_spawn_case spawn-hook-handover first-occupant)
+slot="$case_dir/.treehouse/pool-a/1/project"
+mkdir -p "$case_dir/home/data/second-occupant"
+printf 'brief for second-occupant\n' > "$case_dir/home/data/second-occupant/brief.md"
+fake_spawn_treehouse "$case_dir" ""
+out=$(run_spawn "$case_dir" first-occupant "$slot" "$case_dir/project" --harness claude); rc=$?
+expect_code 0 "$rc" "spawn-hook-handover first spawn"$'\n'"--- output ---"$'\n'"$out"
+assert_present "$slot/.claude/settings.local.json" \
+  "spawn-hook-handover: the first spawn wrote no claude turn-end hook to sweep"
+got=$(fm_turnend_artifact_task_id "$slot/.claude/settings.local.json")
+[ "$got" = first-occupant ] \
+  || fail "spawn-hook-handover: the parser read owner '$got' out of the hook fm-spawn.sh really wrote, expected first-occupant"
+out=$(run_spawn "$case_dir" second-occupant "$slot" "$case_dir/project" --harness opencode); rc=$?
+expect_code 0 "$rc" "spawn-hook-handover second spawn"$'\n'"--- output ---"$'\n'"$out"
+assert_absent "$slot/.claude/settings.local.json" \
+  "spawn-hook-handover: the previous occupant's claude hook survived the next spawn"
+got=$(fm_turnend_artifact_task_id "$slot/.opencode/plugins/fm-turn-end.js")
+[ "$got" = second-occupant ] \
+  || fail "spawn-hook-handover: the new occupant's own hook reads as owner '$got', expected second-occupant"
+pass "fm-spawn.sh: a real spawn sweeps the turn-end hook a real earlier spawn left in the slot"
+
 # --- audit fixtures ---------------------------------------------------------
+
+# (F) UNTRACKED asserts what the pool records SAY, so it may only be reported
+# when a reader actually answered. Here neither can: `treehouse status` fails and
+# the home's pool directory holds no treehouse-state.json, which is exactly the
+# shape a box without those tools installed produces for every home at once. The
+# audit is the diagnostic every home refusal names, so a definite fleet-wide
+# false alarm there is worse than admitting it does not know.
+unknown_dir="$TMP_ROOT/audit-unreadable"
+mkdir -p "$unknown_dir/state" "$unknown_dir/data" "$unknown_dir/fakebin"
+git init -q -b main "$unknown_dir/proj"
+git -C "$unknown_dir/proj" commit -q --allow-empty -m baseline
+mkdir -p "$unknown_dir/.treehouse/pool-z/1"
+git -C "$unknown_dir/proj" worktree add -q --detach "$unknown_dir/.treehouse/pool-z/1/proj" main
+cat > "$unknown_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = status ] && exit 1
+exit 0
+SH
+chmod +x "$unknown_dir/fakebin/treehouse"
+register_secondmate "$unknown_dir/data/secondmates.md" dictate "$unknown_dir/.treehouse/pool-z/1/proj"
+out=$(FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$unknown_dir/state" \
+  FM_DATA_OVERRIDE="$unknown_dir/data" PATH="$unknown_dir/fakebin:$PATH" \
+  "$AUDIT" 2>&1); rc=$?
+expect_code 1 "$rc" "audit-unreadable"
+assert_contains "$out" "UNKNOWN: dictate" "unreadable pool state is reported as unknown"
+assert_contains "$out" "pool state could not be read" "the UNKNOWN line says what could not be read"
+assert_not_contains "$out" "UNTRACKED" \
+  "unreadable pool state was reported as a definite untracked-slot claim"
+pass "fm-leased-home-audit.sh: reports UNKNOWN, not UNTRACKED, when no pool reader answered"
 
 if ! command -v jq >/dev/null 2>&1; then
   pass "fm-leased-home-audit.sh: lease cases skipped (jq not installed)"
