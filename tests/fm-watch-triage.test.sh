@@ -869,6 +869,15 @@ test_live_declared_pause_stays_an_awaiting_external_wait() {
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   wait_for_exit "$pid" 40 || fail "a live crew's first stale sight did not surface"
+  # Count the surfaced wake HERE, before anything acknowledges it. Every round
+  # below stops a watcher, and a watcher gap makes the next watcher open by
+  # resurfacing that downtime (check: rearm-resurface) unless the cycle is
+  # acknowledged the way firstmate does between cycles - and acknowledging
+  # consumes the durable queue this count reads. So the surfaced-once assertion
+  # runs first, and the rounds acknowledge afterwards.
+  wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' "$state/.wake-queue")
+  [ "$wakes" -eq 1 ] || fail "a live declared pause should surface once, got $wakes wakes"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional first-sight stop"
 
   # Rounds 2-4: the same unchanged hash must be absorbed on the pause cadence -
   # no wake, no wedge timer, and never a capture-failure or confirmed-dead wake
@@ -886,13 +895,15 @@ test_live_declared_pause_stays_an_awaiting_external_wait() {
     fi
     [ ! -s "$out" ] || { reap "$pid"; fail "a live declared pause printed a wake reason on round $round: $(cat "$out")"; }
     reap "$pid"
+    # Reaping a live watcher is a gap too; acknowledge whatever recovery it armed
+    # so the next round opens on supervision rather than on the resurface. A
+    # round that armed nothing has nothing to acknowledge, which is not a failure.
+    ack_stopped_cycle "$state" >/dev/null 2>&1 || true
     round=$((round + 1))
   done
   [ -e "$state/.paused-$key" ] || fail "a live declared pause lost its bounded pause cadence marker"
   [ ! -e "$state/.stale-since-$key" ] || fail "a live declared pause started the wedge timer"
   [ ! -e "$state/.missing-$key" ] || fail "a readable pane was recorded as a gone window"
-  wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' "$state/.wake-queue")
-  [ "$wakes" -eq 1 ] || fail "a live declared pause should surface once, got $wakes wakes"
 
   # Round 5: age the re-surface throttle past the cadence. The recheck fires as
   # an ordinary awaiting-external wait, not as a stopped crew.
