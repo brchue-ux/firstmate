@@ -473,21 +473,31 @@ seeded_origin_url() {
 # origin needs that remote in the seeded clone too: without it bin/fm-fleet-sync.sh
 # skips the seeded clone by name on every run and it never refreshes again.
 # Purely additive, so it is safe on a clone this seed did not create: a remote
-# that is already present is left exactly as it is, and nothing else in the clone
-# is touched. bin/fm-project-mode.sh has already validated the name as a plain
-# remote.
+# that is already present is never rewritten, and nothing else in the clone is
+# touched. A present-but-divergent base remote is refused exactly like a
+# divergent origin, because syncing a clone against the wrong remote is the
+# failure this token exists to prevent. bin/fm-project-mode.sh has already
+# validated the name as a plain remote.
 copy_base_remote() {
-  local project=$1 base=$2 src=$3 dst=$4 url
+  local project=$1 base=$2 src=$3 dst=$4 url dst_url
   case "$base" in ''|origin) return 0 ;; esac
-  if git -C "$dst" remote get-url "$base" >/dev/null 2>&1; then
-    return 0
-  fi
+  dst_url=$(git -C "$dst" remote get-url "$base" 2>/dev/null || true)
   url=$(git -C "$src" remote get-url "$base" 2>/dev/null || true)
   if [ -z "$url" ]; then
-    echo "warn: project $project records base remote $base but $src has no such remote; seeded clone will not refresh until it is added" >&2
+    if [ -z "$dst_url" ]; then
+      echo "warn: project $project records base remote $base but $src has no such remote; seeded clone will not refresh until it is added" >&2
+    fi
     return 0
   fi
   url=$(normalize_origin_url "$src" "$url")
+  if [ -n "$dst_url" ]; then
+    dst_url=$(normalize_origin_url "$dst" "$dst_url")
+    [ "$dst_url" = "$url" ] || {
+      echo "error: seeded project $project at $dst has base remote $base $dst_url; expected $url" >&2
+      return 1
+    }
+    return 0
+  fi
   git -C "$dst" remote add "$base" "$url" || return 1
   git -C "$dst" fetch --quiet "$base" \
     || echo "warn: seeded project $project could not fetch base remote $base from $url" >&2

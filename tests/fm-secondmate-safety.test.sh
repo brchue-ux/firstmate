@@ -1007,11 +1007,12 @@ test_home_seed_copies_base_remote_into_seeded_clone() {
 }
 
 test_home_seed_backfills_base_remote_into_existing_clone() {
-  local home subhome seeded work upstream_abs fork_abs sync_out head_before
+  local home subhome seeded work upstream_abs fork_abs sync_out head_before err
   home="$TMP_ROOT/base-backfill-home"
   subhome="$TMP_ROOT/base-backfill-subhome"
   seeded="$subhome/projects/alpha"
   work="$TMP_ROOT/base-backfill-work"
+  err="$TMP_ROOT/base-backfill.err"
   mkdir -p "$home/projects" "$home/data" "$home/state" "$home/remotes"
   fm_git_init_commit "$home/projects/alpha"
   git -C "$home/projects/alpha" branch -M main
@@ -1048,14 +1049,25 @@ test_home_seed_backfills_base_remote_into_existing_clone() {
   [ "$(git -C "$seeded" rev-parse HEAD)" = "$(git -C "$seeded" rev-parse fork/main)" ] \
     || fail "existing clone was not fast-forwarded to its base remote"
 
-  # A base remote the clone already has is never rewritten, whatever it points at.
-  git -C "$seeded" remote set-url fork "file://$upstream_abs"
+  # A matching base remote is accepted as-is, and re-seeding stays idempotent.
   FM_HOME="$home" FM_SECONDMATE_CHARTER='base backfill scope' FM_SECONDMATE_SCOPE='base backfill scope' \
     "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha >/dev/null \
-    || fail "re-seed failed when the base remote was already present"
+    || fail "re-seed failed when the base remote was already present and matching"
+  [ "$(git -C "$seeded" remote get-url fork)" = "file://$fork_abs" ] \
+    || fail "re-seed disturbed a matching base remote"
+
+  # A base remote pointing somewhere else is refused, never rewritten: syncing
+  # that clone against the wrong remote is the failure the token exists to stop.
+  git -C "$seeded" remote set-url fork "file://$upstream_abs"
+  if FM_HOME="$home" FM_SECONDMATE_CHARTER='base backfill scope' FM_SECONDMATE_SCOPE='base backfill scope' \
+    "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha >/dev/null 2>"$err"; then
+    fail "re-seed accepted a clone whose base remote points at a different repo"
+  fi
+  grep -F "has base remote fork" "$err" >/dev/null \
+    || fail "re-seed did not explain the base remote mismatch"
   [ "$(git -C "$seeded" remote get-url fork)" = "file://$upstream_abs" ] \
-    || fail "re-seed overwrote an existing base remote URL"
-  pass "home seeding backfills a missing base remote into an existing clone without overwriting one"
+    || fail "re-seed overwrote a divergent base remote URL"
+  pass "home seeding backfills a missing base remote and refuses a divergent one"
 }
 
 test_home_seed_skips_initialized_existing_no_mistakes_projects() {
