@@ -377,22 +377,26 @@ attached_cycle_end_is_explained() {
 
 # Close a cycle whose reason line this arm could not read.
 #
-# The durable evidence above is consulted FIRST, and the bounded terminal-delivery
-# ledger is the fallback. Order matters: when the wake queue advanced during the
-# cycle, the OWNING arm is already relaying that exact reason, so reading it back
-# out of the ledger here would print the same wake twice - once from the owner and
-# once from this attached arm. The ledger's own purpose is the case the evidence
-# cannot account for, where the cycle did deliver a reason but nothing else
-# records that it was handled. Only a cycle neither accounts for is the typed
-# nonzero failure.
+# The bounded terminal-delivery ledger is consulted FIRST, and the durable
+# evidence above is the fallback. Order matters, and this way round is
+# deliberate: the ledger reports what the cycle ACTUALLY delivered, while the
+# evidence only infers that something else must be relaying it. The
+# wake-enqueued inference in particular reads an advanced queue counter as "the
+# owning arm is relaying that reason", which is only true when an owning arm
+# exists - a watcher started directly, with a single attached arm following it,
+# advances the same counter with nobody else to surface the reason. Preferring
+# the ledger keeps that case reported instead of silently swallowed; a reason
+# surfaced twice is collapsed by the drain's own duplicate-wake handling, and
+# presented records stay durable until their generation-bound acknowledgement.
+# Only a cycle neither accounts for is the typed nonzero failure.
 close_unobserved_cycle() {
   local i reason clean_identity record_pid record_identity record_reason
-  attached_cycle_end_is_explained && return 0
   clean_identity=$(printf '%s' "$cycle_watcher_identity" | tr '\t\r\n' '   ')
   i=0
   while ! fm_lock_try_acquire "$WATCH_DELIVERY_LOCK"; do
     [ "$i" -lt 20 ] || {
       # The ledger is unreadable right now, which is not evidence of an outage.
+      attached_cycle_end_is_explained && return 0
       fail_unexplained_cycle
       return 1
     }
@@ -412,6 +416,7 @@ close_unobserved_cycle() {
     printf '%s\n' "$reason"
     return 0
   fi
+  attached_cycle_end_is_explained && return 0
   fail_unexplained_cycle
   return 1
 }

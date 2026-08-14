@@ -583,7 +583,13 @@ test_two_arms_and_one_wake_produce_no_false_failure() {
     || fail "attached arm exited nonzero for a normally ended cycle (status $attach_status): $(cat "$attachout")"
   ! grep -qF 'watcher: FAILED' "$attachout" \
     || fail "attached arm reported FAILED for a cycle that ended with a real wake: $(cat "$attachout")"
-  grep -q "arm_pid=$attachpid.*origin=attached.*reason=attached-cycle-explained.*successor=wake-enqueued" "$state/.watch-cycle-exits.log" \
+  # Either accounting is a real answer to "why was this not a failure", and which
+  # one applies depends on whether the watcher published its reason to the
+  # delivery ledger before releasing the lock (docs/watcher-continuity.md): a
+  # matching record reports the delivered wake, and only a cycle the ledger
+  # cannot account for falls through to the wake-enqueued inference. What must
+  # never appear is a cycle end with no accounting at all.
+  grep -qE "arm_pid=$attachpid.*origin=attached.*reason=(attached-cycle-explained.*successor=wake-enqueued|attached-delivered-wake)" "$state/.watch-cycle-exits.log" \
     || fail "lifecycle ledger did not record WHY the attached cycle end was not a failure"
   pass "two arms plus one actionable wake produce no failure from the attached arm"
 }
