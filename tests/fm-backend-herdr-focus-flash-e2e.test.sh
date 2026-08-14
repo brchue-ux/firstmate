@@ -237,7 +237,17 @@ C_SURVIVOR_ORDER=$(printf '%s' "$C_ORDER" | tr ',' '\n' | grep -v "^$C_DOOMED_WS
 
 # One persistent background child of the pane's shell, started outside any
 # worktree so nothing reaps it, is enough to fail the proof on every sample.
-lab pane send-text "$C_DOOMED_PANE" 'cd / && sleep 3000 &' >/dev/null \
+# The `cd` and the background command are submitted separately on purpose. As a
+# single `cd / && sleep 3000 &` AND-list, bash forks a subshell for the whole
+# list and does not exec-optimize it away, so the sleep is a GRANDchild of the
+# pane's shell and the direct-child probe below never sees it; zsh optimizes the
+# same list into a direct child, which is why this only shows up off macOS. Two
+# submissions produce a direct child of the pane's shell under both shells.
+lab pane send-text "$C_DOOMED_PANE" 'cd /' >/dev/null \
+  || fail 'could not send the Part C working-directory command'
+lab pane send-keys "$C_DOOMED_PANE" enter >/dev/null \
+  || fail 'could not submit the Part C working-directory command'
+lab pane send-text "$C_DOOMED_PANE" 'sleep 3000 &' >/dev/null \
   || fail 'could not send the Part C persistent-child command'
 lab pane send-keys "$C_DOOMED_PANE" enter >/dev/null \
   || fail 'could not submit the Part C persistent-child command'
