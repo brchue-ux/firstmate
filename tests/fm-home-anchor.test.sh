@@ -24,6 +24,7 @@
 #   (l) resolving a home issues no declaration of its own to descendants
 #   (m) a second resolve in the same process settles the same way
 #   (n) a resolution record from outside the process declares nothing
+#   (o) the tracked session-start hook refuses an inherited home
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -422,3 +423,23 @@ res=$(run_in "$PRIMARY" env FM_HOME="$MATE" bash -c \
 expect_code 1 "${res%%|*}" "a resolution record from outside must not bless an inherited home"
 assert_not_contains "${res#*|}" "local-only" "an environment-supplied record must not reach the mate"
 pass "a resolution record arriving in the environment is not a decision this process made"
+
+# ---------------------------------------------------------------------------
+# (o) The tracked session-start hook refuses an ambiently inherited home.
+# bin/fm-sessionstart-run.sh runs the startup digest from the harness's
+# session-open hook, and that digest drains the durable wake queue and runs the
+# mutating bootstrap sweeps. A session opened from another home's pane inherits
+# that home's FM_HOME, so without the resolver this hook would take the other
+# home's session lock and edit its durable records before the first turn.
+# FM_ROOT_OVERRIDE points the code root at a plain checkout so the hook's own
+# primary-scope predicate would otherwise admit this call, which keeps the case
+# from passing for an unrelated reason.
+# ---------------------------------------------------------------------------
+SESSIONSTART_RUN="$ROOT/bin/fm-sessionstart-run.sh"
+res=$(run_in "$PRIMARY" env FM_HOME="$MATE" FM_ROOT_OVERRIDE="$PRIMARY" "$SESSIONSTART_RUN")
+expect_code 0 "${res%%|*}" "the session-start hook must exit 0 on a refused home, never fail the session open"
+[ -z "${res#*|}" ] \
+  || fail "the session-start hook emitted a digest for an inherited home: ${res#*|}"
+[ ! -e "$MATE/state/.session-start-complete" ] \
+  || fail "the session-start hook recorded a completed digest in the inherited home"
+pass "the session-start hook refuses an ambiently inherited home instead of digesting it"
