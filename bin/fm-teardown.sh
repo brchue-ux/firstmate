@@ -52,6 +52,17 @@
 # leased home releases its durable treehouse lease so the pool slot is freed,
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
+#
+# Foreign-home refusal: every treehouse return here first passes through
+# bin/fm-leased-home-lib.sh's ownership guard, because `treehouse return`
+# releases a durable lease for any caller that does not pass a lease
+# precondition. A recorded worktree= can name a pool slot that was reallocated
+# and then leased as a secondmate home, so teardown refuses when its target is a
+# secondmate home that this task does not own - identified by the home's own
+# .fm-secondmate-home marker or by data/secondmates.md. Only the matching
+# secondmate id may return its own home. --force does NOT bypass this: it
+# authorizes discarding THIS task's work, never another agent's home.
+# bin/fm-leased-home-audit.sh reports homes whose lease is already lost.
 # Usage: fm-teardown.sh <task-id> [--force]
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
@@ -108,6 +119,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-lock-lib.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
+# shellcheck source=bin/fm-leased-home-lib.sh
+. "$SCRIPT_DIR/fm-leased-home-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
@@ -594,9 +607,17 @@ cleanup_stale_lock_for_safety_check() {
 
 # Return a worktree/home via `treehouse return --force`, tolerating a transient or
 # stale git index.lock left by a killed crew process. See the script header.
+# <owner-id> is the only secondmate allowed to have its home returned here; it is
+# empty for every ordinary task worktree, which owns no home at all.
 teardown_treehouse_return() {
-  local dir=$1 cd_dir=$2 label=$3 post_cleanup_check=${4:-}
+  local dir=$1 cd_dir=$2 label=$3 post_cleanup_check=${4:-} owner_id=${5:-}
   local out lock attempt=0 max_retries lock_desc
+
+  # `treehouse return` releases a durable lease for any caller, so a stale or
+  # mistaken path that now names a live secondmate home would kill that
+  # secondmate's processes and hand its home back to the pool. Refuse before the
+  # first destructive command; see bin/fm-leased-home-lib.sh.
+  fm_leased_home_guard "$dir" "$owner_id" "teardown of $label" "$SECONDMATE_REG" || return 1
 
   # Capture stdout+stderr so non-lock failures stay visible and lock failures can
   # be matched by signature even when the lock file is already gone mid-check.
@@ -934,7 +955,7 @@ remove_firstmate_home() {
       echo "error: treehouse command not found; cannot return $label $abs_home_path" >&2
       return 1
     }
-    teardown_treehouse_return "$abs_home_path" "$FM_ROOT" "$label" || {
+    teardown_treehouse_return "$abs_home_path" "$FM_ROOT" "$label" "" "$expected_id" || {
       echo "error: treehouse return failed for $label $abs_home_path; lease may still be held" >&2
       return 1
     }

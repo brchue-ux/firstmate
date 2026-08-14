@@ -57,9 +57,15 @@ bin/fm-home-seed.sh <id> <home|-> {<project>...|--no-projects}
 Pass `--no-projects` in the project position to seed the project-less home described above; the same mutual-exclusion and fail-loud-on-omission rules apply.
 It may only seed a home with no project clones or project-registry entries, and refuses conversion of populated homes without changing them.
 `-` durably leases a fresh firstmate worktree via `treehouse get --lease` under the secondmate id.
-The lease survives with no live process and is never recycled by later `treehouse get` or `prune`.
+The lease survives with no live process, and while it is held the slot is never recycled by a later `treehouse get` or `prune`.
 The slot stays reserved across restarts until the lease is released.
 Release happens only on explicit retirement or seed rollback, never on routine restart or recovery.
+
+Read that guarantee as conditional on the lease still being held, because it is the only thing separating a home from an ordinary task worktree in the same pool.
+`treehouse return` releases a lease for any caller that does not pass `--if-lease-holder`/`--if-lease-id`, and firstmate passes neither, so one teardown aimed at a stale `worktree=` that now names a home drops that home into the free pool - after which an ordinary `treehouse get` is entitled to hand it out, with no treehouse fault involved.
+`bin/fm-leased-home-lib.sh` is the guard: teardown refuses to return, and spawn refuses to launch into, any home the caller does not own, decided from the `.fm-secondmate-home` marker and `data/secondmates.md` rather than from lease state, so a home that has ALREADY lost its lease is still protected.
+Run `bin/fm-leased-home-audit.sh` when a home's protection is in question; it reports every registered home that is unleased, leased to the wrong id, untracked by its pool, or already occupied by a task record, and exits non-zero when any of those hold.
+Repair what it reports by re-seeding or retiring through this skill, never by hand-editing pool state.
 
 `bin/fm-home-seed.sh` copies the charter into the secondmate home as `data/charter.md`.
 It also writes the required `.fm-secondmate-home` identity marker, which is gitignored and must remain in place for home validation.
