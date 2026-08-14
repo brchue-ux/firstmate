@@ -869,11 +869,11 @@ auth_root="$TMP_ROOT/stale-hooks-authroot"
 wt=$(make_hook_worktree stale-hooks vector-fingerprint-instruction-design \
   /home/x/state "$auth_root" fm.aaaabbbbcccc)
 for f in .claude/settings.local.json .opencode/plugins/fm-turn-end.js .fm-grok-turnend .fm-kimi-turnend; do
-  got=$(HOME="$auth_root"; GROK_HOME="$auth_root/.grok"; fm_turnend_artifact_task_id "$wt/$f")
+  got=$(HOME="$auth_root" GROK_HOME="$auth_root/.grok" fm_turnend_artifact_task_id "$wt/$f")
   [ "$got" = vector-fingerprint-instruction-design ] \
     || fail "stale-hooks: $f resolved owner '$got', expected the previous occupant's task id"
 done
-out=$(HOME="$auth_root"; GROK_HOME="$auth_root/.grok"; fm_turnend_clear_foreign "$wt" dictate 2>&1)
+out=$(HOME="$auth_root" GROK_HOME="$auth_root/.grok" fm_turnend_clear_foreign "$wt" dictate 2>&1)
 assert_contains "$out" "previous occupant" "the sweep reports what it removed"
 for f in .claude/settings.local.json .opencode/plugins/fm-turn-end.js .fm-grok-turnend .fm-kimi-turnend; do
   assert_absent "$wt/$f" "stale-hooks: $f survived the sweep"
@@ -883,7 +883,7 @@ pass "fm-turnend-artifact-lib.sh: clears every turn-end hook a prior occupant le
 # (r) This task's own hooks are never swept.
 auth_root="$TMP_ROOT/own-hooks-authroot"
 wt=$(make_hook_worktree own-hooks dictate /home/x/state "$auth_root" fm.ddddeeeeffff)
-( HOME="$auth_root"; GROK_HOME="$auth_root/.grok"; fm_turnend_clear_foreign "$wt" dictate 2>/dev/null )
+HOME="$auth_root" GROK_HOME="$auth_root/.grok" fm_turnend_clear_foreign "$wt" dictate 2>/dev/null
 for f in .claude/settings.local.json .opencode/plugins/fm-turn-end.js .fm-grok-turnend .fm-kimi-turnend; do
   assert_present "$wt/$f" "own-hooks: the sweep removed this task's own $f"
 done
@@ -895,10 +895,10 @@ pass "fm-turnend-artifact-lib.sh: leaves this task's own turn-end hooks in place
 auth_root="$TMP_ROOT/orphan-pointer-authroot"
 wt=$(make_hook_worktree orphan-pointer someone-else /home/x/state "$auth_root" fm.111122223333)
 rm -f "$auth_root/.grok/hooks/fm-turn-end.d/fm.111122223333"
-got=$(HOME="$auth_root"; GROK_HOME="$auth_root/.grok"; fm_turnend_artifact_task_id "$wt/.fm-grok-turnend")
+got=$(HOME="$auth_root" GROK_HOME="$auth_root/.grok" fm_turnend_artifact_task_id "$wt/.fm-grok-turnend")
 [ -z "$got" ] \
   || fail "orphan-pointer: a pointer with no authorization file was attributed to task '$got'"
-( HOME="$auth_root"; GROK_HOME="$auth_root/.grok"; fm_turnend_clear_foreign "$wt" dictate 2>/dev/null )
+HOME="$auth_root" GROK_HOME="$auth_root/.grok" fm_turnend_clear_foreign "$wt" dictate 2>/dev/null
 assert_present "$wt/.fm-grok-turnend" \
   "orphan-pointer: an unattributable pointer was removed on a guess"
 pass "fm-turnend-artifact-lib.sh: leaves a pointer it cannot tie to a task alone"
@@ -960,7 +960,7 @@ expect_code 0 "$rc" "spawn-grok-handover first spawn"$'\n'"--- output ---"$'\n'"
 assert_present "$slot/.fm-grok-turnend" \
   "spawn-grok-handover: the first spawn wrote no grok turn-end pointer to sweep"
 grok_home="$case_dir/grokhome"
-got=$(HOME="$case_dir/fakehome"; GROK_HOME="$grok_home"; fm_turnend_artifact_task_id "$slot/.fm-grok-turnend")
+got=$(HOME="$case_dir/fakehome" GROK_HOME="$grok_home" fm_turnend_artifact_task_id "$slot/.fm-grok-turnend")
 [ "$got" = grok-first ] \
   || fail "spawn-grok-handover: the parser read owner '$got' out of the pointer fm-spawn.sh really wrote, expected grok-first"
 out=$(run_spawn "$case_dir" claude-second "$slot" "$case_dir/project" --harness claude); rc=$?
