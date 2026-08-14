@@ -962,6 +962,50 @@ test_home_seed_resolves_relative_source_origins() {
   pass "home seeding resolves relative source origins against the source project"
 }
 
+test_home_seed_copies_base_remote_into_seeded_clone() {
+  local home subhome seeded work upstream_abs fork_abs sync_out
+  home="$TMP_ROOT/base-remote-home"
+  subhome="$TMP_ROOT/base-remote-subhome"
+  seeded="$subhome/projects/alpha"
+  work="$TMP_ROOT/base-remote-work"
+  mkdir -p "$home/projects" "$home/data" "$home/state" "$home/remotes"
+  fm_git_init_commit "$home/projects/alpha"
+  git -C "$home/projects/alpha" branch -M main
+  # origin is an upstream nobody pushes to; the fork carries the working line.
+  git clone --quiet --bare "$home/projects/alpha" "$home/remotes/base-alpha-upstream.git"
+  git clone --quiet --bare "$home/projects/alpha" "$home/remotes/base-alpha-fork.git"
+  upstream_abs=$(cd "$home/remotes/base-alpha-upstream.git" && pwd)
+  fork_abs=$(cd "$home/remotes/base-alpha-fork.git" && pwd)
+  git -C "$home/projects/alpha" remote add origin "file://$upstream_abs"
+  git -C "$home/projects/alpha" remote add fork "file://$fork_abs"
+  printf '%s\n' '- alpha [direct-PR base=fork] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
+  scaffold_secondmate_charter "$home" design 'design domain' alpha \
+    || fail "charter scaffold failed for base remote seed test"
+  # Move the fork ahead of the upstream, so only a seeded clone that carries the
+  # fork remote can refresh at all.
+  git clone --quiet "file://$fork_abs" "$work"
+  printf 'fork line\n' > "$work/file.txt"
+  git -C "$work" add file.txt
+  git -C "$work" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm F1
+  git -C "$work" push -q origin main
+
+  FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha >/dev/null \
+    || fail "seed failed for a project with a recorded base remote"
+
+  [ -d "$seeded/.git" ] || fail "base remote project was not cloned"
+  [ "$(git -C "$seeded" remote get-url fork)" = "file://$fork_abs" ] \
+    || fail "seeded clone did not copy the source's base remote"
+  grep -F 'base=fork' "$subhome/data/projects.md" >/dev/null \
+    || fail "sub-home registry did not carry the base remote token"
+
+  sync_out=$(FM_HOME="$subhome" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-fleet-sync.sh" "$seeded" 2>/dev/null)
+  printf '%s\n' "$sync_out" | grep -F 'alpha: synced' >/dev/null \
+    || fail "seeded base remote clone did not sync: $sync_out"
+  [ "$(git -C "$seeded" rev-parse HEAD)" = "$(git -C "$seeded" rev-parse fork/main)" ] \
+    || fail "seeded clone was not fast-forwarded to its base remote"
+  pass "home seeding copies a project's base remote into the seeded clone"
+}
+
 test_home_seed_skips_initialized_existing_no_mistakes_projects() {
   local home subhome err fakebin log origin
   home="$TMP_ROOT/existing-initialized-home"
@@ -2196,6 +2240,7 @@ test_home_seed_refuses_home_overlapping_registered_home
 test_home_seed_refuses_remote_backed_project_without_origin
 test_home_seed_refuses_existing_remote_backed_project_with_wrong_origin
 test_home_seed_resolves_relative_source_origins
+test_home_seed_copies_base_remote_into_seeded_clone
 test_home_seed_skips_initialized_existing_no_mistakes_projects
 test_home_seed_refuses_uninitialized_existing_no_mistakes_project
 test_home_seed_refuses_project_destinations_outside_subhome
