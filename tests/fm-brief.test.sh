@@ -251,7 +251,8 @@ test_ship_mode_is_explicit_not_registry() {
   local home brief
   home="$TMP_ROOT/explicit-over-registry-home"
   write_registry "$home"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-explicit-a5 direct-proj --mode no-mistakes >/dev/null 2>&1 \
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-explicit-a5 direct-proj --mode no-mistakes \
+    --pr-repo owner/direct-proj --pr-base main >/dev/null 2>&1 \
     || fail "explicit no-mistakes brief on a direct-PR project should scaffold"
   brief="$home/data/brief-explicit-a5/brief.md"
   grep -qx "Delivery contract: mode=no-mistakes" "$brief" \
@@ -313,7 +314,8 @@ test_faster_paths_use_configured_authority_without_stacked_review() {
   assert_no_grep "make \`--intent\` preserve all relevant content from this brief" "$home/data/$id/brief.md" \
     "local-only brief must not include the no-mistakes --intent contract"
   id="brief-direct-intent-a4"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" direct-proj --mode direct-PR >/dev/null 2>&1
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" direct-proj --mode direct-PR \
+    --pr-repo owner/direct-proj --pr-base main >/dev/null 2>&1
   assert_no_grep "make \`--intent\` preserve all relevant content from this brief" "$home/data/$id/brief.md" \
     "direct-PR brief must not include the no-mistakes --intent contract"
   pass "fm-brief.sh: faster paths use configured authority without stacked review"
