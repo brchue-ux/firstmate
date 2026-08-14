@@ -59,17 +59,20 @@ An acknowledged episode does not freeze the generation, because the next downtim
 
 `bin/fm-watch-arm.sh` never returns a clean empty success from an owned cycle.
 An actionable child output returns that reason normally.
-A zero/empty child return rechecks the home lock and beacon, attaches to a verified healthy successor when one exists, or resolves the close against the watcher's bounded terminal-delivery ledger.
+A zero/empty child return rechecks the home lock and beacon, attaches to a verified healthy successor when one exists, or resolves the close without one.
 An attached arm follows verified identity-matched successors and resolves the same way when that chain ends without one, because it holds no handle on the watcher's stdout and cannot read the reason line itself.
-Before releasing its singleton lock after printing an actionable reason, the watcher records that reason with its PID and process identity in `state/.watch-deliveries.log`.
-A matching PID and identity lets an attached arm report the delivered reason and exit zero even after its durable wake was handled and acknowledged, while an unrelated queue producer or a recycled PID cannot satisfy the match.
+Its outcome depends on whether supervision is genuinely absent rather than on whether that arm personally saw the wake reason.
 
-When the ledger does not account for the cycle either, the outcome still depends on whether supervision is genuinely absent rather than on whether that arm personally saw the wake reason.
-Before reporting the typed failure it accepts three pieces of durable evidence that the cycle ended normally: the wake queue advanced during the cycle, so the owning arm is relaying that reason; this home no longer needs supervision at all; or a live Stop auto-arm claim held by a process other than this arm's own launcher already owns the next cycle.
+It first accepts three pieces of durable evidence that the cycle ended normally: the wake queue advanced during the cycle, so the owning arm is relaying that reason; this home no longer needs supervision at all; or a live Stop auto-arm claim held by a process other than this arm's own launcher already owns the next cycle.
 Any of those exits 0 quietly and records the classification in the lifecycle ledger as `attached-cycle-explained` with the deciding evidence in the successor field, which keeps a real unexplained cycle end distinguishable from a normal one.
 A claim held by this arm's own launcher is deliberately excluded: it says nothing about the next cycle, so honoring it would let a genuine outage close quietly.
 This is what the Claude ordering above requires - the successor arms at the next Stop, so an attached arm that waited for one would report a certainty, not a race.
-Only a cycle that neither the delivery ledger nor that evidence accounts for emits `watcher: FAILED - cycle ended without an actionable reason` and exits nonzero.
+
+Only when none of that evidence accounts for the cycle does the arm consult the watcher's bounded terminal-delivery ledger.
+Before releasing its singleton lock after printing an actionable reason, the watcher records that reason with its PID and process identity in `state/.watch-deliveries.log`.
+A matching PID and identity lets the arm report the delivered reason and exit zero even after its durable wake was handled and acknowledged, while an unrelated queue producer or a recycled PID cannot satisfy the match.
+The evidence is checked first on purpose: when the queue advanced, the owning arm is already relaying that exact reason, so reading it back out of the ledger would print the same wake twice.
+Only a cycle that neither the evidence nor the delivery ledger accounts for emits `watcher: FAILED - cycle ended without an actionable reason` and exits nonzero.
 
 That quiet clean-empty exit is a confirmed success on the Claude Stop-hook path specifically, which is the path that reads the arm's exit and output directly.
 Pi's and OpenCode's close handlers still classify a clean empty close of an arm child as a typed continuity failure, so an explained attached cycle is still reported as a supervision failure on those two primaries.
