@@ -814,7 +814,7 @@ test_claude_scopes_out_ambient_anthropic_api_key() {
   rec=$(make_spawn_case profile-claude-authkey claude "$id")
   read_case_record "$rec"
 
-  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
   expect_code 0 "$status" "claude spawn should succeed"
   launch=$(cat "$LAUNCH_LOG")
@@ -829,7 +829,7 @@ test_non_claude_harness_does_not_scope_anthropic_api_key() {
   rec=$(make_spawn_case profile-codex-authkey codex "$id")
   read_case_record "$rec"
 
-  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
   expect_code 0 "$status" "codex spawn should succeed"
   launch=$(cat "$LAUNCH_LOG")
