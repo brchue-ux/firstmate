@@ -41,7 +41,10 @@ mkdir -p "$FLEET_MAIN/data" "$FLEET_MATE/data"
 # name is shortened, so matching it proves the sweep derives names forward
 # instead of stripping a prefix off one.
 FLEET_LONG_ID="long-fleet-task-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-FLEET_LONG_SESSION=$(fm_browser_session_name "$FLEET_LONG_ID")
+# Both names are derived against the home that OWNS the task, which is the mate
+# home here, because the same id in another home is a different session now.
+FLEET_LONG_SESSION=$(fm_browser_session_name "$FLEET_LONG_ID" "$FLEET_MATE")
+FLEET_OTHER_SESSION=$(fm_browser_session_name other-home-task "$FLEET_MATE")
 cat > "$FLEET_MAIN/data/backlog.md" <<'EOF'
 # Backlog
 
@@ -106,91 +109,28 @@ EOF
 printf -- '- mate - owns alpha work (home: %s; scope: alpha; projects: alpha; added 2026-08-01)\n' \
   "$FLEET_BENIGN_MATE" > "$FLEET_BENIGN_MAIN/data/secondmates.md"
 
-HELD_PIDS=()
-
-# await_args <pid> <needle>: block until the process's command line is the one
-# the fixture intends. A backgrounded script still shows its PARENT's command
-# line between fork and exec, so a sweep run in that window reads the fixture as
-# some other process and skips it - a flake that has nothing to do with the
-# behavior under test.
-await_args() {
-  local pid=$1 needle=$2 attempt=0
-  while [ "$attempt" -lt 200 ]; do
-    case "$(ps -o args= -p "$pid" 2>/dev/null)" in
-      *"$needle"*) return 0 ;;
-    esac
-    sleep 0.05
-    attempt=$((attempt + 1))
-  done
-  fail "fixture process $pid never showed '$needle' in its command line"
-}
-
 cleanup_all() {
-  local pid
-  for pid in "${HELD_PIDS[@]:-}"; do
-    [ -n "$pid" ] && kill "$pid" 2>/dev/null
-  done
+  fm_kill_pids
   fm_test_cleanup
 }
 trap cleanup_all EXIT
 
-# start_fake_bridge <dir>: a real, running process whose ps args carry the
-# chrome-devtools-axi marker the sweep identifies bridges by. The name has to be
-# in the command line for the identity check to be exercised honestly rather
-# than stubbed out.
+# The three fixture process shapes this suite distinguishes, all through the one
+# shared helper: the bridge marker the sweep identifies a bridge by, a plain
+# `chrome-devtools-axi <cmd>` CLI call whose argv also carries the package name,
+# and something entirely unrelated. The last two are the reused-pid cases, and
+# they matter because the reported stop command SIGTERMs and then SIGKILLs the
+# recorded pid whatever it turns out to be.
 start_fake_bridge() {
-  local dir=$1 script="$1/chrome-devtools-axi-bridge.js" pid
-  mkdir -p "$dir"
-  cat > "$script" <<'SH'
-#!/usr/bin/env bash
-sleep 300
-SH
-  chmod +x "$script"
-  # Detached from this function's stdout: it is read through a command
-  # substitution, and a background child holding that pipe open would make the
-  # caller wait for the child instead of for the pid.
-  "$script" >/dev/null 2>&1 &
-  pid=$!
-  HELD_PIDS+=("$pid")
-  await_args "$pid" chrome-devtools-axi-bridge.js
-  printf '%s\n' "$pid"
+  fm_start_marked_process "$1" chrome-devtools-axi-bridge.js
 }
 
-# start_fake_other <dir>: a running process that is NOT a bridge, for the
-# reused-pid case.
 start_fake_other() {
-  local dir=$1 script="$1/unrelated-daemon" pid
-  mkdir -p "$dir"
-  cat > "$script" <<'SH'
-#!/usr/bin/env bash
-sleep 300
-SH
-  chmod +x "$script"
-  "$script" >/dev/null 2>&1 &
-  pid=$!
-  HELD_PIDS+=("$pid")
-  await_args "$pid" unrelated-daemon
-  printf '%s\n' "$pid"
+  fm_start_marked_process "$1" unrelated-daemon
 }
 
-# start_fake_cli <dir>: a running process whose command line carries the package
-# name but is NOT the bridge - the shape a short-lived `chrome-devtools-axi
-# <cmd>` invocation has. This is the nastiest reused-pid case, because the
-# reported stop command SIGTERMs and then SIGKILLs the recorded pid whatever it
-# turns out to be.
 start_fake_cli() {
-  local dir=$1 script="$1/chrome-devtools-axi.js" pid
-  mkdir -p "$dir"
-  cat > "$script" <<'SH'
-#!/usr/bin/env bash
-sleep 300
-SH
-  chmod +x "$script"
-  "$script" >/dev/null 2>&1 &
-  pid=$!
-  HELD_PIDS+=("$pid")
-  await_args "$pid" chrome-devtools-axi.js
-  printf '%s\n' "$pid"
+  fm_start_marked_process "$1" chrome-devtools-axi.js
 }
 
 new_root() {
@@ -246,7 +186,7 @@ sweep_bin_with_index() {  # <dir> <absent|fails|hangs|wrong-schema|partial-subtr
   local dir=$1 mode=$2 bindir="$1/bin" index
   mkdir -p "$bindir"
   cp "$ROOT/bin/fm-browser-sweep.sh" "$ROOT/bin/fm-supervision-lib.sh" \
-    "$ROOT/bin/fm-browser-session-lib.sh" "$bindir/"
+    "$ROOT/bin/fm-browser-session-lib.sh" "$ROOT/bin/fm-backend-hometag-lib.sh" "$bindir/"
   index="$bindir/fm-fleet-work-index.sh"
   case "$mode" in
     absent) : ;;
@@ -306,22 +246,23 @@ test_idle_bridge_is_reported_and_fresh_one_is_not() {
 }
 
 test_live_task_session_is_protected() {
-  local root pid dir home out
+  local root pid dir home session out
   root=$(new_root protected)
   home="$TMP_ROOT/protected-home"
   mkdir -p "$home/state"
+  session=$(fm_browser_session_name paused-task "$home")
   pid=$(start_fake_bridge "$root/proc")
-  dir=$(write_session "$root" fm-paused-task "$pid")
+  dir=$(write_session "$root" "$session" "$pid")
   age_out "$dir/bridge.pid" "$dir/snapshot-generation"
 
   out=$(run_sweep "$root" --age-hours 12)
-  assert_contains "$out" "fm-paused-task: idle:" \
+  assert_contains "$out" "$session: idle:" \
     "an idle bridge with no owning task was not reported"
 
   fm_write_meta "$home/state/paused-task.meta" \
     "window=firstmate:fm-paused-task" "worktree=$home/wt" "project=$home/proj"
   out=$(run_sweep "$root" --age-hours 12 --protect-home "$home")
-  assert_not_contains "$out" "fm-paused-task" \
+  assert_not_contains "$out" "$session" \
     "a session a live task still records was reported as idle"
   pass "fm-browser-sweep: a session pinned to a task the home still records is never reported, however long it has sat"
 }
@@ -338,7 +279,7 @@ test_open_work_in_another_home_is_never_reported() {
   long_pid=$(start_fake_bridge "$root/proc")
   orphan_pid=$(start_fake_bridge "$root/proc")
 
-  dir=$(write_session "$root" fm-other-home-task "$owned_pid")
+  dir=$(write_session "$root" "$FLEET_OTHER_SESSION" "$owned_pid")
   age_out "$dir/bridge.pid" "$dir/snapshot-generation"
   dir=$(write_session "$root" "$FLEET_LONG_SESSION" "$long_pid")
   age_out "$dir/bridge.pid" "$dir/snapshot-generation"
@@ -346,7 +287,7 @@ test_open_work_in_another_home_is_never_reported() {
   age_out "$dir/bridge.pid" "$dir/snapshot-generation"
 
   out=$(run_sweep "$root" --age-hours 12)
-  assert_not_contains "$out" "fm-other-home-task" \
+  assert_not_contains "$out" "$FLEET_OTHER_SESSION" \
     "a bridge whose task is in flight in another home was reported as an orphan"
   assert_not_contains "$out" "$FLEET_LONG_SESSION" \
     "a bridge whose maximum-length task id is in flight in another home was reported as an orphan"
@@ -440,11 +381,11 @@ test_benign_index_skips_still_protect_open_work() {
   local root pid dir out
   root=$(new_root benign-index-protects)
   pid=$(start_fake_bridge "$root/proc")
-  dir=$(write_session "$root" fm-benign-open-task "$pid")
+  dir=$(write_session "$root" "$(fm_browser_session_name benign-open-task "$FLEET_BENIGN_MAIN")" "$pid")
   age_out "$dir/bridge.pid" "$dir/snapshot-generation"
 
   out=$(run_sweep_in_home "$FLEET_BENIGN_MAIN" "$root" --age-hours 12)
-  assert_not_contains "$out" "fm-benign-open-task" \
+  assert_not_contains "$out" "$(fm_browser_session_name benign-open-task "$FLEET_BENIGN_MAIN")" \
     "an in-flight task's session was reported once the fleet had an ordinary skipped home"
   pass "fm-browser-sweep: open work is still read and still protected in a fleet that has ordinary skipped homes"
 }

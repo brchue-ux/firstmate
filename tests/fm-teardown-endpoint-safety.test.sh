@@ -55,14 +55,9 @@ run_case() {  # <case> <id>
     "$TEARDOWN" "$id" --force
 }
 
-BROWSER_HELD_PIDS=()
-
 browser_pids_cleanup() {
-  local pid
-  for pid in "${BROWSER_HELD_PIDS[@]:-}"; do
-    [ -n "$pid" ] && kill "$pid" 2>/dev/null
-  done
-  return 0
+  fm_kill_pids
+  fm_test_cleanup
 }
 trap browser_pids_cleanup EXIT
 
@@ -70,24 +65,7 @@ trap browser_pids_cleanup EXIT
 # identifies a bridge by, or one that deliberately does not. Cleanup reads the
 # recorded pid's argv, so a stub would not exercise the guard at all.
 start_marked_process() {  # <dir> <basename> -> pid
-  local dir=$1 name=$2 script pid attempt=0
-  mkdir -p "$dir"
-  script="$dir/$name"
-  printf '%s\n' '#!/usr/bin/env bash' 'sleep 300' > "$script"
-  chmod +x "$script"
-  "$script" >/dev/null 2>&1 &
-  pid=$!
-  BROWSER_HELD_PIDS+=("$pid")
-  # A backgrounded script still shows its parent's command line between fork
-  # and exec, so a read in that window sees the wrong process.
-  while [ "$attempt" -lt 200 ]; do
-    case "$(ps -o args= -p "$pid" 2>/dev/null)" in
-      *"$name"*) printf '%s\n' "$pid"; return 0 ;;
-    esac
-    sleep 0.05
-    attempt=$((attempt + 1))
-  done
-  fail "fixture process $pid never showed '$name' in its command line"
+  fm_start_marked_process "$1" "$2"
 }
 
 # The on-disk record chrome-devtools-axi leaves for a running named session.
@@ -247,14 +225,18 @@ test_recorded_process_identity_cleanup_is_exact() {
 # this task - and only that one, because a bare stop would take down the default
 # session, which belongs to whatever sibling home is using it right now.
 test_browser_session_cleanup_is_scoped_to_the_task() {
-  local dir id=browser-task other=browser-other invocations pid other_pid
+  local dir id=browser-task other=browser-other invocations pid other_pid session other_session
   dir=$(make_case browser-session)
+  # shellcheck source=bin/fm-browser-session-lib.sh disable=SC1091
+  . "$ROOT/bin/fm-browser-session-lib.sh"
   # Both tasks have a live bridge on record, so a blanket stop has something to
   # hit and would show up as a second invocation rather than being inferred.
+  session=$(fm_browser_session_name "$id" "$dir/home")
+  other_session=$(fm_browser_session_name "$other" "$dir/home")
   pid=$(start_marked_process "$dir/proc" chrome-devtools-axi-bridge.js)
-  write_bridge_record "$dir" "fm-$id" "$pid"
+  write_bridge_record "$dir" "$session" "$pid"
   other_pid=$(start_marked_process "$dir/proc" chrome-devtools-axi-bridge.js)
-  write_bridge_record "$dir" "fm-$other" "$other_pid"
+  write_bridge_record "$dir" "$other_session" "$other_pid"
   fm_write_meta "$dir/home/state/$id.meta" \
     "window=firstmate:fm-$id" "endpoint_task_id=$id" \
     "worktree=$dir/nonexistent-worktree" "project=$dir/nonexistent-project" \
@@ -269,12 +251,12 @@ test_browser_session_cleanup_is_scoped_to_the_task() {
   run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr" \
     || fail "scoped browser cleanup teardown failed: $(cat "$dir/stderr")"
 
-  grep -Fqx "chrome-devtools-axi session=<fm-$id> <stop>" "$dir/runtime.log" \
+  grep -Fqx "chrome-devtools-axi session=<$session> <stop>" "$dir/runtime.log" \
     || fail "cleanup did not stop the task's own browser session: $(cat "$dir/runtime.log")"
   invocations=$(grep -c '^chrome-devtools-axi ' "$dir/runtime.log")
   [ "$invocations" -eq 1 ] \
     || fail "cleanup made $invocations browser calls, expected exactly one: $(cat "$dir/runtime.log")"
-  grep '^chrome-devtools-axi ' "$dir/runtime.log" | grep -qv "session=<fm-$id>" \
+  grep '^chrome-devtools-axi ' "$dir/runtime.log" | grep -qv "session=<$session>" \
     && fail "cleanup ran a browser command outside this task's session: $(cat "$dir/runtime.log")"
   assert_present "$dir/home/state/$other.meta" "cleanup disturbed an unrelated task's records"
   pass "fm-teardown: cleanup stops exactly the task's own pinned browser session and no other"
@@ -291,11 +273,13 @@ test_browser_session_cleanup_uses_the_shared_name_for_a_maximum_length_id() {
   [ "${#id}" -eq 64 ] || fail "fixture task id is ${#id} characters, wanted 64"
   # shellcheck source=bin/fm-browser-session-lib.sh disable=SC1091
   . "$ROOT/bin/fm-browser-session-lib.sh"
-  session=$(fm_browser_session_name "$id") || fail "no session name derived for a 64-character id"
-  [ "${#session}" -le 64 ] \
-    || fail "the shared derivation produced a ${#session}-character name: $session"
 
   dir=$(make_case browser-session-long)
+  # Derived against the home cleanup will run as, because the owning home is as
+  # much an input to the name as the task id is.
+  session=$(fm_browser_session_name "$id" "$dir/home") || fail "no session name derived for a 64-character id"
+  [ "${#session}" -le 64 ] \
+    || fail "the shared derivation produced a ${#session}-character name: $session"
   pid=$(start_marked_process "$dir/proc" chrome-devtools-axi-bridge.js)
   write_bridge_record "$dir" "$session" "$pid"
   fm_write_meta "$dir/home/state/$id.meta" \
@@ -319,11 +303,52 @@ test_browser_session_cleanup_uses_the_shared_name_for_a_maximum_length_id() {
 # pid is reused, invoking stop at all is what kills an unrelated process - and
 # unlike the sweep, cleanup runs with no operator in the loop. So cleanup must
 # not reach the tool at all here.
+# chrome-devtools-axi's sessions live in one directory per OS user while a task
+# id is unique only inside its own home, so two homes can legitimately hold the
+# same id. If the pinned name ignored the home, both crewmates would share one
+# bridge and THIS teardown would SIGTERM and SIGKILL the other home's live
+# worker mid-task, with no operator in the loop and neither --protect-home nor
+# the fleet index consulted on this path.
+test_browser_session_cleanup_leaves_another_homes_colliding_task_alone() {
+  local dir id=readme-refresh other_home mine theirs their_pid
+  dir=$(make_case browser-session-collide)
+  # shellcheck source=bin/fm-browser-session-lib.sh disable=SC1091
+  . "$ROOT/bin/fm-browser-session-lib.sh"
+
+  # A second home that filed the very same task id, with a live bridge on
+  # record - the sibling worker this teardown must not touch.
+  other_home="$dir/other-home"
+  mkdir -p "$other_home/state"
+  mine=$(fm_browser_session_name "$id" "$dir/home")
+  theirs=$(fm_browser_session_name "$id" "$other_home")
+  [ "$mine" != "$theirs" ] \
+    || fail "the two homes derived one shared session name, so this case cannot distinguish them"
+
+  their_pid=$(start_marked_process "$dir/proc" chrome-devtools-axi-bridge.js)
+  write_bridge_record "$dir" "$theirs" "$their_pid"
+
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/nonexistent-worktree" "project=$dir/nonexistent-project" \
+    "kind=scout" "mode=no-mistakes"
+
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "colliding-id teardown failed: $(cat "$dir/stderr")"
+
+  grep -Fq "session=<$theirs>" "$dir/runtime.log" \
+    && fail "cleanup stopped another home's browser for a colliding task id: $(cat "$dir/runtime.log")"
+  kill -0 "$their_pid" 2>/dev/null \
+    || fail "cleanup killed another home's live bridge for a colliding task id"
+  pass "fm-teardown: a task id that also exists in another home never reaches that home's browser session"
+}
+
 test_browser_session_cleanup_skips_a_recorded_pid_that_is_not_a_bridge() {
   local dir id=browser-reused pid
   dir=$(make_case browser-session-reused)
+  # shellcheck source=bin/fm-browser-session-lib.sh disable=SC1091
+  . "$ROOT/bin/fm-browser-session-lib.sh"
   pid=$(start_marked_process "$dir/proc" unrelated-daemon)
-  write_bridge_record "$dir" "fm-$id" "$pid"
+  write_bridge_record "$dir" "$(fm_browser_session_name "$id" "$dir/home")" "$pid"
   fm_write_meta "$dir/home/state/$id.meta" \
     "window=firstmate:fm-$id" "endpoint_task_id=$id" \
     "worktree=$dir/nonexistent-worktree" "project=$dir/nonexistent-project" \
@@ -344,10 +369,12 @@ test_browser_session_cleanup_skips_a_recorded_pid_that_is_not_a_bridge() {
 test_browser_session_cleanup_skips_a_dead_recorded_pid() {
   local dir id=browser-dead pid
   dir=$(make_case browser-session-dead)
+  # shellcheck source=bin/fm-browser-session-lib.sh disable=SC1091
+  . "$ROOT/bin/fm-browser-session-lib.sh"
   pid=$(start_marked_process "$dir/proc" chrome-devtools-axi-bridge.js)
   kill "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
-  write_bridge_record "$dir" "fm-$id" "$pid"
+  write_bridge_record "$dir" "$(fm_browser_session_name "$id" "$dir/home")" "$pid"
   fm_write_meta "$dir/home/state/$id.meta" \
     "window=firstmate:fm-$id" "endpoint_task_id=$id" \
     "worktree=$dir/nonexistent-worktree" "project=$dir/nonexistent-project" \
@@ -451,6 +478,7 @@ test_tmux_empty_target_refuses_without_invocation
 test_recorded_process_identity_cleanup_is_exact
 test_browser_session_cleanup_is_scoped_to_the_task
 test_browser_session_cleanup_uses_the_shared_name_for_a_maximum_length_id
+test_browser_session_cleanup_leaves_another_homes_colliding_task_alone
 test_browser_session_cleanup_skips_a_recorded_pid_that_is_not_a_bridge
 test_browser_session_cleanup_skips_a_dead_recorded_pid
 test_isolated_tmux_invalid_and_valid_cleanup

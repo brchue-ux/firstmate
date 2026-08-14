@@ -12,31 +12,72 @@
 # leaks, and a name the sweep cannot match is a live worker's browser reported
 # as an orphan.
 #
-# The name is `fm-<task id>` whenever that fits, which is the overwhelmingly
-# common case and is what keeps a flagged session attributable to its task by
-# reading it. chrome-devtools-axi's validateSessionName accepts 1-64 characters
-# from [A-Za-z0-9._-], while bin/fm-pr-lib.sh admits a task id of up to 64
-# characters from that same alphabet, so `fm-<id>` can reach 67 - and a name
-# over the cap is refused on EVERY call, which blocks the task's browser work
-# outright and makes teardown's scoped stop a permanent no-op. A name that would
-# exceed the cap therefore keeps as much of the leading id as still fits and
-# carries the uniqueness in a short hash of the WHOLE id, so two ids sharing a
-# long prefix still get distinct sessions. Nothing hashes when it does not have
-# to: a digest of hashed names would destroy the operator-readable attribution
-# this pinning exists to create.
+# A name identifies a task AND the home that owns it, because the two namespaces
+# do not line up: chrome-devtools-axi's sessions live in one host-global
+# directory per OS user, while a task id is only unique inside its own home. Two
+# homes that each file `readme-refresh` would otherwise pin both crewmates to one
+# bridge - two agents driving one Chrome - and the first teardown to finish would
+# SIGKILL the other's browser mid-task, with no operator in the loop. The home
+# tag comes from bin/fm-backend-hometag-lib.sh, which exists because that same
+# collision could close another home's backend tabs.
 #
-# The derivation is a pure function of the task id - no clock, no environment,
-# no filesystem - so every process on a host computes the same name for the same
-# task. Which digest tool is available decides the hash, exactly as
+# The name is `fm-<task id>-<home tag>` whenever that fits, id first so a
+# flagged session stays attributable by reading it. chrome-devtools-axi's
+# validateSessionName accepts 1-64 characters from [A-Za-z0-9._-], while
+# bin/fm-pr-lib.sh admits a task id of up to 64 characters from that same
+# alphabet, so the full form can run past the cap - and a name over the cap is
+# refused on EVERY call, which blocks the task's browser work outright and makes
+# teardown's scoped stop a permanent no-op. A name that would exceed the cap
+# therefore keeps as much of the leading id as still fits and carries the
+# uniqueness in a short digest of the whole untruncated name, so two ids sharing
+# a long prefix, and the same id in two homes, still get distinct sessions.
+# Nothing hashes when it does not have to.
+#
+# The derivation is a pure function of the task id and the owning home's path -
+# no clock, no ambient state, nothing about the calling process - so every
+# process on a host computes the same name for the same task in the same home.
+# Which digest tool is available decides the hash, exactly as
 # bin/fm-backend-hometag-lib.sh already accepts, and a session name is only ever
 # compared against names derived on the same host.
+
+FM_BROWSER_SESSION_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+# Per-home disambiguation of a process-global namespace has one owner already.
+# shellcheck source=bin/fm-backend-hometag-lib.sh disable=SC1091
+. "$FM_BROWSER_SESSION_LIB_DIR/fm-backend-hometag-lib.sh"
 
 FM_BROWSER_SESSION_PREFIX="fm-"
 # chrome-devtools-axi's own cap (src/sessions.js validateSessionName).
 FM_BROWSER_SESSION_NAME_MAX=64
 
-# Short stable digest of $1. Tool preference matches
-# bin/fm-backend-hometag-lib.sh so the fleet has one spelling of "short hash".
+# The owning home's tag, from the repo's existing owner of exactly this problem.
+# bin/fm-backend-hometag-lib.sh was written because two homes whose task ids
+# happen to collide could close each other's tabs in a backend-global namespace,
+# which is the same namespace shape chrome-devtools-axi has; a second spelling of
+# that convention here is the drift that ruling was made to prevent.
+#
+# It is called with the target home as BOTH the home and the code root, which
+# makes it a pure function of the home path rather than of whichever home the
+# calling process happens to be in - bin/fm-browser-sweep.sh has to derive names
+# for other homes' tasks, so a tag that depended on the caller could never match.
+# Every firstmate home is its own checkout, so home and code root are the same
+# directory in the ordinary case anyway.
+#
+# The result is filtered to the session-name alphabet: the tag embeds the
+# secondmate id from that home's marker, which nothing upstream constrains to
+# these characters, and a name outside [A-Za-z0-9._-] is refused by the tool on
+# every call.
+fm_browser_session_home_tag() {  # <home>
+  local home=${1-} tag
+  [ -n "$home" ] || return 1
+  tag=$( FM_HOME=$home FM_ROOT=$home fm_backend_hometag ) || return 1
+  tag=${tag//[^A-Za-z0-9._-]/}
+  [ -n "$tag" ] || return 1
+  printf '%s\n' "$tag"
+}
+
+# Short stable digest of $1, used only to shorten a name that would otherwise
+# exceed the tool's cap. Home identity is NOT hashed here; that is
+# fm_browser_session_home_tag's job above.
 fm_browser_session_hash() {  # <text>
   local text=${1-}
   if command -v shasum >/dev/null 2>&1; then
@@ -48,25 +89,41 @@ fm_browser_session_hash() {  # <text>
   fi
 }
 
-# The pinned session name for a task id, or non-zero when one cannot be derived
-# at all (no id, or no digest to shorten with). Callers treat a non-zero return
-# as "this task has no browser session", never as "use the raw id".
-fm_browser_session_name() {  # <task-id>
-  local id=${1-} name hash keep
+# The pinned session name for a task id in a given home, or non-zero when one
+# cannot be derived at all. Callers treat a non-zero return as "this task has no
+# browser session", never as "use the raw id".
+#
+# The home defaults to this process's own FM_HOME, which is what bin/fm-brief.sh
+# and bin/fm-teardown.sh want; bin/fm-browser-sweep.sh passes the owning home of
+# each fleet-index item explicitly, because it answers for tasks that are not
+# its own.
+#
+# Shape is `fm-<id>-<home tag>`, id first so a digest line stays attributable at
+# a glance. When that exceeds the tool's 64-character cap the id is truncated
+# and a digest of the WHOLE untruncated name replaces the tail, which keeps two
+# ids sharing a long prefix - and the same id in two homes - distinct.
+#
+# The direction is one-way by construction: with a home tag and possibly a
+# digest in the name, no task id can be recovered from a session name, and
+# nothing anywhere may try. Comparisons derive forward from a known id and home.
+fm_browser_session_name() {  # <task-id> [home]
+  local id=${1-} home=${2-${FM_HOME:-}} tag name hash keep
   [ -n "$id" ] || return 1
-  name="$FM_BROWSER_SESSION_PREFIX$id"
+  tag=$(fm_browser_session_home_tag "$home") || return 1
+  name="$FM_BROWSER_SESSION_PREFIX$id-$tag"
   if [ "${#name}" -le "$FM_BROWSER_SESSION_NAME_MAX" ]; then
     printf '%s\n' "$name"
     return 0
   fi
-  hash=$(fm_browser_session_hash "$id")
+  hash=$(fm_browser_session_hash "$name")
   case "$hash" in
     '' | *[!0-9a-f]*) return 1 ;;
   esac
-  # One separator between the kept prefix and the hash, so the shortened form
+  # One separator between the kept prefix and the digest, so the shortened form
   # reads as a truncation rather than as a different id.
   keep=$((FM_BROWSER_SESSION_NAME_MAX - ${#FM_BROWSER_SESSION_PREFIX} - 1 - ${#hash}))
   [ "$keep" -ge 1 ] || return 1
+  [ "$keep" -le "${#id}" ] || keep=${#id}
   printf '%s%s-%s\n' "$FM_BROWSER_SESSION_PREFIX" "${id:0:keep}" "$hash"
 }
 

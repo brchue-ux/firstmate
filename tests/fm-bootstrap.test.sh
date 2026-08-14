@@ -554,7 +554,7 @@ start_fixture_bridge() {  # <dir> -> pid
 }
 
 test_browser_sweep_is_reported_and_scoped_to_this_home() {
-  local case_dir fakebin fake_root state_root session_dir pid out lib
+  local case_dir fakebin fake_root state_root session_dir session pid out lib
   command -v jq >/dev/null 2>&1 || {
     pass "bootstrap browser sweep wiring: skipped, jq not found"
     return 0
@@ -573,14 +573,19 @@ EOF
   fake_root="$case_dir/fake-root"
   fm_copy_core_libs "$fake_root/bin"
   for lib in fm-browser-sweep.sh fm-browser-session-lib.sh fm-supervision-lib.sh \
-    fm-fleet-work-index.sh fm-backlog-parse-lib.sh fm-ff-lib.sh; do
+    fm-backend-hometag-lib.sh fm-fleet-work-index.sh fm-backlog-parse-lib.sh fm-ff-lib.sh; do
     cp "$ROOT/bin/$lib" "$fake_root/bin/$lib"
   done
 
   state_root="$case_dir/chrome-devtools-axi"
   mkdir -p "$state_root/sessions"
   pid=$(start_fixture_bridge "$case_dir/proc")
-  session_dir="$state_root/sessions/fm-orphan-task"
+  # shellcheck source=bin/fm-browser-session-lib.sh disable=SC1091
+  . "$ROOT/bin/fm-browser-session-lib.sh"
+  # The name carries the owning home, so the fixture has to be the name this
+  # home would really have pinned for the task the protect-home layer records.
+  session=$(fm_browser_session_name orphan-task "$case_dir/home")
+  session_dir="$state_root/sessions/$session"
   mkdir -p "$session_dir"
   printf '{"pid":%s,"port":9224}\n' "$pid" > "$session_dir/bridge.pid"
   printf '1\n' > "$session_dir/snapshot-generation"
@@ -589,9 +594,9 @@ EOF
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$fake_root" \
     FM_BROWSER_SWEEP_ROOT="$state_root" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
-  assert_contains "$out" "BROWSER_SWEEP: fm-orphan-task: idle:" \
+  assert_contains "$out" "BROWSER_SWEEP: $session: idle:" \
     "an orphaned browser bridge is not reaching the session-start digest"
-  assert_contains "$out" "CHROME_DEVTOOLS_AXI_SESSION=fm-orphan-task chrome-devtools-axi stop" \
+  assert_contains "$out" "CHROME_DEVTOOLS_AXI_SESSION=$session chrome-devtools-axi stop" \
     "the digest line dropped the session-scoped stop command the operator runs"
 
   # Redirecting only the library's own root variable has to move the sweep too.
@@ -602,7 +607,7 @@ EOF
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$fake_root" \
     FM_BROWSER_SESSION_ROOT="$state_root" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
-  assert_contains "$out" "BROWSER_SWEEP: fm-orphan-task: idle:" \
+  assert_contains "$out" "BROWSER_SWEEP: $session: idle:" \
     "the sweep ignored the browser-state root its own shared library resolves"
 
   # The same fixture, now recorded as this home's live task. Only --protect-home
@@ -644,7 +649,7 @@ EOF
   fake_root="$case_dir/fake-root"
   fm_copy_core_libs "$fake_root/bin"
   for lib in fm-browser-sweep.sh fm-browser-session-lib.sh fm-supervision-lib.sh \
-    fm-fleet-work-index.sh fm-backlog-parse-lib.sh fm-ff-lib.sh; do
+    fm-backend-hometag-lib.sh fm-fleet-work-index.sh fm-backlog-parse-lib.sh fm-ff-lib.sh; do
     cp "$ROOT/bin/$lib" "$fake_root/bin/$lib"
   done
 

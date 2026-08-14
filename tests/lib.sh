@@ -138,6 +138,52 @@ SH
   done
 }
 
+# --- fixture processes ------------------------------------------------------
+#
+# fm_start_marked_process <dir> <basename> starts a real, running process whose
+# ps command line carries <basename>, and echoes its pid. Callers that assert on
+# process identity - the browser sweep and cleanup both read a recorded pid's
+# argv - need a genuine process rather than a stub, and they distinguish
+# processes only by that name, so one parameterized helper covers "a bridge",
+# "a chrome-devtools-axi CLI call", and "something unrelated" alike.
+#
+# The caller owns killing what it starts; fm_kill_pids is the usual EXIT trap.
+
+FM_TEST_STARTED_PIDS=()
+
+fm_kill_pids() {
+  local pid
+  for pid in "${FM_TEST_STARTED_PIDS[@]:-}"; do
+    [ -n "$pid" ] && kill "$pid" 2>/dev/null
+  done
+  return 0
+}
+
+fm_start_marked_process() {
+  local dir=$1 name=$2 script pid attempt=0
+  mkdir -p "$dir"
+  script="$dir/$name"
+  printf '%s\n' '#!/usr/bin/env bash' 'sleep 300' > "$script"
+  chmod +x "$script"
+  # Detached from this function's stdout: it is read through a command
+  # substitution, and a background child holding that pipe open would make the
+  # caller wait for the child instead of for the pid.
+  "$script" >/dev/null 2>&1 &
+  pid=$!
+  FM_TEST_STARTED_PIDS+=("$pid")
+  # A backgrounded script still shows its PARENT's command line between fork and
+  # exec, so anything reading argv in that window sees the wrong process - a
+  # flake with nothing to do with the behavior under test.
+  while [ "$attempt" -lt 200 ]; do
+    case "$(ps -o args= -p "$pid" 2>/dev/null)" in
+      *"$name"*) printf '%s\n' "$pid"; return 0 ;;
+    esac
+    sleep 0.05
+    attempt=$((attempt + 1))
+  done
+  fail "fixture process $pid never showed '$name' in its command line"
+}
+
 # --- deterministic git identity and fixtures --------------------------------
 
 # fm_git_identity [name] [email]: export a fixed author/committer identity so

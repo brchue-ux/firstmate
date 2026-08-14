@@ -57,9 +57,10 @@
 # bin/fm-operational-input.sh owns the wire format and must not be restated here.
 # tests/fm-brief.test.sh asserts both facts against generated briefs.
 # Every crewmate scaffold pins the task's browser session to the name
-# bin/fm-browser-session-lib.sh derives for the task (fm-<task-id>, shortened
-# only when that would exceed the tool's 64-character cap) and requires the
-# worker to stop it before reporting a terminal state.
+# bin/fm-browser-session-lib.sh derives for the task and this home
+# (fm-<task-id>-<home tag>, shortened only when that would exceed the tool's
+# 64-character cap) and requires the worker to stop it before reporting a
+# terminal state.
 # The chrome-devtools-axi bridge detaches
 # itself from the pane, so it survives teardown's kills and holds a headless
 # Chrome tree open indefinitely; the session name is the only handle left, and
@@ -185,9 +186,12 @@ STATUS_FILE=$(shell_quote "$STATE/$ID.status")
 # The name itself is derived, never spelled out here: the tool refuses a name
 # over 64 characters, and a task id may be 64 characters on its own, so a
 # hand-written "fm-$ID" would brief a name every one of the worker's calls
-# rejects. bin/fm-browser-session-lib.sh owns that rule for teardown and the
+# rejects. It also carries this home's tag, because the browser session
+# namespace is host-global while a task id is unique only inside its own home -
+# two homes filing the same id would otherwise brief both crewmates onto one
+# bridge. bin/fm-browser-session-lib.sh owns that rule for teardown and the
 # sweep too, and this emits the same computed literal into the brief.
-BROWSER_SESSION=$(fm_browser_session_name "$ID") || {
+BROWSER_SESSION=$(fm_browser_session_name "$ID" "$FM_HOME") || {
   echo "error: no browser session name can be derived for task id: $ID" >&2
   exit 1
 }

@@ -9,7 +9,8 @@
 # headless Chrome tree alive behind it - measured at 38 processes, 2.28 GB
 # resident and 477 MB swap on one host before anything reaped them.
 # bin/fm-teardown.sh closes the common case by stopping the task's own pinned
-# session (bin/fm-brief.sh pins it to fm-<task id>), but a crewmate that was
+# session (bin/fm-brief.sh pins it per task and owning home), but a crewmate
+# that was
 # killed, crashed, or never reached teardown leaves its bridge behind, and a
 # detached daemon can only ever be recovered out of band. This sweep is that
 # out-of-band half.
@@ -45,8 +46,12 @@
 #     this sweep knows nothing about; bin/fm-fleet-work-index.sh already answers
 #     "what is open anywhere", transitively and read-only, so it is consulted
 #     once per run and every open item's pinned session name is protected.
-#     Session names are derived FROM ids through bin/fm-browser-session-lib.sh,
-#     never parsed back out of a name: a shortened name has no id to recover.
+#     Session names are derived FORWARD through bin/fm-browser-session-lib.sh
+#     from each item's id AND the home that owns it, never parsed back out of a
+#     name: a name carries its home's tag and, once shortened, a digest where
+#     the rest of the id was, so nothing can recover an id from one. Deriving
+#     with this sweep's own home instead would build names no other home's
+#     crewmate ever used, and quietly protect nothing outside this home.
 #     The index must have determined EVERY home's open work to answer this. It
 #     succeeds on a partial read by design - a backlog it cannot read or parse,
 #     a home it cannot resolve, and a registry it cannot enumerate all leave
@@ -303,14 +308,20 @@ load_fleet_task_sessions() {
     return 1
   fi
 
-  ids=$(printf '%s' "$json" | jq -r '.items[] | .id // empty' 2>/dev/null) || {
+  # Each item carries the home that owns it, and the session name is derived
+  # from BOTH: a task id is unique only inside its home, while the browser
+  # session namespace is host-global. Deriving with this sweep's own home would
+  # produce names no other home's crewmate ever used, so every open task
+  # elsewhere in the fleet would silently stop being protected.
+  ids=$(printf '%s' "$json" | jq -r '
+    .items[] | select((.id // "") != "") | "\(.id)\t\(.home // "")"' 2>/dev/null) || {
     FLEET_INDEX_REASON="the cross-home work index did not emit a readable fm-fleet-work-index.v1 object"
     return 1
   }
   FLEET_TASK_SESSIONS=" "
-  while IFS= read -r id; do
+  while IFS=$'\t' read -r id home; do
     [ -n "$id" ] || continue
-    name=$(fm_browser_session_name "$id") || continue
+    name=$(fm_browser_session_name "$id" "$home") || continue
     FLEET_TASK_SESSIONS="$FLEET_TASK_SESSIONS$name "
   done <<<"$ids"
   return 0
@@ -344,10 +355,12 @@ fleet_task_session() {
 # all (a scout dispatched straight from a conversation), and that is still work
 # in flight.
 #
-# The direction is id -> name, never name -> id. A shortened session name
-# (bin/fm-browser-session-lib.sh) carries a hash where the rest of the id was,
-# so no id can be recovered from it; deriving the name each recorded task would
-# have used is the only comparison that holds for every id length.
+# The direction is id -> name, never name -> id. A session name carries its
+# home's tag and, once shortened, a digest where the rest of the id was
+# (bin/fm-browser-session-lib.sh), so no id can be recovered from one; deriving
+# the name each recorded task would have used is the only comparison that holds.
+# Each meta is derived against the home it was found in, for the same reason the
+# fleet index items are: the same id in two homes is two different sessions.
 PROTECTED_SESSIONS=
 PROTECTED_SESSIONS_LOADED=0
 
@@ -366,7 +379,7 @@ load_protected_sessions() {
       [ -f "$meta" ] || continue
       id=${meta##*/}
       id=${id%.meta}
-      name=$(fm_browser_session_name "$id") || continue
+      name=$(fm_browser_session_name "$id" "$home") || continue
       PROTECTED_SESSIONS="$PROTECTED_SESSIONS$name "
     done
   done

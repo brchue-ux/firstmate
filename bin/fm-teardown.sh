@@ -903,9 +903,13 @@ safe_rm_rf() {
 # SCOPED BY SESSION NAME ONLY. A bare `chrome-devtools-axi stop` would stop the
 # default session, which is a sibling home's live browser - the same class of
 # mistake AGENTS.md section 8 forbids for `pkill -f bin/fm-watch.sh`. The name
-# is derived from the task id through the same owner bin/fm-brief.sh briefed it
-# with, so this can only ever reach the session this task's own brief told it to
-# use, and can never miss it because the two spellings drifted.
+# is derived from the task id AND its owning home through the same owner
+# bin/fm-brief.sh briefed it with, so this can only ever reach the session this
+# task's own brief told it to use, and can never miss it because the two
+# spellings drifted. The home is part of it because task ids are unique only
+# within a home while the browser session namespace is host-global: two homes
+# filing the same id would otherwise share one bridge, and this stop would kill
+# the other home's live worker.
 #
 # Failure is never fatal: the tool may not be installed, the task may never have
 # opened a browser, and a bridge that is already gone is the outcome we wanted.
@@ -923,10 +927,10 @@ safe_rm_rf() {
 # here. Nothing is given up by asking: with no record or a dead pid, the tool's
 # own stop does nothing anyway.
 stop_task_browser_session() {
-  local task_id=$1 session
+  local task_id=$1 home=${2:-$FM_HOME} session
   [ -n "$task_id" ] || return 0
   command -v chrome-devtools-axi >/dev/null 2>&1 || return 0
-  session=$(fm_browser_session_name "$task_id") || return 0
+  session=$(fm_browser_session_name "$task_id" "$home") || return 0
   fm_browser_session_has_live_bridge "$session" || return 0
   if command -v timeout >/dev/null 2>&1; then
     CHROME_DEVTOOLS_AXI_SESSION="$session" timeout 20 chrome-devtools-axi stop >/dev/null 2>&1 || true
@@ -1057,7 +1061,10 @@ cleanup_firstmate_home_children() {
         fm_backend_kill "$child_backend" "$child_t" "$(meta_value "$child_meta" zellij_tab_id)" "fm-$child_id" 2>/dev/null || true
       fi
     fi
-    stop_task_browser_session "$child_id"
+    # As with the zellij tab titles above, the session name is scoped by the
+    # owning home, so a child's browser must be derived as that child home and
+    # never as the parent doing the retiring.
+    stop_task_browser_session "$child_id" "$home"
     if [ "$child_kind" = secondmate ]; then
       child_home=$(meta_value "$child_meta" home)
       [ -n "$child_home" ] || child_home=$child_wt
