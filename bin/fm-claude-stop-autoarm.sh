@@ -47,7 +47,7 @@ set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
-# FM_HOME resolution: see bin/fm-home-anchor-lib.sh:1-22 ("Why this exists").
+# FM_HOME resolution: see bin/fm-home-anchor-lib.sh ("Why this exists").
 # shellcheck source=bin/fm-home-anchor-lib.sh
 . "$SCRIPT_DIR/fm-home-anchor-lib.sh"
 fm_home_anchor_resolve "$FM_ROOT" quiet || exit 0
