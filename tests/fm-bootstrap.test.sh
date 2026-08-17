@@ -518,39 +518,17 @@ test_tmp_usage_is_reported_after_reclamation() {
 #
 # tests/lib.sh points the shared browser-state root at a path that cannot exist
 # for the whole suite, so this case supplies its own fixture state root and its
-# own live fixture bridge.
-BROWSER_SWEEP_HELD_PIDS=()
-
-browser_sweep_cleanup() {
-  local pid
-  for pid in "${BROWSER_SWEEP_HELD_PIDS[@]:-}"; do
-    [ -n "$pid" ] && kill "$pid" 2>/dev/null
-  done
-  return 0
+# own live fixture bridge. The bridge itself comes from the shared helper: the
+# sweep refuses to report a pid whose command line it cannot identify, and that
+# marker is the same one tests/fm-browser-sweep.test.sh depends on.
+cleanup_all() {
+  fm_kill_pids
+  fm_test_cleanup
 }
-trap browser_sweep_cleanup EXIT
+trap cleanup_all EXIT
 
-# A real running process whose command line carries the marker the sweep
-# identifies a bridge by; the sweep refuses to report a pid it cannot identify.
 start_fixture_bridge() {  # <dir> -> pid
-  local dir=$1 script pid attempt=0
-  mkdir -p "$dir"
-  script="$dir/chrome-devtools-axi-bridge.js"
-  printf '%s\n' '#!/usr/bin/env bash' 'sleep 300' > "$script"
-  chmod +x "$script"
-  "$script" >/dev/null 2>&1 &
-  pid=$!
-  BROWSER_SWEEP_HELD_PIDS+=("$pid")
-  # A backgrounded script still shows its parent's command line between fork and
-  # exec, and a sweep run in that window reads it as some other process.
-  while [ "$attempt" -lt 200 ]; do
-    case "$(ps -o args= -p "$pid" 2>/dev/null)" in
-      *chrome-devtools-axi-bridge.js*) printf '%s\n' "$pid"; return 0 ;;
-    esac
-    sleep 0.05
-    attempt=$((attempt + 1))
-  done
-  fail "fixture bridge $pid never showed its own command line"
+  fm_start_marked_process "$1" chrome-devtools-axi-bridge.js
 }
 
 test_browser_sweep_is_reported_and_scoped_to_this_home() {

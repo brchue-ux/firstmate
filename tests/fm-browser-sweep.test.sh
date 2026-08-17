@@ -296,6 +296,41 @@ test_open_work_in_another_home_is_never_reported() {
   pass "fm-browser-sweep: a session owned by open work in any home is left alone, whatever its id length, and one owned nowhere is still reported"
 }
 
+# The gap between the two ownership layers. The index knows a task by its open
+# backlog ROW, so work dispatched straight from a conversation - a live
+# state/<id>.meta and no row anywhere - is invisible to it. Reading those records
+# in only the home the sweep was told about left every other home's meta-only
+# task reported as an orphan, stop command attached, which on one measured host
+# was 25 live tasks. The index has already resolved every home, so the record
+# layer follows its list.
+test_meta_only_task_in_another_home_is_protected() {
+  local root pid dir session out
+  root=$(new_root fleet-meta-only)
+  # An id with no backlog row in either fixture home, so only the mate home's
+  # own live record can account for it.
+  session=$(fm_browser_session_name conversation-task "$FLEET_MATE")
+  pid=$(start_fake_bridge "$root/proc")
+  dir=$(write_session "$root" "$session" "$pid")
+  age_out "$dir/bridge.pid" "$dir/snapshot-generation"
+
+  # Nothing records it yet, so the same fixture is reported - the silence below
+  # is the record being honored and not the fixture failing to look idle.
+  out=$(run_sweep "$root" --age-hours 12)
+  assert_contains "$out" "$session: idle:" \
+    "a session owned by nothing at all was not reported"
+
+  mkdir -p "$FLEET_MATE/state"
+  fm_write_meta "$FLEET_MATE/state/conversation-task.meta" \
+    "window=firstmate:fm-conversation-task" "worktree=$FLEET_MATE/wt" \
+    "project=$FLEET_MATE/proj"
+  # No --protect-home: the mate home reaches the sweep only through the index.
+  out=$(run_sweep "$root" --age-hours 12)
+  assert_not_contains "$out" "$session" \
+    "a live task another home records only in its own state was reported as an orphan"
+  rm -f "$FLEET_MATE/state/conversation-task.meta"
+  pass "fm-browser-sweep: a task another home records with no backlog row anywhere still protects its browser session"
+}
+
 # The fleet's open work is a precondition for reporting, not an enhancement.
 # With no way to read it, every session on the host is indistinguishable from a
 # live worker's, and flagging one anyway is the exact harm this sweep exists to
@@ -541,6 +576,7 @@ SH
 test_idle_bridge_is_reported_and_fresh_one_is_not
 test_live_task_session_is_protected
 test_open_work_in_another_home_is_never_reported
+test_meta_only_task_in_another_home_is_protected
 test_unconsultable_fleet_index_reports_nothing_idle
 test_partially_read_fleet_index_reports_nothing_idle
 test_benign_index_skips_still_sweep_normally

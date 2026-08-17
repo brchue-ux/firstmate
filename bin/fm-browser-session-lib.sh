@@ -66,13 +66,49 @@ FM_BROWSER_SESSION_NAME_MAX=64
 # secondmate id from that home's marker, which nothing upstream constrains to
 # these characters, and a name outside [A-Za-z0-9._-] is refused by the tool on
 # every call.
-fm_browser_session_home_tag() {  # <home>
-  local home=${1-} tag
+# Memoized per home, because deriving one costs a subshell, a `pwd -P`, and a
+# digest, while bin/fm-browser-sweep.sh asks for a name per open work item in the
+# fleet - 206 items across 19 homes on one measured host, for 19 distinct
+# answers, on a path that runs at session start (5.9s to 2.4s there). The tag is
+# a pure function of the home path, so a cached answer cannot go stale within a
+# process; the cache is per process and nothing persists it.
+# Kept portable to bash 3.2 (no associative arrays), the same constraint
+# bin/fm-classify-lib.sh already works under.
+FM_BROWSER_SESSION_TAG_CACHE=
+FM_BROWSER_SESSION_TAG_SEP=$'\t'
+FM_BROWSER_SESSION_TAG_RESULT=
+
+# The _result form assigns instead of printing, and is the one the memo is for:
+# a command substitution runs its function in a SUBSHELL, so a cache filled
+# there dies with it and every call pays the full derivation again. Capturing
+# stdout is the natural way to call this, so both forms exist and the printing
+# one is a thin wrapper - callers that derive one name keep the readable form,
+# and the loops in bin/fm-browser-sweep.sh that derive hundreds use this one.
+fm_browser_session_home_tag_result() {  # <home>
+  local home=${1-} sep=$FM_BROWSER_SESSION_TAG_SEP tag key val
+  FM_BROWSER_SESSION_TAG_RESULT=
   [ -n "$home" ] || return 1
+  while IFS=$sep read -r key val; do
+    [ -n "$key" ] && [ "$key" = "$home" ] || continue
+    FM_BROWSER_SESSION_TAG_RESULT=$val
+    return 0
+  done <<<"$FM_BROWSER_SESSION_TAG_CACHE"
   tag=$( FM_HOME=$home FM_ROOT=$home fm_backend_hometag ) || return 1
   tag=${tag//[^A-Za-z0-9._-]/}
   [ -n "$tag" ] || return 1
-  printf '%s\n' "$tag"
+  # A home path carrying the cache's own separators would split across its
+  # fields, so such a path is answered without being remembered rather than
+  # remembered wrongly. Neither character appears in a real home path.
+  case "$home" in
+    *"$sep"* | *$'\n'*) : ;;
+    *) FM_BROWSER_SESSION_TAG_CACHE="$FM_BROWSER_SESSION_TAG_CACHE$home$sep$tag"$'\n' ;;
+  esac
+  FM_BROWSER_SESSION_TAG_RESULT=$tag
+}
+
+fm_browser_session_home_tag() {  # <home>
+  fm_browser_session_home_tag_result "${1-}" || return 1
+  printf '%s\n' "$FM_BROWSER_SESSION_TAG_RESULT"
 }
 
 # Short stable digest of $1, used only to shorten a name that would otherwise
@@ -106,13 +142,19 @@ fm_browser_session_hash() {  # <text>
 # The direction is one-way by construction: with a home tag and possibly a
 # digest in the name, no task id can be recovered from a session name, and
 # nothing anywhere may try. Comparisons derive forward from a known id and home.
-fm_browser_session_name() {  # <task-id> [home]
+FM_BROWSER_SESSION_NAME_RESULT=
+
+fm_browser_session_name_result() {  # <task-id> [home]
   local id=${1-} home=${2-${FM_HOME:-}} tag name hash keep
+  FM_BROWSER_SESSION_NAME_RESULT=
   [ -n "$id" ] || return 1
-  tag=$(fm_browser_session_home_tag "$home") || return 1
+  # Called in this shell, not through a substitution, so its per-home memo
+  # survives from one item to the next.
+  fm_browser_session_home_tag_result "$home" || return 1
+  tag=$FM_BROWSER_SESSION_TAG_RESULT
   name="$FM_BROWSER_SESSION_PREFIX$id-$tag"
   if [ "${#name}" -le "$FM_BROWSER_SESSION_NAME_MAX" ]; then
-    printf '%s\n' "$name"
+    FM_BROWSER_SESSION_NAME_RESULT=$name
     return 0
   fi
   hash=$(fm_browser_session_hash "$name")
@@ -124,7 +166,12 @@ fm_browser_session_name() {  # <task-id> [home]
   keep=$((FM_BROWSER_SESSION_NAME_MAX - ${#FM_BROWSER_SESSION_PREFIX} - 1 - ${#hash}))
   [ "$keep" -ge 1 ] || return 1
   [ "$keep" -le "${#id}" ] || keep=${#id}
-  printf '%s%s-%s\n' "$FM_BROWSER_SESSION_PREFIX" "${id:0:keep}" "$hash"
+  FM_BROWSER_SESSION_NAME_RESULT="$FM_BROWSER_SESSION_PREFIX${id:0:keep}-$hash"
+}
+
+fm_browser_session_name() {  # <task-id> [home]
+  fm_browser_session_name_result "${1-}" "${2-${FM_HOME:-}}" || return 1
+  printf '%s\n' "$FM_BROWSER_SESSION_NAME_RESULT"
 }
 
 # Bridge identity, shared by everything in bin/ that acts on a recorded pid.

@@ -93,11 +93,18 @@ pass() {
 
 FM_TEST_CLEANUP_DIRS=()
 
+# Ends on an explicit success, exactly as fm_kill_pids does. With no directory
+# registered - the ordinary case, since the `root=$(fm_test_tmproot p)` form runs
+# in a subshell - the loop's last test is a failed [ -n "" ] and the function
+# would otherwise return 1. A suite whose EXIT trap ends in this call then fails
+# with every one of its cases passing, which is a suite failure nothing in the
+# output explains.
 fm_test_cleanup() {
   local d
   for d in "${FM_TEST_CLEANUP_DIRS[@]:-}"; do
     [ -n "$d" ] && rm -rf "$d"
   done
+  return 0
 }
 
 fm_test_tmproot() {

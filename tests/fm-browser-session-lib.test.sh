@@ -148,6 +148,52 @@ test_the_same_id_in_two_homes_is_two_sessions() {
   pass "fm-browser-session-lib: the same task id in different homes derives different sessions, still led by the task id"
 }
 
+# The derivation memoizes the home tag, and a memo is only reachable from the
+# form that assigns instead of printing - a command substitution would run it in
+# a subshell and throw the cache away. Every case above therefore runs with a
+# cold cache and cannot see a mis-keyed one. This case is the warm-cache run:
+# several homes interleaved inside ONE shell, which is exactly how
+# bin/fm-browser-sweep.sh walks the fleet. A cache keyed loosely would hand the
+# first home's tag to the second, collapsing two homes onto one session - the
+# collision the home tag exists to prevent, reintroduced by the cache meant to
+# make it cheap.
+test_the_memo_keeps_each_home_distinct_within_one_process() {
+  local home_a home_b mate id=readme-refresh expect_a expect_b expect_mate round
+  home_a="$TMP_ROOT/memo-a"
+  home_b="$TMP_ROOT/memo-b"
+  mate="$TMP_ROOT/memo-mate"
+  mkdir -p "$home_a" "$home_b" "$mate"
+  printf '%s\n' memo-mate > "$mate/.fm-secondmate-home"
+
+  # The printing form is the contract every earlier case pins, so it is the
+  # reference the warm-cache form has to agree with.
+  expect_a=$(fm_browser_session_name "$id" "$home_a") || fail "no name derived for home A"
+  expect_b=$(fm_browser_session_name "$id" "$home_b") || fail "no name derived for home B"
+  expect_mate=$(fm_browser_session_name "$id" "$mate") || fail "no name derived for the secondmate home"
+  [ "$expect_a" != "$expect_b" ] \
+    || fail "fixture homes are indistinguishable, so this case would prove nothing"
+
+  # Twice through, in the same shell: the first round fills the cache and the
+  # second reads it, so a stale or sticky entry shows up as a changed answer.
+  for round in 1 2; do
+    fm_browser_session_name_result "$id" "$home_a" || fail "round $round: no name derived for home A"
+    [ "$FM_BROWSER_SESSION_NAME_RESULT" = "$expect_a" ] \
+      || fail "round $round: home A derived $FM_BROWSER_SESSION_NAME_RESULT, expected $expect_a"
+    fm_browser_session_name_result "$id" "$home_b" || fail "round $round: no name derived for home B"
+    [ "$FM_BROWSER_SESSION_NAME_RESULT" = "$expect_b" ] \
+      || fail "round $round: home B derived $FM_BROWSER_SESSION_NAME_RESULT, expected $expect_b"
+    fm_browser_session_name_result "$id" "$mate" || fail "round $round: no name derived for the secondmate home"
+    [ "$FM_BROWSER_SESSION_NAME_RESULT" = "$expect_mate" ] \
+      || fail "round $round: the secondmate home derived $FM_BROWSER_SESSION_NAME_RESULT, expected $expect_mate"
+  done
+
+  # A home that cannot be resolved still fails, warm cache or not, and must not
+  # answer with whichever tag happens to be cached.
+  fm_browser_session_name_result "$id" "" \
+    && fail "an empty home derived a session name off the cache: $FM_BROWSER_SESSION_NAME_RESULT"
+  pass "fm-browser-session-lib: the per-home tag memo keeps every home's session distinct across repeated derivations in one process"
+}
+
 # A maximum-length id plus a home tag runs past the cap, which is where the
 # shortening rule has to compose with the home rather than replace it.
 test_home_stays_distinct_when_the_name_must_be_shortened() {
@@ -190,6 +236,7 @@ test_ordinary_ids_keep_their_readable_name
 test_oversized_ids_are_shortened_under_the_cap
 test_shortened_names_stay_distinct_and_deterministic
 test_the_same_id_in_two_homes_is_two_sessions
+test_the_memo_keeps_each_home_distinct_within_one_process
 test_home_stays_distinct_when_the_name_must_be_shortened
 test_no_home_yields_no_session
 test_no_id_yields_no_session

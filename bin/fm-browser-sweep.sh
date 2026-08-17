@@ -36,10 +36,13 @@
 #     whose argv also carries the package name - so the match is the bridge
 #     entry point specifically. Reporting either would send an operator to kill
 #     an unrelated process
-#   - no --protect-home records it as a live task's session. A session pinned to
-#     a task whose state/<task id>.meta still exists belongs to work in flight -
+#   - no home records it as a live task's session. A session pinned to a task
+#     whose state/<task id>.meta still exists belongs to work in flight -
 #     including a task deliberately idling on an external wait - and a long-idle
-#     browser is normal there
+#     browser is normal there. The homes read are every home the fleet index
+#     below resolved, plus any named with --protect-home; a task is only ever
+#     recorded in its own home, so reading one home would leave every other
+#     home's meta-only work unprotected
 #   - nothing in the session's own state has been written within the age window
 #   - no open work item anywhere in the fleet owns the session. Bridge state is
 #     host-global, so a session can belong to a live worker in a secondmate home
@@ -86,10 +89,13 @@
 # covers the whole host on every home's behalf. This is a caveat on where a
 # manual run is meaningful, not a refusal: the script stays runnable anywhere.
 #
-# Scope limit, narrowed but not gone: the index knows a task by its backlog row,
-# so a session pinned to work that another home tracks only in state/<id>.meta,
-# with no open row anywhere, is still reported. The lines are advisory, and the
-# operator confirms ownership before stopping anything.
+# The two ownership layers are complementary, and each covers what the other
+# cannot: the index knows a task by its open backlog ROW in any home, while the
+# live-task layer knows it by its state/<id>.meta RECORD in any home the index
+# resolved. A task dispatched straight from a conversation has a record and no
+# row; a queued item has a row and no record. Reading the records of only one
+# home left everything between them exposed, which is why the record layer
+# follows the index's own home list rather than the command line.
 #
 # Output is one line per notable outcome and silent otherwise, in the same
 # "<subject>: <verb>: <detail>" shape the other session-start sweeps use:
@@ -114,8 +120,9 @@
 #   FM_BROWSER_SWEEP_AGE_MINUTES  idle window in minutes; wins over the hours form
 #   FM_BROWSER_SWEEP_ROOT         chrome-devtools-axi state root
 #                                 (default $HOME/.chrome-devtools-axi)
-#   FM_BROWSER_SWEEP_HOMES        firstmate homes whose live tasks are protected,
-#                                 colon-separated
+#   FM_BROWSER_SWEEP_HOMES        firstmate homes whose live tasks are protected
+#                                 in ADDITION to the ones the fleet index
+#                                 resolves, colon-separated
 #   FM_BROWSER_SWEEP_INDEX_TIMEOUT
 #                                 seconds the cross-home work index may take
 #                                 before its answer is treated as unavailable
@@ -232,6 +239,10 @@ fi
 FLEET_INDEX_STATE=unread
 FLEET_INDEX_REASON=
 FLEET_TASK_SESSIONS=
+# Every home the index READ, newline-separated, which is what lets the live-task
+# layer below cover the whole fleet rather than only the homes named on the
+# command line. The index already resolved them, so this costs nothing extra.
+FLEET_INDEX_HOMES=
 
 # The index walks every registered home, so one on a stale or hung mount would
 # otherwise hold session start open forever. The bound is the same reasoning
@@ -251,7 +262,7 @@ run_fleet_index() {
 # failure mode here means "the fleet's open work is unknown", never "there is
 # none": the caller must not report anything after one.
 load_fleet_task_sessions() {
-  local json ids id name rc unread
+  local json ids id home rc unread
   command -v jq >/dev/null 2>&1 || {
     FLEET_INDEX_REASON="jq is not installed, so the fleet's open work could not be read"
     return 1
@@ -318,11 +329,27 @@ load_fleet_task_sessions() {
     FLEET_INDEX_REASON="the cross-home work index did not emit a readable fm-fleet-work-index.v1 object"
     return 1
   }
+
+  # The homes themselves, every one the index resolved - including the ones it
+  # skipped, which are exactly where the gap this closes lives: a home with no
+  # backlog file is skipped as a complete answer about its BACKLOG, and is also
+  # the likeliest home to be running a task that only ever existed as a
+  # state/<id>.meta. Nothing is inferred about a skipped home's work here; its
+  # live task records are simply read directly, one directory listing each.
+  FLEET_INDEX_HOMES=$(printf '%s' "$json" | jq -r '
+    .homes[] | select((.home // "") != "") | .home' 2>/dev/null) || {
+    FLEET_INDEX_REASON="the cross-home work index did not emit a readable fm-fleet-work-index.v1 object"
+    return 1
+  }
+  # The _result form derives in THIS shell rather than a command substitution,
+  # so the library's per-home tag memo survives from one item to the next. A
+  # fleet with 206 open items across 19 homes otherwise pays 206 subshells and
+  # digests for 19 distinct answers, on a path that runs at session start.
   FLEET_TASK_SESSIONS=" "
   while IFS=$'\t' read -r id home; do
     [ -n "$id" ] || continue
-    name=$(fm_browser_session_name "$id" "$home") || continue
-    FLEET_TASK_SESSIONS="$FLEET_TASK_SESSIONS$name "
+    fm_browser_session_name_result "$id" "$home" || continue
+    FLEET_TASK_SESSIONS="$FLEET_TASK_SESSIONS$FM_BROWSER_SESSION_NAME_RESULT "
   done <<<"$ids"
   return 0
 }
@@ -348,12 +375,20 @@ fleet_task_session() {
   return 1
 }
 
-# A session pinned to a task a --protect-home still records is live work's,
-# however long its browser has sat untouched: state/<task id>.meta exists
-# exactly as long as the task does. This is the second layer under the fleet
-# index, not a duplicate of it - a task can hold a meta with no backlog row at
-# all (a scout dispatched straight from a conversation), and that is still work
-# in flight.
+# A session pinned to a task a home still records is live work's, however long
+# its browser has sat untouched: state/<task id>.meta exists exactly as long as
+# the task does. This is the second layer under the fleet index, not a duplicate
+# of it - a task can hold a meta with no backlog row at all (a scout dispatched
+# straight from a conversation), and that is still work in flight.
+#
+# The homes walked are every home the fleet index resolved, plus any named with
+# --protect-home. Reading only the named ones left the two layers with a gap
+# between them: the index sees a task by its backlog ROW, so a meta-only task in
+# any home but this one was covered by neither, and its browser was reported as
+# an orphan with a stop command attached - measured at 25 such live records on
+# one host. The index has already resolved every home by the time this runs, so
+# closing that gap is one directory listing per home and no new discovery path.
+# --protect-home remains for a manual run against homes outside the index.
 #
 # The direction is id -> name, never name -> id. A session name carries its
 # home's tag and, once shortened, a digest where the rest of the id was
@@ -365,8 +400,7 @@ PROTECTED_SESSIONS=
 PROTECTED_SESSIONS_LOADED=0
 
 load_protected_sessions() {
-  local rest=$PROTECT_HOMES home meta id name
-  PROTECTED_SESSIONS=" "
+  local rest=$PROTECT_HOMES homes='' seen=$'\n' home meta id
   while [ -n "$rest" ]; do
     home=${rest%%:*}
     case "$rest" in
@@ -374,15 +408,28 @@ load_protected_sessions() {
       *) rest= ;;
     esac
     [ -n "$home" ] || continue
+    homes="$homes$home"$'\n'
+  done
+  homes="$homes$FLEET_INDEX_HOMES"
+
+  PROTECTED_SESSIONS=" "
+  while IFS= read -r home; do
+    [ -n "$home" ] || continue
+    # A home reached from both sources is read once; the same meta yields the
+    # same name either way, but the listing is not worth repeating.
+    case "$seen" in
+      *$'\n'"$home"$'\n'*) continue ;;
+    esac
+    seen="$seen$home"$'\n'
     [ -d "$home/state" ] || continue
     for meta in "$home"/state/*.meta; do
       [ -f "$meta" ] || continue
       id=${meta##*/}
       id=${id%.meta}
-      name=$(fm_browser_session_name "$id" "$home") || continue
-      PROTECTED_SESSIONS="$PROTECTED_SESSIONS$name "
+      fm_browser_session_name_result "$id" "$home" || continue
+      PROTECTED_SESSIONS="$PROTECTED_SESSIONS$FM_BROWSER_SESSION_NAME_RESULT "
     done
-  done
+  done <<<"$homes"
 }
 
 protected_session() {
@@ -426,7 +473,7 @@ describe_idle() {
 
 # examine <session> <state dir>
 examine() {
-  local session=$1 dir=$2 pid_file="$2/bridge.pid" pid last now idle
+  local session=$1 dir=$2 pid_file="$2/bridge.pid" pid last now idle unreadable=
   [ -f "$pid_file" ] || { note "$session: skipped: no bridge record"; return 0; }
   if ! pid=$(fm_browser_session_bridge_pid "$pid_file"); then
     report "$session: skipped: bridge record names no readable pid ($pid_file)"
@@ -436,25 +483,33 @@ examine() {
     note "$session: skipped: recorded pid $pid is not a running bridge"
     return 0
   fi
+  if last=$(newest_state_mtime "$dir"); then
+    now=$(date +%s)
+    idle=$((now - last))
+    if [ "$idle" -lt "$AGE_SECONDS" ]; then
+      note "$session: skipped: used within $AGE_WINDOW"
+      return 0
+    fi
+  else
+    # Unreadable state cannot be aged, but it still describes a live bridge an
+    # operator may act on, so it goes through the same ownership checks below
+    # rather than being announced about a session live work still owns.
+    unreadable="bridge pid $pid is running but its state could not be read ($dir)"
+  fi
+  # The ownership checks come last: the index is the only one that costs a walk
+  # of every home's backlog, nothing may be reported without it, and the live-
+  # task layer under it reads the homes the index resolved.
+  fleet_index_usable || return 0
+  if fleet_task_session "$session"; then
+    note "$session: skipped: an open work item in the fleet still owns this session"
+    return 0
+  fi
   if protected_session "$session"; then
     note "$session: skipped: a firstmate home records it as a live task's browser session"
     return 0
   fi
-  if ! last=$(newest_state_mtime "$dir"); then
-    report "$session: skipped: bridge pid $pid is running but its state could not be read ($dir)"
-    return 0
-  fi
-  now=$(date +%s)
-  idle=$((now - last))
-  if [ "$idle" -lt "$AGE_SECONDS" ]; then
-    note "$session: skipped: used within $AGE_WINDOW"
-    return 0
-  fi
-  # Last, because it is the only check that costs a walk of every home's
-  # backlog, and because nothing may be reported without it.
-  fleet_index_usable || return 0
-  if fleet_task_session "$session"; then
-    note "$session: skipped: an open work item in the fleet still owns this session"
+  if [ -n "$unreadable" ]; then
+    report "$session: skipped: $unreadable"
     return 0
   fi
   report "$session: idle: bridge pid $pid unused for $(describe_idle "$idle") (window $AGE_WINDOW); stop it with CHROME_DEVTOOLS_AXI_SESSION=$session chrome-devtools-axi stop"
