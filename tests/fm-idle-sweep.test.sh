@@ -24,6 +24,9 @@
 #   (k) --dry-run                                -> reports, invokes nothing
 #   (l) a sweep started while one is running     -> stands down quietly, exit 0
 #   (m) --dry-run started while one is running   -> still reports, still inert
+#   (n) mode=no-mistakes implementation-gate done: (idle-sweep-reclaims-mid-flight-done):
+#       "done: {summary}", landed work, no run reported -> never offered; only
+#       "done: PR {url} checks green" is the terminal shape for that mode
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -264,6 +267,44 @@ test_parked_crew_is_never_offered() {
   pass "a stale done: line never outranks a crew reconciled to parked at a gate"
 }
 
+test_no_mistakes_implementation_gate_done_is_never_offered() {
+  local case_dir out
+  case_dir=$(make_case no-mistakes-implementation-gate)
+  write_meta "$case_dir"  # mode=no-mistakes (default)
+  install_recording_teardown "$case_dir"
+  wt_commit_file "$case_dir" fix.txt "the fix"
+  land_on_origin "$case_dir"
+  # bin/fm-brief.sh's no-mistakes brief writes this exact line at the
+  # implementation commit, well before /no-mistakes ever runs - the same verb
+  # as the real terminal line, but not its shape.
+  write_status "$case_dir" "done: implemented the thing"
+
+  out=$(run_sweep_recording "$case_dir" --verbose) || fail "no-mistakes-implementation-gate: sweep exited non-zero"
+
+  [ "$(teardown_call_count "$case_dir")" -eq 0 ] \
+    || fail "no-mistakes-implementation-gate: cleanup was attempted on the implementation-gate done: line"
+  assert_contains "$out" "$TASK: skipped: no-mistakes done:" \
+    "no-mistakes-implementation-gate: sweep did not report the mode-aware skip"
+  assert_present "$case_dir/state/$TASK.meta" \
+    "no-mistakes-implementation-gate: task metadata was removed while validation had not even started"
+  pass "a no-mistakes task's implementation-gate done: is never offered for cleanup"
+}
+
+test_no_mistakes_terminal_done_is_still_swept() {
+  local case_dir out
+  case_dir=$(make_case no-mistakes-terminal-gate)
+  write_meta "$case_dir"
+  wt_commit_file "$case_dir" fix.txt "the fix"
+  land_on_origin "$case_dir"
+  write_status "$case_dir" "done: PR https://example.test/pr/9 checks green"
+
+  out=$(run_sweep "$case_dir" --verbose) || fail "no-mistakes-terminal-gate: sweep exited non-zero"
+
+  assert_contains "$out" "$TASK: cleaned up" \
+    "no-mistakes-terminal-gate: the genuine terminal done: line was not swept"
+  pass "a no-mistakes task's real terminal done: line is swept exactly as before"
+}
+
 test_secondmate_is_never_offered() {
   local case_dir out
   case_dir=$(make_case secondmate-skipped)
@@ -348,7 +389,7 @@ test_new_evidence_reopens_a_backed_off_task() {
   install_recording_teardown "$case_dir"
   # The task moved: a new status event is new evidence, so the retry window
   # reopens immediately instead of waiting out --retry-secs.
-  printf '%s\n' "done: PR https://example.test/pr/9 merged" >> "$case_dir/state/$TASK.status"
+  printf '%s\n' "done: PR https://example.test/pr/9 checks green (rebased)" >> "$case_dir/state/$TASK.status"
   out=$(run_sweep_recording "$case_dir" --verbose) || fail "backoff-reopen: second sweep exited non-zero"
 
   [ "$(teardown_call_count "$case_dir")" -eq 1 ] \
@@ -512,6 +553,8 @@ test_unlanded_done_task_is_left_alone
 test_dirty_worktree_is_left_alone
 test_unfinished_task_is_never_offered
 test_parked_crew_is_never_offered
+test_no_mistakes_implementation_gate_done_is_never_offered
+test_no_mistakes_terminal_done_is_still_swept
 test_secondmate_is_never_offered
 test_task_with_nothing_to_reclaim_is_never_offered
 test_failed_task_with_live_worktree_is_swept

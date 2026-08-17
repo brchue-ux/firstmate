@@ -56,7 +56,12 @@
 #   - its kind is not secondmate. A secondmate is persistent by design and is
 #     retired only on an explicit captain or main-firstmate decision
 #     (AGENTS.md section 7), never by a periodic sweep
-#   - the last line of state/<id>.status carries the done: or failed: verb
+#   - the last line of state/<id>.status carries the done: or failed: verb. For a
+#     mode=no-mistakes task, a done: verb is eligible only when the line is the
+#     genuine terminal shape ("done: PR {url} checks green"), not the earlier
+#     implementation-gate "done: {summary}" bin/fm-brief.sh's no-mistakes brief
+#     also writes with the same verb - see status_line_is_no_mistakes_terminal
+#     (fm-classify-lib.sh). Every other mode's done: is already terminal
 #   - it still holds something to reclaim: the recorded worktree still exists as
 #     a directory, or the recorded runtime endpoint is not confidently dead. A
 #     task holding neither is left to the recovery path that owns a lost
@@ -329,13 +334,28 @@ for meta in "$STATE"/*.meta; do
     continue
   fi
 
-  verb=$(status_line_verb "$(last_status_line "$STATE/$id.status")")
+  last_line=$(last_status_line "$STATE/$id.status")
+  verb=$(status_line_verb "$last_line")
   case "$verb" in
     done|failed) ;;
     *)
       report_verbose "$id: skipped: last recorded status is not done or failed"
       continue ;;
   esac
+
+  # bin/fm-brief.sh's no-mistakes ship brief writes done: at TWO different gates:
+  # the implementation commit ("done: {summary}", well before validation even
+  # starts) and the real terminal state ("done: PR {url} checks green"). Both
+  # carry the same verb, so a plain verb match can offer a mode=no-mistakes task
+  # while its pipeline run is still live. Require the terminal shape specifically
+  # for that mode; every other mode's done: is already its worker's genuine
+  # terminal state (AGENTS.md section 7).
+  mode=$(fm_meta_get "$meta" mode)
+  [ -n "$mode" ] || mode=no-mistakes
+  if [ "$verb" = "done" ] && [ "$mode" = no-mistakes ] && ! status_line_is_no_mistakes_terminal "$last_line"; then
+    report_verbose "$id: skipped: no-mistakes done: is the implementation gate, not the terminal PR/checks-green line"
+    continue
+  fi
 
   if ! task_holds_resources "$meta"; then
     report_verbose "$id: skipped: no worktree or live endpoint left to reclaim"

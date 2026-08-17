@@ -38,6 +38,11 @@
 #   (o) fm-pr-check rerun after HEAD moved                      -> no stale pr_head
 #   (p) fm-pr-check when local HEAD lags                        -> record remote PR head
 #   (q) no-mistakes + NO pr= recorded, PR discovered by branch  -> ALLOW  (yolo/no-CI merge)
+#   (z1) no-mistakes + pushed only to its own local staging remote (idle-sweep-
+#        reclaims-mid-flight-done) -> REFUSE (a mid-run pipeline push is not landed)
+#   (z2) direct-PR + pushed to origin, PR still open              -> REFUSE (idle-
+#        sweep-reclaims-mid-flight-done: "on origin" != landed for this mode)
+#   (z3) direct-PR + pushed to origin, PR merged                   -> ALLOW  (no regression)
 #
 # Also covers backlog teardown-lock-race: a git index.lock left in the worktree by a
 # killed crew process (bin/fm-teardown.sh's teardown_treehouse_return).
@@ -697,6 +702,97 @@ test_no_mistakes_truly_unpushed_refuses() {
   expect_code 1 "$rc" "nm-unpushed: teardown should refuse"
   grep -q REFUSED "$case_dir/stderr" || fail "nm-unpushed: no REFUSED line in stderr"
   pass "no-mistakes worktree with genuinely unlanded work is refused (safety preserved)"
+}
+
+# idle-sweep-reclaims-mid-flight-done, occurrence 3: a no-mistakes run pushes the
+# branch to its own local staging repo (~/.no-mistakes/repos/<hash>.git) mid-run,
+# long before anything reaches the real forge. That push alone must not satisfy
+# "reachable from a remote" - only the project's real remotes count as landed.
+test_no_mistakes_staging_remote_push_refuses() {
+  local case_dir rc
+  case_dir=$(make_case nm-staging-only)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "in-flight pipeline commit"
+  mkdir -p "$case_dir/.no-mistakes/repos"
+  git init -q --bare "$case_dir/.no-mistakes/repos/deadbeefcafe.git"
+  git -C "$case_dir/project" remote add no-mistakes "$case_dir/.no-mistakes/repos/deadbeefcafe.git"
+  git -C "$case_dir/wt" push -q no-mistakes fm/task-x1
+  git -C "$case_dir/project" fetch -q no-mistakes
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "nm-staging-only: teardown should refuse a push to no-mistakes' own staging remote alone"
+  grep -q REFUSED "$case_dir/stderr" || fail "nm-staging-only: no REFUSED line in stderr"
+  assert_present "$case_dir/wt/feature.txt" "nm-staging-only: unlanded work was discarded"
+  pass "a push to no-mistakes' own local staging remote alone is never treated as landed"
+}
+
+# idle-sweep-reclaims-mid-flight-done, occurrence 4: direct-PR pushes the branch to
+# origin only to OPEN the PR - unlike no-mistakes (which pushes to origin only
+# once past every gate) or local-only (which never pushes to a remote at all),
+# "on origin" does not mean "landed" for this mode. An open PR must still refuse.
+test_direct_pr_open_pr_refuses() {
+  local case_dir rc
+  case_dir=$(make_case direct-pr-open)
+  write_meta "$case_dir" direct-PR ship
+  wt_commit_file "$case_dir" feature.txt hello "the direct-PR change"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  append_pr_meta_url "$case_dir"
+  cat > "$case_dir/fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "pr view")
+    printf '%s\n' "pull_request:" "  number: 7" "  state: open" ; exit 0 ;;
+esac
+exit 0
+SH
+  cat > "$case_dir/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "pr view")
+    case " $* " in
+      *"state,headRefOid"*) printf '%s\t%s\n' 'OPEN' 'deadbeef' ; exit 0 ;;
+    esac
+    ;;
+esac
+echo "error: pull request not found" >&2
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "direct-pr-open: teardown should refuse a direct-PR task whose PR is still open"
+  grep -q REFUSED "$case_dir/stderr" || fail "direct-pr-open: no REFUSED line in stderr"
+  pass "a direct-PR task whose PR is still open is refused even though its branch is fully pushed"
+}
+
+test_direct_pr_merged_pr_allows() {
+  local case_dir rc pr_head
+  case_dir=$(make_case direct-pr-merged)
+  write_meta "$case_dir" direct-PR ship
+  wt_commit_file "$case_dir" feature.txt hello "the direct-PR change"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  append_pr_meta_for_current_head "$case_dir"
+  pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "direct-pr-merged: teardown should succeed once the PR is merged"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "direct-pr-merged: teardown printed a REFUSED line"
+  pass "a direct-PR task whose PR is merged is torn down (no regression)"
 }
 
 test_squash_merged_branch_deleted_allows() {
@@ -1457,6 +1553,9 @@ test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
 test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
+test_no_mistakes_staging_remote_push_refuses
+test_direct_pr_open_pr_refuses
+test_direct_pr_merged_pr_allows
 test_local_only_force_overrides_unpushed
 test_herdr_teardown_clears_escalation_marker
 test_herdr_projection_teardown_retires_journal_only_after_confirmed_close

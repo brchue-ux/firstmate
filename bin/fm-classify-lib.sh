@@ -172,6 +172,27 @@ status_line_note() {  # <status-line> -> text after the first colon, trimmed
     *) printf '%s' "$1" ;;
   esac
 }
+
+# 0 if <status-line> is a no-mistakes ship task's genuine TERMINAL done: line
+# ("done: PR {url} checks green", the normal case, or "done: PR {url} merged" -
+# FM_CLASSIFY_CAPTAIN_RE_DEFAULT's other recognized PR-landed free-text token,
+# e.g. a yolo-authorized merge on a repo with no PR CI where checks green never
+# fires), not the earlier implementation-gate "done: {summary}" line
+# bin/fm-brief.sh's no-mistakes brief also writes with the same verb (AGENTS.md
+# section 7's "validate" step). The two done: lines are otherwise
+# indistinguishable by verb alone, so a caller that must not act until
+# validation is truly finished (bin/fm-idle-sweep.sh's reclaim eligibility)
+# checks this instead of the bare verb. Shared with fm-crew-state.sh's identical
+# ci-ready test so the terminal shape has one owner.
+status_line_is_no_mistakes_terminal() {  # <status-line>
+  local note
+  [ "$(status_line_verb "$1")" = "done" ] || return 1
+  note=$(status_line_note "$1")
+  case "$note" in
+    *PR*"checks green"*|*"checks green"*PR*|*PR*merged*|*merged*PR*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
 _fm_decision_key() {  # <status-line> -> key slug, or "default" when no token
   local prefix=${1%%:*} k
   case "$prefix" in
