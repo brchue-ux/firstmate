@@ -8,13 +8,25 @@
 # (a secondmate teardown prints none, since secondmates are not backlog items).
 # REFUSES if the worktree holds work that has not LANDED, because cleanup
 # hard-resets/removes the worktree and kills its processes. Work has landed when it is
-# reachable from any remote-tracking branch (a fork counts as a remote, so
-# upstream-contribution PRs pushed to a fork satisfy this in any mode), OR - for a
-# normal ship task whose commits are not so reachable - when its PR is merged and
-# GitHub reports a PR head that contains the current local work, or its content is
-# already present in the up-to-date default branch. This recognizes the common
-# squash-merge-then-delete-branch flow, where the branch's own commits live nowhere
-# on a remote yet the change is fully in main.
+# reachable from any remote-tracking branch EXCEPT no-mistakes' own local staging
+# remote (a fork counts as a landed remote, so upstream-contribution PRs pushed to
+# a fork satisfy this in any mode; the staging remote at .no-mistakes/repos/*.git
+# does not, because it is a mid-pipeline artifact of the CURRENT run, not a landed
+# destination - see unlanded_log), OR - for a normal ship task whose commits are
+# not so reachable - when its PR is merged and GitHub reports a PR head that
+# contains the current local work, or its content is already present in the
+# up-to-date default branch. This recognizes the common squash-merge-then-delete-
+# branch flow, where the branch's own commits live nowhere on a remote yet the
+# change is fully in main.
+# mode=direct-PR additionally requires its recorded PR to actually be landed
+# (merged, or its content already in the default branch) even when the branch
+# itself is fully pushed to origin: origin is a real remote, but for direct-PR
+# the worker pushes there only to OPEN the PR, so "on origin" alone does not mean
+# "landed" the way it does for no-mistakes (whose own pipeline pushes to origin
+# only once past every gate) or local-only (which never pushes to a remote at
+# all). Without this, a still-open direct-PR PR was reclaimed as soon as done:
+# was reported, destroying the metadata bin/fm-pr-merge.sh and bin/fm-pr-check.sh
+# need to track its merge.
 # The PR itself is resolved from the task's recorded pr= when present, or - when
 # no pr= was ever recorded (e.g. a yolo-authorized merge on a repo with no PR CI,
 # where the usual "checks green" fm-pr-check.sh trigger never fires) - by looking
@@ -676,6 +688,34 @@ teardown_treehouse_return() {
   return 1
 }
 
+# Names of $WT's remotes whose URL is no-mistakes' own local staging repo
+# (same unspoofable path pattern as fm-gate-refuse-lib.sh's gate-agent
+# detection: */.no-mistakes/repos/*.git). A push there is a mid-run pipeline
+# artifact, never a landed destination.
+staging_remote_names() {
+  local name url
+  git -C "$WT" remote 2>/dev/null | while IFS= read -r name; do
+    url=$(git -C "$WT" remote get-url "$name" 2>/dev/null) || continue
+    case "$url" in
+      */.no-mistakes/repos/*.git) printf '%s\n' "$name" ;;
+    esac
+  done
+}
+
+# Like `git log HEAD --not --remotes`, except a push to the staging remote
+# above never counts as covering HEAD - closes the gap where an in-flight
+# no-mistakes run's own intermediate push satisfied "reachable from a remote"
+# and unlocked teardown of work that had not actually landed anywhere durable.
+unlanded_log() {
+  local args=(log --oneline HEAD --not) name
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    args+=(--exclude="$name/*")
+  done < <(staging_remote_names)
+  args+=(--remotes --)
+  git -C "$WT" "${args[@]}" 2>/dev/null
+}
+
 validate_worktree_teardown_safety() {
   local dirty_raw dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch
   [ -d "$WT" ] || return 0
@@ -694,7 +734,7 @@ validate_worktree_teardown_safety() {
   fi
   dirty=$(printf '%s\n' "$dirty_raw" | grep -vE '^\?\? (\.claude/|\.fm-(grok|kimi)-turnend$)' | head -1 || true)
 
-  if ! unpushed_raw=$(git -C "$WT" log --oneline HEAD --not --remotes -- 2>/dev/null); then
+  if ! unpushed_raw=$(unlanded_log); then
     if worktree_safety_blocked_by_lock "commits not on a remote"; then
       return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
     fi
@@ -737,6 +777,24 @@ validate_worktree_teardown_safety() {
       echo "REFUSED: worktree $WT has work not on any remote and not landed." >&2
       printf 'unpushed commits:\n%s\n' "$unpushed" >&2
       echo "Push the branch, land its PR, or get the captain's explicit OK to discard, then --force." >&2
+      return 1
+    fi
+  elif [ "$MODE" = direct-PR ]; then
+    # Nothing dirty and nothing unpushed: the branch is fully on a real remote
+    # (usually origin). That is enough to call it landed for no-mistakes (whose
+    # own pipeline only pushes there once past every gate) and local-only (which
+    # never pushes to a remote at all), but not for direct-PR, where the worker
+    # pushes to open the PR long before it is merged. Require the same
+    # merged-or-in-default proof the unpushed branch above requires.
+    branch=${TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY:-}
+    if [ -z "$branch" ]; then
+      branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
+      TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY=$branch
+    fi
+    if ! work_is_landed "$branch"; then
+      echo "REFUSED: direct-PR worktree $WT is pushed but its PR is not merged." >&2
+      [ -n "$PR_URL" ] && echo "recorded PR: $PR_URL" >&2
+      echo "Merge the PR, or get the captain's explicit OK to discard, then --force." >&2
       return 1
     fi
   fi

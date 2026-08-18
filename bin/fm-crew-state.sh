@@ -288,12 +288,11 @@ nm_gate_findings_count() {
   case "$rest" in ''|*[!0-9]*) return 0 ;; esac
   printf '%s' "$rest"
 }
+# The PR/checks-green terminal-shape test itself is owned by
+# fm-classify-lib.sh's status_line_is_no_mistakes_terminal (also used by
+# bin/fm-idle-sweep.sh); this wrapper just supplies the crew's own log line.
 log_reports_ci_ready() {
-  [ "$LOG_VERB" = "done" ] || return 1
-  case "$(status_line_note "$LOG_LINE")" in
-    *PR*"checks green"*|*"checks green"*PR*) return 0 ;;
-    *) return 1 ;;
-  esac
+  status_line_is_no_mistakes_terminal "$LOG_LINE"
 }
 
 nm_ci_step_status() {
