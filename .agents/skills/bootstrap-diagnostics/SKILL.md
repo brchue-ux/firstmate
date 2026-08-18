@@ -2,7 +2,7 @@
 name: bootstrap-diagnostics
 description: >-
   Agent-only handling playbook for session-start bootstrap diagnostics.
-  Use whenever the session-start digest's bootstrap section prints an actionable diagnostic line - MISSING, MISSING_MANUAL, NO_MISTAKES_OUTDATED, BACKEND_INVALID, NEEDS_GH_AUTH, TANGLE, STARTUP_MEMORY_BUDGET, CREW_DISPATCH invalid, FLEET_SYNC, PR_CHECK_MIGRATION, SCRATCH_SWEEP, TMP_USAGE, SECONDMATE_SYNC, SECONDMATE_LIVENESS, NUDGE_SECONDMATES, or FMX - or when a standalone bin/fm-bootstrap.sh run prints one of those lines.
+  Use whenever the session-start digest's bootstrap section prints an actionable diagnostic line - MISSING, MISSING_MANUAL, NO_MISTAKES_OUTDATED, BACKEND_INVALID, NEEDS_GH_AUTH, TANGLE, STARTUP_MEMORY_BUDGET, CREW_DISPATCH invalid, FLEET_SYNC, PR_CHECK_MIGRATION, SCRATCH_SWEEP, TMP_USAGE, BROWSER_SWEEP, SECONDMATE_SYNC, SECONDMATE_LIVENESS, NUDGE_SECONDMATES, or FMX - or when a standalone bin/fm-bootstrap.sh run prints one of those lines.
   A silent bootstrap section, or a BOOTSTRAP_INFO fact, means no skill load.
 user-invocable: false
 metadata:
@@ -65,6 +65,24 @@ When any diagnostic needs captain attention, report the plain consequence and re
   Resizing the temp filesystem is never the local fix: it spends the same RAM the memory ceiling protects, so it is the captain's call.
 - `TMP_USAGE: <temp root>: unknown: <reason>` - free space on the temp root could not be measured at all.
   Treat it as unknown rather than healthy, because silence and health are indistinguishable here, and that is exactly how the condition goes unnoticed; check the named root exists and is readable before dispatching heavy work.
+- `BROWSER_SWEEP: <session>: idle: <detail>` - a `chrome-devtools-axi` browser session nothing has used for the reported window is still holding a bridge process and the headless Chrome tree behind it.
+  These accumulate because the bridge detaches itself from the pane that started it, so no cleanup, worktree return, or process-group kill reaches it; one host reached 38 such processes at 2.28 GB resident and 477 MB swap before anyone noticed, and they cost swap and page-cache pressure quietly rather than CPU.
+  The line carries the exact session-scoped stop command, and running it is a decision, not an automatic step: the sweep deliberately never stops anything, because a session that merely looks idle may belong to a live worker in another home, and killing that mid-task is worse than leaving a paged-out daemon.
+  This sweep runs in the main home only, and that is what makes its answer trustworthy: its cross-home work index walks strictly downward from the home running it, so only the fleet root sees the whole fleet's open work while the browser state it reads is host-global.
+  So the line means two separate exclusions already ran: every task carrying an open backlog row anywhere in the fleet, and every task any of those homes still records in its own runtime state without one, which is what covers work dispatched straight from a conversation.
+  You will not see this diagnostic in a secondmate session, and the main home's sweep covers that home's bridges too.
+  Confirm the session is not in use before running the printed command.
+  A pinned name reads `fm-<task id>-<home tag>`, where the home tag is `firstmate-<hash>` for the main home or `2ndmate-<id>-<hash>` for a secondmate home, so the leading segment after `fm-` is the task and the trailing segment is the home that owns it.
+  When that would have exceeded the tool's 64-character limit the name is instead `fm-<leading part of the task id>-<hash>`, so the task id may be truncated and the home tag replaced by a digest.
+  Do not grep for a literal `fm-<task id>` and conclude nothing owns the session when it does not match: match on the leading id segment, and treat a truncated name as still belonging to the task it starts with.
+  Then run the printed command, which is scoped by name; never a bare `chrome-devtools-axi stop`, which takes down the shared `default` session another home may be using right now.
+  A `default:` line means an unpinned call created it, so also check that the task in question was briefed with a pinned session.
+- `BROWSER_SWEEP: <session|state root>: skipped: <reason>` - the sweep could not decide whether a bridge is idle: a bridge record that names no readable pid, a running bridge whose state could not be read, or (for the whole root) no way to identify running processes at all, or no way to read the fleet's open work.
+  Nothing was reported as idle in that case, so treat it as unmeasured rather than clean, and inspect the named path before assuming the host has no orphaned browsers.
+  A whole-root skip naming the cross-home work index is the deliberate fail-safe: without it a session belonging to a live worker in another home is indistinguishable from an orphan, so the sweep reports nothing at all rather than risk sending you to stop working work.
+  That skip also fires when the index answered but could not determine some home's open work, and it names those homes: a home whose backlog exists but cannot be read or parsed, a registered home that cannot be found at all, or a home whose own secondmate registry cannot be enumerated (which hides that whole subtree) contributes no open work, so its live workers would otherwise look abandoned.
+  A home that simply has no `data/backlog.md`, or one already counted under an earlier registry id, is not this condition and never triggers the skip, so a named home is a real repair and not the ordinary state of a seeded home.
+  Fix the named home's readability and the next bootstrap sweeps normally; the browsers are still there in the meantime, so this is a repair to schedule rather than an emergency.
 - `SECONDMATE_SYNC: secondmate <id>: skipped: <reason>` - the local-HEAD secondmate sync left a live secondmate home on its existing checkout because the home was dirty, diverged, unsafe, on the wrong branch, missing the primary target commit, or otherwise not fast-forwardable, or because inherited local-material propagation failed; bootstrap continued, but inspect the reason because the secondmate's tracked instructions, inherited settings, or shared captain preferences may be stale after a primary update.
 - `SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed after <cause>: <reason>` - the session-start liveness sweep owes that secondmate a launch and could not deliver it.
   Fleet startup launches the first mate and nothing else, so the sweep only ever owes a launch to a dead or missing secondmate whose own durable records show pending work (`secondmate-provisioning` "Recovery" owns that test).

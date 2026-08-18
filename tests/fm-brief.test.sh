@@ -214,6 +214,71 @@ test_ship_modes_generate_clean_briefs() {
   pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"
 }
 
+# The chrome-devtools-axi bridge outlives the pane, the worktree and every kill
+# teardown performs, so the session name is the only handle anything keeps on it.
+# Pinning it to the task id is what lets bin/fm-teardown.sh stop this task's
+# browser and no other, and it has to hold for scouts too - the audited orphans
+# came from one-off investigation sessions, not from ship tasks.
+test_browser_session_is_pinned_to_the_task() {
+  local home id brief session
+  home="$TMP_ROOT/browser-session-home"
+  write_registry "$home"
+  # shellcheck source=bin/fm-browser-session-lib.sh disable=SC1091
+  . "$ROOT/bin/fm-browser-session-lib.sh"
+
+  for id in brief-browser-ship brief-browser-scout; do
+    session=$(fm_browser_session_name "$id" "$home")
+    case "$id" in
+      *scout) FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" someproj --scout >/dev/null ;;
+      *) FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" someproj --pr-repo owner/someproj --pr-base main >/dev/null ;;
+    esac
+    brief="$home/data/$id/brief.md"
+    # The name leads with the task id, which is what keeps a bridge attributable
+    # by reading it, and carries this home's tag so another home filing the same
+    # id does not land on the same browser.
+    assert_grep "CHROME_DEVTOOLS_AXI_SESSION=fm-$id-" "$brief" \
+      "$id: brief does not pin the browser session to the task id"
+    assert_grep "CHROME_DEVTOOLS_AXI_SESSION=$session chrome-devtools-axi stop" "$brief" \
+      "$id: brief does not require stopping the task's own browser session"
+    # shellcheck disable=SC2016 # The backticks are literal brief prose, not a command substitution.
+    assert_grep 'before you append `done:` or `failed:`' "$brief" \
+      "$id: stopping the browser is not tied to reporting a terminal state"
+    # A bare stop would take the default session down with it, which is a
+    # sibling home's live browser.
+    grep -n 'chrome-devtools-axi stop' "$brief" | grep -qv "CHROME_DEVTOOLS_AXI_SESSION=$session" \
+      && fail "$id: brief tells the worker to run an unscoped chrome-devtools-axi stop"
+  done
+  pass "fm-brief.sh: ship and scout briefs pin the browser session to the task and require a scoped stop before a terminal report"
+}
+
+# A task id may be 64 characters (bin/fm-pr-lib.sh's fm_task_id_creation_valid),
+# while chrome-devtools-axi refuses a session name over 64. Briefing the naive
+# fm-<id> for such a task would hand the worker a name that throws on EVERY call
+# it makes, so the brief has to carry the derived one - and it has to be the
+# same derivation bin/fm-teardown.sh and bin/fm-browser-sweep.sh use, or the
+# bridge it does start is one nothing can stop or attribute.
+test_browser_session_fits_the_tool_cap_for_a_maximum_length_task_id() {
+  local home id brief session
+  home="$TMP_ROOT/browser-session-long-home"
+  write_registry "$home"
+  id="long-brief-task-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+  [ "${#id}" -eq 64 ] || fail "fixture task id is ${#id} characters, wanted 64"
+
+  # shellcheck source=bin/fm-browser-session-lib.sh disable=SC1091
+  . "$ROOT/bin/fm-browser-session-lib.sh"
+  session=$(fm_browser_session_name "$id" "$home") || fail "no session name derived for a 64-character id"
+  [ "${#session}" -le 64 ] \
+    || fail "the shared derivation produced a ${#session}-character name: $session"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" someproj --scout >/dev/null
+  brief="$home/data/$id/brief.md"
+  assert_grep "CHROME_DEVTOOLS_AXI_SESSION=$session chrome-devtools-axi stop" "$brief" \
+    "the brief does not pin the derived session name teardown and the sweep use"
+  assert_no_grep "CHROME_DEVTOOLS_AXI_SESSION=fm-$id" "$brief" \
+    "the brief pinned a session name chrome-devtools-axi would refuse on every call"
+  pass "fm-brief.sh: a maximum-length task id is briefed with the shared derived session name, inside the tool's cap"
+}
+
 test_faster_paths_use_configured_authority_without_stacked_review() {
   local home id brief
   home="$TMP_ROOT/configured-authority-home"
@@ -745,6 +810,8 @@ test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
+test_browser_session_is_pinned_to_the_task
+test_browser_session_fits_the_tool_cap_for_a_maximum_length_task_id
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
 test_ship_project_memory_wording

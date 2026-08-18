@@ -508,6 +508,156 @@ test_tmp_usage_is_reported_after_reclamation() {
   pass "bootstrap reports remaining temp-root pressure, locked or not, and stays silent when there is room"
 }
 
+# The browser sweep's own rules are covered by tests/fm-browser-sweep.test.sh.
+# What is only reachable from here is the wiring: that bootstrap runs it at all,
+# that its lines reach the digest under the BROWSER_SWEEP prefix the
+# bootstrap-diagnostics skill keys on, and that this home is handed to it as a
+# protected home. A rename, a dropped flag, or a typo'd prefix all fail the same
+# way otherwise - the diagnostic simply goes quiet, and silence here is
+# indistinguishable from a host with no orphaned browsers.
+#
+# tests/lib.sh points the shared browser-state root at a path that cannot exist
+# for the whole suite, so this case supplies its own fixture state root and its
+# own live fixture bridge. The bridge itself comes from the shared helper: the
+# sweep refuses to report a pid whose command line it cannot identify, and that
+# marker is the same one tests/fm-browser-sweep.test.sh depends on.
+cleanup_all() {
+  fm_kill_pids
+  fm_test_cleanup
+}
+trap cleanup_all EXIT
+
+start_fixture_bridge() {  # <dir> -> pid
+  fm_start_marked_process "$1" chrome-devtools-axi-bridge.js
+}
+
+test_browser_sweep_is_reported_and_scoped_to_this_home() {
+  local case_dir fakebin fake_root state_root session_dir session pid out lib
+  command -v jq >/dev/null 2>&1 || {
+    pass "bootstrap browser sweep wiring: skipped, jq not found"
+    return 0
+  }
+  case_dir="$TMP_ROOT/browser-sweep"
+  mkdir -p "$case_dir/home/config" "$case_dir/home/state" "$case_dir/home/data"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  cat > "$case_dir/home/data/backlog.md" <<'EOF'
+# Backlog
+
+## In flight
+## Queued
+## Done
+EOF
+  fakebin=$(make_fake_toolchain "$case_dir")
+  fake_root="$case_dir/fake-root"
+  fm_copy_core_libs "$fake_root/bin"
+  for lib in fm-browser-sweep.sh fm-browser-session-lib.sh fm-supervision-lib.sh \
+    fm-backend-hometag-lib.sh fm-fleet-work-index.sh fm-backlog-parse-lib.sh fm-ff-lib.sh; do
+    cp "$ROOT/bin/$lib" "$fake_root/bin/$lib"
+  done
+
+  state_root="$case_dir/chrome-devtools-axi"
+  mkdir -p "$state_root/sessions"
+  pid=$(start_fixture_bridge "$case_dir/proc")
+  # shellcheck source=bin/fm-browser-session-lib.sh disable=SC1091
+  . "$ROOT/bin/fm-browser-session-lib.sh"
+  # The name carries the owning home, so the fixture has to be the name this
+  # home would really have pinned for the task the protect-home layer records.
+  session=$(fm_browser_session_name orphan-task "$case_dir/home")
+  session_dir="$state_root/sessions/$session"
+  mkdir -p "$session_dir"
+  printf '{"pid":%s,"port":9224}\n' "$pid" > "$session_dir/bridge.pid"
+  printf '1\n' > "$session_dir/snapshot-generation"
+  touch -t 202601010000 "$session_dir/bridge.pid" "$session_dir/snapshot-generation"
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$fake_root" \
+    FM_BROWSER_SWEEP_ROOT="$state_root" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" "BROWSER_SWEEP: $session: idle:" \
+    "an orphaned browser bridge is not reaching the session-start digest"
+  assert_contains "$out" "CHROME_DEVTOOLS_AXI_SESSION=$session chrome-devtools-axi stop" \
+    "the digest line dropped the session-scoped stop command the operator runs"
+
+  # Redirecting only the library's own root variable has to move the sweep too.
+  # bin/fm-browser-session-lib.sh owns where chrome-devtools-axi state lives and
+  # bin/fm-teardown.sh already reads it from there; a sweep with an independent
+  # default is how a caller redirects one reader and leaves the other pointed at
+  # the real ~/.chrome-devtools-axi.
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$fake_root" \
+    FM_BROWSER_SESSION_ROOT="$state_root" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" "BROWSER_SWEEP: $session: idle:" \
+    "the sweep ignored the browser-state root its own shared library resolves"
+
+  # The same fixture, now recorded as this home's live task. Only --protect-home
+  # can silence it: the task holds no backlog row, so the fleet work index has
+  # nothing to say about it.
+  fm_write_meta "$case_dir/home/state/orphan-task.meta" \
+    "window=firstmate:fm-orphan-task" "worktree=$case_dir/wt" "project=$case_dir/proj"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$fake_root" \
+    FM_BROWSER_SWEEP_ROOT="$state_root" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_not_contains "$out" "BROWSER_SWEEP:" \
+    "this home was not passed to the sweep as a protected home, so its own live task was reported"
+  pass "bootstrap prefixes browser-sweep lines with BROWSER_SWEEP and hands the sweep this home to protect"
+}
+
+# The sweep's cross-home work index walks strictly downward from the home it
+# runs in, so a secondmate gets a confident answer covering only its own subtree
+# while reading the same host-global bridge state. Left running there it would
+# report the primary's live workers as orphans, with nothing in the output able
+# to mark the gap. Browser state is host-global, so the main home's sweep
+# already covers this home's bridges and the secondmate simply stays quiet.
+test_browser_sweep_does_not_run_in_a_secondmate_home() {
+  local case_dir fakebin fake_root state_root session_dir pid out lib
+  command -v jq >/dev/null 2>&1 || {
+    pass "bootstrap secondmate browser sweep: skipped, jq not found"
+    return 0
+  }
+  case_dir="$TMP_ROOT/browser-sweep-secondmate"
+  mkdir -p "$case_dir/home/config" "$case_dir/home/state" "$case_dir/home/data"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  cat > "$case_dir/home/data/backlog.md" <<'EOF'
+# Backlog
+
+## In flight
+## Queued
+## Done
+EOF
+  fakebin=$(make_fake_toolchain "$case_dir")
+  fake_root="$case_dir/fake-root"
+  fm_copy_core_libs "$fake_root/bin"
+  for lib in fm-browser-sweep.sh fm-browser-session-lib.sh fm-supervision-lib.sh \
+    fm-backend-hometag-lib.sh fm-fleet-work-index.sh fm-backlog-parse-lib.sh fm-ff-lib.sh; do
+    cp "$ROOT/bin/$lib" "$fake_root/bin/$lib"
+  done
+
+  # An unmistakably reportable bridge: a live process the sweep identifies, and
+  # a session nothing in this home's backlog or state records.
+  state_root="$case_dir/chrome-devtools-axi"
+  mkdir -p "$state_root/sessions"
+  pid=$(start_fixture_bridge "$case_dir/proc")
+  session_dir="$state_root/sessions/fm-elsewhere-task"
+  mkdir -p "$session_dir"
+  printf '{"pid":%s,"port":9224}\n' "$pid" > "$session_dir/bridge.pid"
+  printf '1\n' > "$session_dir/snapshot-generation"
+  touch -t 202601010000 "$session_dir/bridge.pid" "$session_dir/snapshot-generation"
+
+  # Same fixture, same home, no marker: the line is there to be suppressed.
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$fake_root" \
+    FM_BROWSER_SWEEP_ROOT="$state_root" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" "BROWSER_SWEEP: fm-elsewhere-task: idle:" \
+    "the fixture bridge is not reported even in a main home, so this case proves nothing"
+
+  printf '%s\n' mate-x > "$case_dir/home/.fm-secondmate-home"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$fake_root" \
+    FM_BROWSER_SWEEP_ROOT="$state_root" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_not_contains "$out" "BROWSER_SWEEP:" \
+    "a secondmate home reported on host-global browser state it cannot see the fleet's ownership of"
+  pass "bootstrap runs the browser sweep in the main home only, staying silent in a secondmate home that cannot see the whole fleet"
+}
+
 test_orca_backend_gates_orca_tool_only_when_selected() {
   local case_dir fakebin out missing_orca
   missing_orca="MISSING: orca (install: brew install orca  # or the platform's package manager)"
@@ -954,6 +1104,8 @@ ROWS
 test_bootstrap_reporting
 test_scratch_sweep_is_a_locked_mutating_sweep
 test_tmp_usage_is_reported_after_reclamation
+test_browser_sweep_is_reported_and_scoped_to_this_home
+test_browser_sweep_does_not_run_in_a_secondmate_home
 test_no_mistakes_min_version
 test_no_mistakes_staleness_is_reported_beyond_the_floor
 test_git_is_required_with_supported_install_instruction

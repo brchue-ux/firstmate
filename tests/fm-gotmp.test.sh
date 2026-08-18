@@ -67,6 +67,11 @@ make_fake_root() {
   ln -s "$ROOT/bin/fm-gate-refuse-lib.sh" "$fake/bin/fm-gate-refuse-lib.sh"
   # fm-pr-lib.sh: teardown uses its canonical task-ID validator for poll cleanup.
   ln -s "$ROOT/bin/fm-pr-lib.sh" "$fake/bin/fm-pr-lib.sh"
+  # fm-browser-session-lib.sh, plus the home tag it sources: teardown sources it
+  # unconditionally to derive the browser session it stops, so without it
+  # teardown aborts on that source line before reaching anything asserted here.
+  ln -s "$ROOT/bin/fm-browser-session-lib.sh" "$fake/bin/fm-browser-session-lib.sh"
+  ln -s "$ROOT/bin/fm-backend-hometag-lib.sh" "$fake/bin/fm-backend-hometag-lib.sh"
   # fm-guard.sh: stub (teardown calls it with `|| true`).
   cat > "$fake/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash
@@ -136,6 +141,11 @@ test_teardown_skips_gracefully_without_tasktmp() {
   ln -s "$ROOT/bin/fm-gate-refuse-lib.sh" "$fake/bin/fm-gate-refuse-lib.sh"
   # fm-pr-lib.sh: teardown uses its canonical task-ID validator for poll cleanup.
   ln -s "$ROOT/bin/fm-pr-lib.sh" "$fake/bin/fm-pr-lib.sh"
+  # fm-browser-session-lib.sh, plus the home tag it sources: teardown sources it
+  # unconditionally to derive the browser session it stops, so without it
+  # teardown aborts on that source line before reaching anything asserted here.
+  ln -s "$ROOT/bin/fm-browser-session-lib.sh" "$fake/bin/fm-browser-session-lib.sh"
+  ln -s "$ROOT/bin/fm-backend-hometag-lib.sh" "$fake/bin/fm-backend-hometag-lib.sh"
   cat > "$fake/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash
 exit 0

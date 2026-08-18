@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Tear down a finished task: return the treehouse worktree, release the Orca
 # worktree, or retire a secondmate home; kill the recorded runtime endpoint,
+# stop the task's own pinned browser session (see stop_task_browser_session -
+# scoped to the task's own derived session name, never a blanket stop),
 # clear volatile state, refresh/prune the project's clone for PR-based ship
 # tasks, then print a backlog-refresh reminder for ship and scout teardowns
 # (a secondmate teardown prints none, since secondmates are not backlog items).
@@ -109,6 +111,11 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# The pinned browser session name has one owner, shared with bin/fm-brief.sh
+# (which briefs it) and bin/fm-browser-sweep.sh (which decides who still owns
+# one). Deriving it a second time here is how a stop stops nothing.
+# shellcheck source=bin/fm-browser-session-lib.sh
+. "$SCRIPT_DIR/fm-browser-session-lib.sh"
 if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
   echo "error: invalid teardown request" >&2
   exit 2
@@ -885,6 +892,53 @@ safe_rm_rf() {
   rm -rf -- "$target"
 }
 
+# Best-effort stop of the browser session bin/fm-brief.sh pins to a task.
+# chrome-devtools-axi's bridge calls setsid() at startup, so it sits in neither
+# the endpoint's process group nor its session: closing the pane, returning the
+# worktree, and removing the worktree's files all miss it, and it keeps a
+# headless Chrome tree resident afterwards. Its own `stop` is the only thing
+# that ends it.
+#
+# SCOPED BY SESSION NAME ONLY. A bare `chrome-devtools-axi stop` would stop the
+# default session, which is a sibling home's live browser - the same class of
+# mistake AGENTS.md section 8 forbids for `pkill -f bin/fm-watch.sh`. The name
+# is derived from the task id AND its owning home through the same owner
+# bin/fm-brief.sh briefed it with, so this can only ever reach the session this
+# task's own brief told it to use, and can never miss it because the two
+# spellings drifted. The home is part of it because task ids are unique only
+# within a home while the browser session namespace is host-global: two homes
+# filing the same id would otherwise share one bridge, and this stop would kill
+# the other home's live worker.
+#
+# Failure is never fatal: the tool may not be installed, the task may never have
+# opened a browser, and a bridge that is already gone is the outcome we wanted.
+# It is time-bounded because a wedged bridge must not wedge cleanup.
+#
+# It is also gated on the session's record still naming a LIVE BRIDGE, because
+# the tool's own stop is not identity-guarded: it reads the recorded pid, checks
+# only that it is alive, and SIGTERMs then SIGKILLs it, with the bridge test
+# gating nothing but whether the process group goes too. A bridge that crashed
+# or was killed rather than stopped leaves its bridge.pid behind, so a stale
+# record is the ordinary case, and once that pid is reused this would kill an
+# unrelated process with no operator in the loop. That is the same invariant
+# bin/fm-browser-sweep.sh holds before it so much as REPORTS a session, and it
+# has one owner in bin/fm-browser-session-lib.sh rather than a second spelling
+# here. Nothing is given up by asking: with no record or a dead pid, the tool's
+# own stop does nothing anyway.
+stop_task_browser_session() {
+  local task_id=$1 home=${2:-$FM_HOME} session
+  [ -n "$task_id" ] || return 0
+  command -v chrome-devtools-axi >/dev/null 2>&1 || return 0
+  session=$(fm_browser_session_name "$task_id" "$home") || return 0
+  fm_browser_session_has_live_bridge "$session" || return 0
+  if command -v timeout >/dev/null 2>&1; then
+    CHROME_DEVTOOLS_AXI_SESSION="$session" timeout 20 chrome-devtools-axi stop >/dev/null 2>&1 || true
+  else
+    CHROME_DEVTOOLS_AXI_SESSION="$session" chrome-devtools-axi stop >/dev/null 2>&1 || true
+  fi
+  return 0
+}
+
 safe_rm_rf_child_worktree() {
   local target=$1 project=$2
   validate_child_worktree_for_removal "$target" "$project" >/dev/null || return 1
@@ -1006,6 +1060,10 @@ cleanup_firstmate_home_children() {
         fm_backend_kill "$child_backend" "$child_t" "$(meta_value "$child_meta" zellij_tab_id)" "fm-$child_id" 2>/dev/null || true
       fi
     fi
+    # As with the zellij tab titles above, the session name is scoped by the
+    # owning home, so a child's browser must be derived as that child home and
+    # never as the parent doing the retiring.
+    stop_task_browser_session "$child_id" "$home"
     if [ "$child_kind" = secondmate ]; then
       child_home=$(meta_value "$child_meta" home)
       [ -n "$child_home" ] || child_home=$child_wt
@@ -1213,6 +1271,10 @@ if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
 elif [ "$BACKEND" != orca ]; then
   fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
 fi
+# Alongside the endpoint kill above, and unconditional because the Orca branch
+# closes its terminal earlier: a detached browser bridge outlives every one of
+# those paths.
+stop_task_browser_session "$ID"
 if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
   if [ "$(fm_backend_herdr_pane_agent_state "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_PANE")" = dead ]; then
     rm -f "$HERDR_PRESENTATION_JOURNAL"
