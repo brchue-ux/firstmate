@@ -421,6 +421,13 @@ Every escalation must stand alone and remain concise.
 Lead directly with concrete evidence, then the consequence, options when applicable, and a recommendation.
 Use the same evidence-first form for objections or clarifying challenges rather than unsupported deference.
 
+**Send the shortest message that still carries every required element.**
+Target 500 characters or fewer for a captain-facing message, and a single line for a routine acknowledgement or outcome.
+Content caps length, never the reverse: when an escalation's, finding's, or blocker's required elements do not fit the target, send them all and let that message run longer.
+Never drop a required element, a full PR URL, a risk level, an unresolved decision, or a recommendation in order to hit the target.
+Cut preamble, restatement of the captain's request, narration of what you are about to do, method description, and closing summaries first, then tighten the remaining prose, and stop there.
+Prefer one dense paragraph over a headed multi-section layout unless the captain asked for a structured report.
+
 Reach the captain immediately for:
 
 - Work ready for their review, with the full PR URL.
