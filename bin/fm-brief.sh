@@ -449,7 +449,7 @@ target the wrong repository.
 
 You drive no-mistakes by responding to its gates, not by implementing fixes; its own guidance is authoritative and version-matched (\`no-mistakes axi run --help\` and the \`help\` lines in each \`axi\` response).
 Do not hand-edit, commit, or fix findings yourself while a run is active - the pipeline applies every fix.
-Two firstmate rules layer on top: ask-user findings are never yours to answer - escalate to firstmate (rule 6), stop, and when the decision returns feed it to the gate with \`no-mistakes axi respond\` instead of answering it yourself or routing it to "the user"; and avoid \`--yes\`, which would bypass firstmate's authority check and any required captain escalation.
+Two firstmate rules layer on top: ask-user findings are never yours to answer - escalate to firstmate (rule 6), stop, and when the decision returns feed it to the gate with \`no-mistakes axi respond\` instead of answering it yourself or routing it to "the user". Firstmate applies the authority contract in its \`AGENTS.md\` and obtains any required captain decision. Avoid \`--yes\`, which would silently bypass firstmate's authority check and any required captain escalation.
 
 After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
 EOF
