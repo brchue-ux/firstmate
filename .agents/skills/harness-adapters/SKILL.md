@@ -107,7 +107,7 @@ Effort precedence is an explicit per-task captain instruction first, then any ap
 Never replace an effort value supplied by either higher-precedence source; use the fallback only when neither specifies effort.
 Use `low` for well-understood work with an explicit bounded path.
 Choose intermediate levels proportionally as complexity, uncertainty, blast radius, or open-ended reasoning increases.
-Ambiguity alone never justifies `xhigh` or `max`: select either only when you can name both why the task is genuinely ambiguous or open-ended and why its affected surface is large enough or its failure consequences severe enough to warrant that tier.
+Ambiguity alone never justifies `xhigh`: select it only when you can name both why the task is genuinely ambiguous or open-ended and why its affected surface is large enough or its failure consequences severe enough to warrant that tier.
 A genuinely unknown task that touches a narrow surface and is cheap to get wrong takes a lower tier, noting that further investigation may be needed, rather than an automatic jump.
 Scale effort with how much precision or nuance the specific instance actually demands, not with the generic task category or the mere fact that the answer is unknown at intake: the same nominal task can be settled at a glance in one instance and require discriminating among close alternatives in another, and the harder instance earns proportionally more reasoning without automatically reaching the top tier.
 When a verified adapter lacks `xhigh`, cap the choice at its highest supported non-`max` level rather than omitting the intended effort silently.
