@@ -53,6 +53,39 @@ Existing task operations use recorded endpoint ids and do not move a live task w
 The per-home workspace is reused while it has task tabs.
 Closing its last tab can remove the workspace, and the next spawn recreates it.
 
+## Home workspace grouping
+
+A home's workspace is anchored at the home directory itself, not at whichever project its first task happened to use.
+Firstmate opens it through Herdr's worktree path so the workspace carries worktree membership, which is the only thing Herdr's sidebar grouping reads.
+A workspace created by a plain `workspace create` carries none regardless of its path and can never group.
+
+A home that is a repository's main checkout is opened as its own repo parent and renders un-indented.
+A home that is a linked worktree of that repository is opened against the already-resolved parent workspace and renders indented beneath it.
+Every secondmate home is a linked worktree of the Firstmate repository, so registered secondmates group under the primary home.
+
+Membership is stamped when the workspace is created, because a workspace's git identity is otherwise derived from its live panes and the seeded default tab is pruned once the first task tab exists.
+
+A home that is itself a main checkout is its own parent and needs nothing pre-existing.
+A linked-worktree home instead requires a workspace already open on the repository's main checkout.
+Without one, the spawn falls back to an ungrouped workspace rather than letting Herdr invent a parent, whose basename-derived label would collide with the primary home's own label and break workspace lookup.
+An existing ungrouped home workspace is not migrated; it keeps its flat shape until it is recreated.
+When a home workspace is created, Herdr reuses ANY workspace already open on that exact checkout instead of adding a second one, including one Firstmate never created and one the captain opened by hand.
+Firstmate never renames a workspace it did not create, so the open call carries no label at all and the home label is applied afterwards, only to a workspace that call itself created.
+A reused workspace therefore keeps its own name and acts only as the grouping parent; this home's own Space is then created by the ordinary label-first path and stays ungrouped.
+Every way the worktree-backed path can fail degrades to an existing or ungrouped home workspace, never to a failed spawn.
+That fallback is unconditional and is never gated on a protocol or version number: grouping is decided by what the client actually returns at runtime, and losing it never fails a spawn.
+An unreadable response falls back, and a missing `already_open` flag is read as if the workspace was reused, so Firstmate renames only what it is certain it just created.
+
+The open call carrying no label is not by itself enough to keep the fallback from duplicating a home label.
+Herdr names a workspace it creates from the checkout directory's basename, and the primary home's basename is literally `firstmate`, which is exactly the label the primary home's Space uses.
+A secondmate home cannot collide that way, because its directory basename is unrelated to its `2ndmate-<id>` label.
+So after any failed attempt the label lookup is re-run and a match is adopted before anything is created, which is what keeps a stranded workspace from being joined by a second one under the same label.
+An adopted match follows the usual adoption discipline: no seeded tab id is recorded and none of its tabs can ever be pruned.
+A failed attempt is reported only after that re-find resolves, because the same failure means different things depending on it.
+If the home label could not be applied to a workspace Herdr just created and the re-find then adopts that very workspace, the warning says so: it is this home's Space, worktree-backed and in use under Herdr's own name, and needs no operator action.
+Only when nothing was adopted does the warning describe a stranded workspace and suggest renaming or deleting it.
+No diagnostic ever suggests renaming or deleting a workspace Firstmate has adopted as this home's Space.
+
 ## Standalone-clone secondmate ownership
 
 Herdr groups workspaces by the repository their checkout belongs to, so a secondmate home that is a linked worktree of the primary's repo is already shown under the primary with no help from Firstmate.
@@ -60,6 +93,13 @@ A secondmate home created as its own standalone clone shares no repository with 
 Every `--secondmate` spawn on this backend therefore publishes the durable workspace token `owner=<the spawning home's own workspace label>` for a standalone-clone home only, so the placement converges on every launch and respawn rather than needing a one-time manual fix.
 A linked-worktree home receives no publish of any kind.
 `bin/fm-herdr-owner-publish.sh` owns that test, the token, and why it deliberately carries no expiry.
+
+## Worker owner token
+
+Every crewmate and scout pane is stamped with an `owner` metadata token naming the mate that launched it, under Firstmate's own metadata source and with no expiry.
+Firstmate publishes it at spawn because a worker's environment carries no home identity to derive it from.
+A mate's own pane is never stamped, so the token's presence distinguishes workers from mates for an agents-panel filter.
+The token is display-only and never authoritative; a failure to publish it does not fail a spawn.
 
 ## Optional presentation spaces
 
@@ -136,8 +176,8 @@ Operational compromises:
 
 ## Default-tab prune safety
 
-`herdr workspace create` seeds one default tab.
-Firstmate prunes it only after a real task tab exists and only when the same create response supplied the seeded tab id.
+Both `herdr workspace create` and the worktree-backed `herdr worktree open` seed one default tab.
+Firstmate prunes it only after a real task tab exists and only when the same creating response supplied the seeded tab id.
 An adopted workspace never supplies that id and can never enter the prune path, regardless of labels or tab count.
 Immediately before close, Firstmate rechecks the exact tab, expected seed label, and native agent state.
 A working seed pane is never closed.
@@ -282,6 +322,7 @@ tests/fm-backend-herdr-smoke.test.sh
 tests/fm-backend-herdr-prune-safety-e2e.test.sh
 tests/fm-backend-herdr-respawn-idem-e2e.test.sh
 tests/fm-backend-herdr-workspace-per-home-e2e.test.sh
+tests/fm-backend-herdr-space-grouping-e2e.test.sh
 tests/fm-backend-herdr-presentation-e2e.test.sh
 tests/fm-backend-herdr-eventwait-smoke.test.sh
 tests/fm-herdr-session-cleanup.test.sh
