@@ -1544,6 +1544,78 @@ test_herdr_projection_teardown_retains_journal_when_close_unconfirmed() {
   pass "herdr projection teardown retains the stale journal and attempts no workspace cleanup when exact-pane close is unconfirmed"
 }
 
+# Symlinked-treehouse-root regression (fm/thpath): bin/fm-spawn.sh records
+# worktree= in resolved-real form via `pwd -P`, but `treehouse` itself matches
+# its pool registry on the literal path reached through $HOME/.treehouse,
+# without resolving symlinks. When $HOME/.treehouse is itself a symlink, a
+# literal `treehouse return --force <resolved-real-path>` refuses with "not
+# managed by treehouse" even though the lease is live and correctly tracked -
+# diagnosed end-to-end against a real symlinked $HOME/.treehouse (see the PR
+# description). This drives the real bin/fm-teardown.sh entrypoint - not the
+# helper directly (tests/fm-treehouse-spelling-lib.test.sh covers that) - with
+# a mock `treehouse` that only accepts the $HOME/.treehouse-spelled form,
+# proving teardown_treehouse_return actually translates before calling out.
+test_teardown_translates_symlinked_treehouse_root_spelling() {
+  local case_dir fixture_home real_root physical_wt expected_spelling rc received
+  case_dir=$(make_case symlinked-treehouse-root)
+  fixture_home="$case_dir/fixture-home"
+  mkdir -p "$fixture_home"
+  # The only symlink in play is this one hop, standing in for a real machine's
+  # $HOME/.treehouse -> /mnt/data/treehouse. real_root stands in for the pool's
+  # physical backing store; case_dir/wt (already built by make_case) is the
+  # worktree meta must record in resolved-real form, exactly as fm-spawn.sh does.
+  real_root=$(cd "$case_dir" && pwd -P)
+  ln -s "$real_root" "$fixture_home/.treehouse"
+  physical_wt=$(cd "$case_dir/wt" && pwd -P)
+  expected_spelling="$fixture_home/.treehouse/wt"
+  [ "$physical_wt" != "$expected_spelling" ] \
+    || fail "symlinked-treehouse-root: fixture built no divergence between the two spellings, so this would not exercise the bug"
+
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=firstmate:fm-task-x1" \
+    "endpoint_task_id=task-x1" \
+    "worktree=$physical_wt" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=local-only"
+  wt_commit "$case_dir" "fix the thing"
+  add_fork_with_pushed_branch "$case_dir"
+
+  # Refuse the resolved-real spelling exactly the way a live treehouse pool
+  # would once $HOME/.treehouse is a symlink; only the $HOME/.treehouse-spelled
+  # form is accepted. Records what it received either way.
+  cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$3" > "$case_dir/treehouse-received-arg"
+if [ "\${1:-}" = return ] && [ "\${2:-}" = --force ] && [ "\${3:-}" = "$expected_spelling" ]; then
+  exit 0
+fi
+echo "worktree \${3:-} is not managed by treehouse" >&2
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  set +e
+  HOME="$fixture_home" \
+  FM_ROOT_OVERRIDE="$ROOT" \
+  FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_CONFIG_OVERRIDE="$case_dir/config" \
+  PATH="$case_dir/fakebin:$PATH" \
+    "$TEARDOWN" task-x1 > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "symlinked-treehouse-root: teardown should succeed once the spelling is translated"
+  ! grep -q "not managed by treehouse" "$case_dir/stderr" \
+    || fail "symlinked-treehouse-root: teardown still hit the not-managed-by-treehouse refusal"
+  ! grep -q REFUSED "$case_dir/stderr" \
+    || fail "symlinked-treehouse-root: teardown printed a REFUSED line"
+  received=$(cat "$case_dir/treehouse-received-arg" 2>/dev/null || echo "")
+  [ "$received" = "$expected_spelling" ] \
+    || fail "symlinked-treehouse-root: treehouse received '$received', expected the \$HOME/.treehouse-spelled '$expected_spelling'"
+  pass "teardown translates a resolved-real worktree path to the \$HOME/.treehouse spelling before calling treehouse, when \$HOME/.treehouse is a symlink"
+}
+
 test_local_only_fork_remote_allows
 test_landed_teardown_publishes_herdr_outcome
 test_forced_teardown_publishes_no_herdr_outcome
@@ -1581,3 +1653,4 @@ test_transient_index_lock_clears_after_first_attempt_and_retry_succeeds
 test_persistent_index_lock_exhausts_retries_and_refuses_loudly
 test_empty_retry_wait_uses_default_without_aborting
 test_fractional_legacy_retry_wait_refuses_without_arithmetic_error
+test_teardown_translates_symlinked_treehouse_root_spelling

@@ -37,6 +37,11 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 # shellcheck source=bin/fm-home-anchor-lib.sh
 . "$SCRIPT_DIR/fm-home-anchor-lib.sh"
 fm_home_anchor_resolve "$FM_ROOT" || exit 1
+# Translates a resolved real home path to the spelling `treehouse`'s own pool
+# registry recognizes, at the boundary where seed_return_treehouse_home
+# invokes the `treehouse` CLI. See that file's header for why this exists.
+# shellcheck source=bin/fm-treehouse-spelling-lib.sh
+. "$SCRIPT_DIR/fm-treehouse-spelling-lib.sh"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 REG="$DATA/secondmates.md"
@@ -683,14 +688,24 @@ seed_rollback_target() {
   printf '%s\n' "$abs_target"
 }
 
+# Best-effort rollback of a treehouse-acquired home; warns rather than aborts on
+# failure, since this only runs when seeding itself already failed. abs_home is
+# the resolved real path; it is translated to the spelling treehouse's own pool
+# registry recognizes (bin/fm-treehouse-spelling-lib.sh) before the return
+# call, so a $HOME/.treehouse reached through a symlink does not false-warn
+# about a lease that is actually returnable.
 seed_return_treehouse_home() {
-  local home=$1 abs_home
+  local home=$1 abs_home treehouse_home
   abs_home=$(seed_rollback_target "$home" "treehouse-acquired home") || return 0
   if ! command -v treehouse >/dev/null 2>&1; then
     echo "warning: failed to return treehouse-acquired home $abs_home during seed rollback; treehouse command not found" >&2
     return 0
   fi
-  ( cd "$FM_ROOT" && treehouse return --force "$abs_home" >/dev/null ) || {
+  treehouse_home=$(fm_treehouse_recognized_path "$abs_home") || {
+    echo "warning: cannot establish a treehouse-recognized spelling for $abs_home during seed rollback; lease may still be held" >&2
+    return 0
+  }
+  ( cd "$FM_ROOT" && treehouse return --force "$treehouse_home" >/dev/null ) || {
     echo "warning: failed to return treehouse-acquired home $abs_home during seed rollback; lease may still be held" >&2
     return 0
   }
