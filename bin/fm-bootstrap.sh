@@ -323,14 +323,14 @@ fleet_sync() {
   rm -f "$tmp"
 }
 
-# Whether secondmate_liveness_sweep deliberately left this secondmate down for
-# having no pending work. A kind=secondmate meta normally IS the liveness
+# Whether secondmate_liveness_sweep found this secondmate dead or missing and
+# left it down, per the never-relaunch-at-session-start policy (captain
+# decision 2026-08-22). A kind=secondmate meta normally IS the liveness
 # signal (bin/fm-ff-lib.sh's live_secondmate_meta_records), but a left-down mate
 # keeps its meta while its recorded endpoint is dead BY DESIGN, so the sweeps
 # that run after the liveness sweep must still converge its home and never send
 # into it: every such send fails and leaves retry state for a correct outcome
-# nobody can fix. SECONDMATE_LEFT_DOWN_IDS is the in-process hand-off, mirroring
-# SECONDMATE_RESPAWNED_IDS.
+# nobody can fix. SECONDMATE_LEFT_DOWN_IDS is the in-process hand-off.
 SECONDMATE_LEFT_DOWN_IDS=""
 secondmate_left_down() {
   case " ${SECONDMATE_LEFT_DOWN_IDS:-} " in
@@ -515,7 +515,6 @@ secondmate_sync() {
   local id home home_real home_lock propagated_homes report reread_out reread_skip_pending
   local reread_skip_send
   propagated_homes=""
-  SECONDMATE_RESPAWNED_IDS=${SECONDMATE_RESPAWNED_IDS:-}
   while IFS='|' read -r id home _window _meta; do
     validate_secondmate_home "$id" "$home" || continue
     home_real="$VALIDATED_HOME"
@@ -541,9 +540,6 @@ secondmate_sync() {
     }
     reread_skip_pending=0
     reread_skip_send=0
-    case " $SECONDMATE_RESPAWNED_IDS " in
-      *" $id "*) reread_skip_pending=1 ;;
-    esac
     # A left-down mate still receives the propagated files below, but nothing is
     # sent into its dead endpoint and no reread generation is queued against it:
     # the launch the captain eventually makes re-reads at startup anyway.
@@ -645,7 +641,6 @@ secondmate_liveness_sweep() {
   # scope and requires a separate periodic signal.
   [ -d "$STATE" ] || return 0
   local meta id window harness backend target agent_state cause home pending
-  SECONDMATE_RESPAWNED_IDS=""
   SECONDMATE_LEFT_DOWN_IDS=""
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
