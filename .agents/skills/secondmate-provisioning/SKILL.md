@@ -144,17 +144,19 @@ Do not hand off `local-only` items.
 
 For `kind=secondmate` meta with no window, treat the secondmate as a dead persistent direct report.
 Reconciling its durable records - confirming its home, backlog, and any in-flight child task metadata - is always correct and never optional.
-Actually respawning it is conditional: **fleet startup launches the first mate and nothing else** (captain decision 2026-08-03).
-The bar is "would this mate actually do something this session", not "was it open or registered before".
+Actually respawning it is conditional, and the condition differs by trigger.
+Session start never respawns a secondmate, regardless of pending work of its own: **fleet startup launches the first mate and nothing else**, full stop (captain decision 2026-08-22, superseding the 2026-08-03 pending-work relaunch rule); the captain reopens it manually.
+An ad hoc mid-session recovery remains a firstmate judgment call, for which pending work stays one useful signal.
 
-**Pending work is the test.**
-Relaunch a dead or missing secondmate only when its own durable records show pending work: a non-empty `## Queued` or `## In flight` section in that home's `data/backlog.md`, or any `*.meta` file left under that home's `state/` by a task it dispatched and never tore down (work paused mid-flight by a crash, quota limit, or killed session).
-A secondmate with neither is left down even though it is registered, or was open when the fleet last stopped; the captain reopens an idle secondmate manually.
+**Pending work is one signal for an ad hoc mid-session respawn decision.**
+A non-empty `## Queued` or `## In flight` section in the home's `data/backlog.md`, or any `*.meta` file left under that home's `state/` by a task it dispatched and never tore down (work paused mid-flight by a crash, quota limit, or killed session), counts as pending work.
+A registered secondmate is left down at session start whether or not it has pending work.
 Judge pending work only from a home you have validated the same way every other consumer of `home=` does - it must be a seeded secondmate home carrying the `.fm-secondmate-home` marker for that id, and never the primary checkout, whose own `state/` metadata would otherwise read as the secondmate's in-flight work.
-When the records cannot be read at all - no recorded home, a home that is missing or does not validate, or a `data/backlog.md` that exists but cannot be read or parsed - do not guess in either direction: repair the record first, because launching an idle secondmate and stranding a busy one are both wrong.
-`bin/fm-bootstrap.sh`'s `secondmate_home_has_pending_work` and `secondmate_liveness_sweep` are the exact-mechanics owner of this test for the session-start liveness sweep; apply the identical test by hand for an ad hoc mid-session recovery.
+When the records cannot be read at all - no recorded home, a home that is missing or does not validate, or a `data/backlog.md` that exists but cannot be read or parsed - do not guess in either direction.
+`bin/fm-bootstrap.sh`'s `secondmate_home_has_pending_work` is the exact-mechanics owner of this pending-work check.
+`secondmate_liveness_sweep` calls it only to surface an FYI fact at session start, never to decide whether to relaunch, which it never does; apply the identical test by hand as one input to an ad hoc mid-session respawn judgment.
 
-A secondmate left down by this test is fully handled: its home is still fast-forwarded and still receives propagated config, but nothing is sent into its endpoint, so it produces no `SECONDMATE_LIVENESS:`, `NUDGE_SECONDMATES:`, or `CONFIG_REREAD:` diagnostic; the launch that eventually reopens it re-reads its instructions and config at startup anyway.
+A secondmate left down at session start is fully handled: its home is still fast-forwarded and still receives propagated config, but nothing is sent into its endpoint, so it produces no `SECONDMATE_LIVENESS:`, `NUDGE_SECONDMATES:`, or `CONFIG_REREAD:` diagnostic; the launch that eventually reopens it re-reads its instructions and config at startup anyway.
 
 When the test passes, respawn with:
 

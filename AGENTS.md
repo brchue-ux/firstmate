@@ -88,7 +88,7 @@ A lock-refused session must not spawn, steer, merge, drain the wake queue, repai
 
 The digest runs in this order: session lock, bootstrap checks, wake-queue drain, context digest, fleet-state digest, then the supervision block for this harness.
 Every mutating part - the bootstrap sweeps and the wake drain - runs only when this session holds the lock; a lock-refused digest prints read-only advisory wording and drains nothing.
-Fleet startup launches the first mate and nothing else, and relaunches a down secondmate only when that mate's own durable records show pending work; the captain reopens an idle secondmate manually.
+Fleet startup launches the first mate and nothing else and never relaunches a down secondmate, whether or not that mate's own durable records show pending work; the captain reopens an idle secondmate manually.
 The digest's endpoint liveness line is a presence check, not a state read; section 8 owns when to reconcile actual current state.
 
 Bootstrap detects first, asks for consent, and installs only after the captain approves in the current session.
