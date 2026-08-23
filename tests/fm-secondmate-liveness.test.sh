@@ -19,12 +19,15 @@
 #   - The Herdr classifier preserves the proven husk mapping while separating a
 #     missing pane from an existing agent-less pane.
 #   - fm_backend_agent_alive preserves the older three-state compatibility view.
-#   - bin/fm-bootstrap.sh's secondmate_liveness_sweep recovers only dead or
-#     missing endpoints, keeps successful recovery and already-live results
-#     silent by default, and reports ambiguous and unreadable targets distinctly.
-#   - The sweep converges: once a secondmate reads alive, a later run never
-#     re-touches it (idempotent by construction, not by remembering what it
-#     already did).
+#   - bin/fm-bootstrap.sh's secondmate_liveness_sweep never relaunches a dead
+#     or missing secondmate at session start (captain decision 2026-08-22),
+#     regardless of whether its own durable records show pending work; it
+#     still cleans up a confirmed-dead endpoint, keeps already-live and
+#     left-down results silent by default, and reports ambiguous and
+#     unreadable targets distinctly.
+#   - The sweep converges: once a secondmate reads alive, or is left down, a
+#     later run never re-touches it (idempotent by construction, not by
+#     remembering what it already did).
 #   - The sweep is skipped entirely under FM_BOOTSTRAP_DETECT_ONLY=1 (the
 #     read-only session path), matching the other mutating sweeps.
 #   - The sweep is naturally scoped to the primary: with no kind=secondmate
@@ -282,7 +285,6 @@ case "${1:-}" in
   new-window|kill-window)
     printf '%s\n' "$*" >> "${FM_TMUX_CALL_LOG:?}"
     [ "${1:-}" = kill-window ] && : > "${FM_TMUX_CALL_LOG}.killed"
-    [ "${FM_TEST_FAIL_NEW_WINDOW:-0}" = 1 ] && [ "${1:-}" = new-window ] && exit 1
     [ "${1:-}" = new-window ] && rm -f "${FM_TMUX_CALL_LOG}.killed"
     exit 0
     ;;
@@ -313,14 +315,15 @@ new_world() {
 }
 
 # add_sm_home <w> <id> <window>: a plain (non-git) secondmate home - the
-# probe/respawn machinery under test never requires the home to be a real
-# worktree; a non-git home just makes the unrelated fast-forward sweep log a
-# harmless "not a git repo" skip.
-# Seeded with a queued backlog item by default, since a registered secondmate
-# with no pending work is deliberately left down under the fleet-startup
-# launch policy (captain decision 2026-08-03) and most of this suite exercises
-# liveness detection and respawn mechanics, not that gate itself; the
-# dedicated pending-work tests below use add_sm_home_idle instead.
+# probe machinery under test never requires the home to be a real worktree; a
+# non-git home just makes the unrelated fast-forward sweep log a harmless "not
+# a git repo" skip.
+# Seeded with a queued backlog item by default, purely to prove the
+# never-relaunch policy (captain decision 2026-08-22) holds even when the
+# secondmate's own records show pending work; most of this suite exercises
+# liveness detection, not the FYI pending-work distinction itself. The
+# dedicated pending-work-vs-idle FYI reporting tests below use
+# add_sm_home_idle instead.
 add_sm_home() {
   local w=$1 id=$2 window=$3 harness=${4:-claude}
   local home="$w/$id"
@@ -339,8 +342,9 @@ add_sm_home() {
 }
 
 # add_sm_home_idle <w> <id> <window>: same as add_sm_home but with no pending
-# work at all - an empty backlog and no child task metadata - the case the
-# fleet-startup launch policy must leave down rather than relaunch.
+# work at all - an empty backlog and no child task metadata - used to
+# distinguish the FYI pending-work-vs-idle wording in verbose diagnostics;
+# both cases are equally left down by the fleet-startup launch policy.
 add_sm_home_idle() {
   local w=$1 id=$2 window=$3 harness=${4:-claude}
   local home="$w/$id"
@@ -364,7 +368,7 @@ run_bootstrap() {  # <fakebin> <home> <pane-cmd> <call-log> [extra env...] -> st
     env "$@" "$ROOT/bin/fm-bootstrap.sh" 2>&1
 }
 
-test_sweep_respawns_confirmed_dead_secondmate() {
+test_sweep_never_respawns_confirmed_dead_secondmate() {
   local w fb tmuxfb log out
   w=$(new_world sweep-dead)
   add_sm_home "$w" sm1 firstmate:fm-sm1
@@ -373,13 +377,13 @@ test_sweep_respawns_confirmed_dead_secondmate() {
 
   out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" zsh "$log")
 
-  assert_not_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1: respawned" \
-    "a successfully respawned secondmate should be handled silently"
+  assert_not_contains "$out" "SECONDMATE_LIVENESS:" \
+    "a confirmed-dead secondmate left down should be handled silently by default"
   assert_contains "$(cat "$log")" "kill-window -t =firstmate:=fm-sm1" \
-    "the stale endpoint must be killed before respawn (tmux refuses a same-named window over a live one)"
-  assert_contains "$(cat "$log")" "new-window" \
-    "a confirmed-dead secondmate should actually be relaunched"
-  pass "sweep: a confirmed-dead secondmate endpoint is killed and respawned"
+    "the stale endpoint should still be cleaned up even though it is left down"
+  assert_not_contains "$(cat "$log")" "new-window" \
+    "session start must never relaunch a confirmed-dead secondmate, even with pending work of its own"
+  pass "sweep: a confirmed-dead secondmate endpoint is cleaned up but never relaunched, even with pending work"
 }
 
 test_sweep_leaves_alive_secondmate_untouched() {
@@ -402,7 +406,7 @@ test_sweep_leaves_alive_secondmate_untouched() {
   pass "sweep: an already-live secondmate is untouched and distinguishable in verbose diagnostics"
 }
 
-test_sweep_respawns_authoritatively_missing_pi_secondmate() {
+test_sweep_never_respawns_authoritatively_missing_pi_secondmate() {
   local w fb tmuxfb log out
   w=$(new_world sweep-missing-pi)
   add_sm_home "$w" sm1 firstmate:fm-sm1 pi
@@ -411,13 +415,14 @@ test_sweep_respawns_authoritatively_missing_pi_secondmate() {
 
   out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" missing "$log")
 
-  assert_not_contains "$out" "SECONDMATE_LIVENESS:" "a successful missing-window recovery should stay silent by default"
-  assert_contains "$(cat "$log")" "new-window" "an authoritatively missing Pi secondmate should be relaunched"
+  assert_not_contains "$out" "SECONDMATE_LIVENESS:" "a missing secondmate left down should stay silent by default"
+  assert_not_contains "$(cat "$log")" "new-window" \
+    "session start must never relaunch an authoritatively missing Pi secondmate, even with pending work of its own"
   assert_not_contains "$(cat "$log")" "kill-window" "an absent window should not need a destructive pre-kill"
-  pass "sweep: an authoritatively missing Pi secondmate window is relaunched"
+  pass "sweep: an authoritatively missing Pi secondmate window is left down, never relaunched"
 }
 
-test_sweep_respawns_authoritatively_missing_pi_signed_secondmate() {
+test_sweep_never_respawns_authoritatively_missing_pi_signed_secondmate() {
   local w fb tmuxfb log out
   w=$(new_world sweep-missing-pi-signed)
   printf '%s\n' pi-signed > "$w/home/config/secondmate-harness"
@@ -428,12 +433,12 @@ test_sweep_respawns_authoritatively_missing_pi_signed_secondmate() {
   out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" missing "$log")
 
   assert_not_contains "$out" "unverified for recovery" \
-    "a recorded pi-signed secondmate should be verified for recovery"
-  assert_contains "$(cat "$log")" "new-window" \
-    "an authoritatively missing pi-signed secondmate should be relaunched"
+    "a recorded pi-signed secondmate should still be verified rather than reported unverified"
+  assert_not_contains "$(cat "$log")" "new-window" \
+    "session start must never relaunch an authoritatively missing pi-signed secondmate, even with pending work of its own"
   assert_not_contains "$(cat "$log")" "kill-window" \
     "an absent pi-signed window should not need a destructive pre-kill"
-  pass "sweep: an authoritatively missing pi-signed secondmate window is relaunched"
+  pass "sweep: an authoritatively missing pi-signed secondmate window is left down, never relaunched"
 }
 
 test_sweep_never_acts_on_ambiguous_existing_process() {
@@ -464,20 +469,6 @@ test_sweep_never_acts_on_transient_unreadability() {
     "a transiently unreadable target should be distinguished from an absent one"
   [ ! -s "$log" ] || fail "an unreadable target must never trigger kill or relaunch: $(cat "$log")"
   pass "sweep: transient target unreadability never licenses recovery"
-}
-
-test_sweep_reports_missing_endpoint_relaunch_failure() {
-  local w fb tmuxfb log out
-  w=$(new_world sweep-missing-failure)
-  add_sm_home "$w" sm1 firstmate:fm-sm1 pi
-  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
-  log="$w/calls.log"; : > "$log"
-
-  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" missing "$log" FM_TEST_FAIL_NEW_WINDOW=1)
-
-  assert_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1: respawn failed after recorded endpoint confidently missing" \
-    "a failed missing-endpoint relaunch should retain its authorizing cause"
-  pass "sweep: failed relaunch diagnostics distinguish a confidently missing endpoint"
 }
 
 test_sweep_leaves_down_idle_dead_secondmate() {
@@ -511,24 +502,45 @@ test_sweep_leaves_down_idle_dead_secondmate() {
   pass "sweep: a dead secondmate with no pending work is left down, never relaunched just because it is registered"
 }
 
-test_sweep_respawns_dead_secondmate_with_in_flight_child_metadata() {
+seed_in_flight_child_meta() {
+  local w=$1
+  # A dispatched-but-not-torn-down child task under the secondmate's own
+  # state/ - the "in-flight task metadata" half of the pending-work FYI test -
+  # is real pending work by that test, yet must still never trigger a
+  # relaunch under the never-relaunch policy.
+  printf 'kind=ship\n' > "$w/sm1/state/child1.meta"
+}
+
+test_sweep_never_respawns_dead_secondmate_with_in_flight_child_metadata() {
   local w fb tmuxfb log out
   w=$(new_world sweep-in-flight-child)
   add_sm_home_idle "$w" sm1 firstmate:fm-sm1
-  # A dispatched-but-not-torn-down child task under the secondmate's own
-  # state/ - the "in-flight task metadata" half of the pending-work test -
-  # must count as pending work even though the backlog itself is empty.
-  printf 'kind=ship\n' > "$w/sm1/state/child1.meta"
+  seed_in_flight_child_meta "$w"
   fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
   log="$w/calls.log"; : > "$log"
 
   out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" zsh "$log")
 
   assert_not_contains "$out" "SECONDMATE_LIVENESS:" \
-    "a dead secondmate with in-flight child task metadata should be respawned silently"
-  assert_contains "$(cat "$log")" "new-window" \
-    "in-flight child task metadata alone should be enough pending work to relaunch"
-  pass "sweep: an empty backlog with in-flight child task metadata still counts as pending work"
+    "a dead secondmate with in-flight child task metadata should be left down silently by default"
+  assert_not_contains "$(cat "$log")" "new-window" \
+    "in-flight child task metadata must not trigger a relaunch under the never-relaunch policy"
+
+  # A fresh world isolates the verbose-facts assertion from the prior call's
+  # kill-window side effect on the fake tmux's window inventory.
+  w=$(new_world sweep-in-flight-child-verbose)
+  add_sm_home_idle "$w" sm1 firstmate:fm-sm1
+  seed_in_flight_child_meta "$w"
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  log="$w/calls.log"; : > "$log"
+
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" zsh "$log" FM_BOOTSTRAP_VERBOSE_FACTS=1)
+  assert_contains "$out" \
+    "BOOTSTRAP_INFO: secondmate sm1 left down after confirmed agent absence on existing endpoint: pending work in its own records, captain reopens manually (backend=tmux)" \
+    "verbose diagnostics should still surface pending work as an FYI fact, never as a relaunch trigger"
+  assert_not_contains "$(cat "$log")" "new-window" \
+    "the verbose-facts pass must not relaunch either"
+  pass "sweep: in-flight child task metadata is surfaced as an FYI fact but never triggers a relaunch"
 }
 
 test_sweep_skips_missing_secondmate_with_no_recorded_home() {
@@ -651,25 +663,27 @@ test_sweep_never_acts_on_unverified_harness_dead_reading() {
   pass "sweep: an unverified harness blocks recovery with a concrete diagnostic"
 }
 
-test_sweep_converges_no_retouch_once_alive() {
+test_sweep_converges_no_retouch_once_left_down() {
   local w fb tmuxfb log out1 out2
   w=$(new_world sweep-idempotent)
   add_sm_home "$w" sm1 firstmate:fm-sm1
   fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
   log="$w/calls.log"; : > "$log"
 
-  # Round 1: dead -> respawned silently (kill + new-window logged).
+  # Round 1: confirmed dead -> cleaned up (killed) and left down, never
+  # respawned, even though this home has pending work of its own.
   out1=$(run_bootstrap "$tmuxfb:$fb" "$w/home" zsh "$log")
-  assert_not_contains "$out1" "SECONDMATE_LIVENESS: secondmate sm1: respawned" "round 1 should handle the successful respawn silently"
-  [ -s "$log" ] || fail "round 1 should have logged the kill+respawn window operations"
+  assert_not_contains "$out1" "SECONDMATE_LIVENESS:" "round 1 should handle the confirmed-dead cleanup silently"
+  assert_contains "$(cat "$log")" "kill-window" "round 1 should have logged the confirmed-dead cleanup"
+  assert_not_contains "$(cat "$log")" "new-window" "round 1 must never relaunch"
 
-  # Round 2: the (now-respawned) secondmate is genuinely alive - a second
-  # sweep must converge to a pure no-op, not respawn again.
+  # Round 2: the endpoint is now genuinely gone (missing, not dead) - a
+  # second sweep must converge to a pure no-op, never relaunching either.
   : > "$log"
-  out2=$(run_bootstrap "$tmuxfb:$fb" "$w/home" claude "$log")
-  assert_not_contains "$out2" "SECONDMATE_LIVENESS: secondmate sm1: already-live" "round 2 should handle the already-live secondmate silently"
-  [ ! -s "$log" ] || fail "round 2 must not re-kill or re-respawn an already-live secondmate: $(cat "$log")"
-  pass "sweep: idempotent by construction - a live secondmate is never re-touched on a later run"
+  out2=$(run_bootstrap "$tmuxfb:$fb" "$w/home" zsh "$log")
+  assert_not_contains "$out2" "SECONDMATE_LIVENESS:" "round 2 should handle the still-left-down secondmate silently"
+  [ ! -s "$log" ] || fail "round 2 must not re-kill or ever relaunch a left-down secondmate: $(cat "$log")"
+  pass "sweep: idempotent by construction - a left-down secondmate is never re-touched or relaunched on a later run"
 }
 
 test_sweep_skipped_under_detect_only() {
@@ -712,21 +726,20 @@ test_tmux_agent_state_classifies
 test_tmux_agent_state_rejects_malformed_targets_before_probe
 test_herdr_agent_state_preserves_husk_classifier
 test_agent_state_dispatcher_and_compatibility
-test_sweep_respawns_confirmed_dead_secondmate
+test_sweep_never_respawns_confirmed_dead_secondmate
 test_sweep_leaves_alive_secondmate_untouched
-test_sweep_respawns_authoritatively_missing_pi_secondmate
-test_sweep_respawns_authoritatively_missing_pi_signed_secondmate
+test_sweep_never_respawns_authoritatively_missing_pi_secondmate
+test_sweep_never_respawns_authoritatively_missing_pi_signed_secondmate
 test_sweep_never_acts_on_ambiguous_existing_process
 test_sweep_never_acts_on_transient_unreadability
-test_sweep_reports_missing_endpoint_relaunch_failure
 test_sweep_leaves_down_idle_dead_secondmate
-test_sweep_respawns_dead_secondmate_with_in_flight_child_metadata
+test_sweep_never_respawns_dead_secondmate_with_in_flight_child_metadata
 test_sweep_skips_missing_secondmate_with_no_recorded_home
 test_sweep_skips_missing_secondmate_with_missing_home_directory
 test_sweep_skips_missing_secondmate_with_unsafe_home
 test_sweep_skips_missing_secondmate_with_unreadable_backlog
 test_sweep_never_acts_on_unverified_harness_dead_reading
-test_sweep_converges_no_retouch_once_alive
+test_sweep_converges_no_retouch_once_left_down
 test_sweep_skipped_under_detect_only
 test_sweep_noop_with_no_secondmate_meta
 

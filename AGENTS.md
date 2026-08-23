@@ -88,7 +88,7 @@ A lock-refused session must not spawn, steer, merge, drain the wake queue, repai
 
 The digest runs in this order: session lock, bootstrap checks, wake-queue drain, context digest, fleet-state digest, then the supervision block for this harness.
 Every mutating part - the bootstrap sweeps and the wake drain - runs only when this session holds the lock; a lock-refused digest prints read-only advisory wording and drains nothing.
-Fleet startup launches the first mate and nothing else, and relaunches a down secondmate only when that mate's own durable records show pending work; the captain reopens an idle secondmate manually.
+Fleet startup launches the first mate and nothing else and never relaunches a down secondmate, whether or not that mate's own durable records show pending work; the captain reopens an idle secondmate manually.
 The digest's endpoint liveness line is a presence check, not a state read; section 8 owns when to reconcile actual current state.
 
 Bootstrap detects first, asks for consent, and installs only after the captain approves in the current session.
@@ -129,7 +129,7 @@ Treat digest status tails as wake-event history and use targeted current-state r
 
 Reconcile only this home's recorded direct reports and their recorded backend inventory; never sweep a shared endpoint namespace for matching names or claim another home's work.
 For an ordinary direct report whose endpoint is dead or metadata has no window, load `stuck-crewmate-recovery` and preserve the recorded worktree and unlanded work while reconciling ownership.
-For a dead secondmate direct report, load `secondmate-provisioning` and reconcile only that secondmate, never its whole child tree from the main home; reconciling its durable records is always correct, but relaunching it is conditional on the same pending-work test as fleet startup.
+For a dead secondmate direct report, load `secondmate-provisioning` and reconcile only that secondmate, never its whole child tree from the main home; reconciling its durable records is always correct, but relaunching it is an ad hoc judgment call for which its own pending work is one signal - unlike session start, which never relaunches a secondmate.
 Each secondmate reconciles work already in its own home and then idles; recovery never authorizes it to invent work.
 
 If away mode is present, load `/afk` and let its daemon own supervision rather than arming another cycle.
