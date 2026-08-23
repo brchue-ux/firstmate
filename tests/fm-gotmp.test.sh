@@ -72,6 +72,9 @@ make_fake_root() {
   # teardown aborts on that source line before reaching anything asserted here.
   ln -s "$ROOT/bin/fm-browser-session-lib.sh" "$fake/bin/fm-browser-session-lib.sh"
   ln -s "$ROOT/bin/fm-backend-hometag-lib.sh" "$fake/bin/fm-backend-hometag-lib.sh"
+  # fm-treehouse-spelling-lib.sh: teardown sources it unconditionally to
+  # translate the treehouse-return spelling boundary.
+  ln -s "$ROOT/bin/fm-treehouse-spelling-lib.sh" "$fake/bin/fm-treehouse-spelling-lib.sh"
   # fm-guard.sh: stub (teardown calls it with `|| true`).
   cat > "$fake/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash
@@ -146,6 +149,9 @@ test_teardown_skips_gracefully_without_tasktmp() {
   # teardown aborts on that source line before reaching anything asserted here.
   ln -s "$ROOT/bin/fm-browser-session-lib.sh" "$fake/bin/fm-browser-session-lib.sh"
   ln -s "$ROOT/bin/fm-backend-hometag-lib.sh" "$fake/bin/fm-backend-hometag-lib.sh"
+  # fm-treehouse-spelling-lib.sh: teardown sources it unconditionally to
+  # translate the treehouse-return spelling boundary.
+  ln -s "$ROOT/bin/fm-treehouse-spelling-lib.sh" "$fake/bin/fm-treehouse-spelling-lib.sh"
   cat > "$fake/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash
 exit 0
