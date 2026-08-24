@@ -307,7 +307,7 @@ test_browser_session_is_pinned_to_the_task() {
     session=$(fm_browser_session_name "$id" "$home")
     case "$id" in
       *scout) FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" someproj --scout >/dev/null ;;
-      *) FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" someproj --pr-repo owner/someproj --pr-base main >/dev/null ;;
+      *) FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" someproj --mode no-mistakes --pr-repo owner/someproj --pr-base main >/dev/null ;;
     esac
     brief="$home/data/$id/brief.md"
     # The name leads with the task id, which is what keeps a bridge attributable
