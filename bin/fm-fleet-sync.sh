@@ -11,14 +11,20 @@
 # and the "N commits behind" STUCK measurement) uses that remote instead. When
 # the base is not origin, origin is fetched too, best effort, so upstream stays
 # readable for comparison.
-# Self-heals the one unambiguously safe drift: a clean, detached HEAD that holds
-# no unique commits (it is an ancestor of <base>/<default>) and whose <default>
-# branch is free to check out is re-attached and then fast-forwarded ("recovered:").
-# Every other off-default state - a non-default named branch, a detached HEAD with
-# unique commits, a dirty tree, or a diverged default - may hold real work, so it
-# is left untouched and reported as a quantified, loud "STUCK: ... N commits behind
-# ... - needs attention" warning rather than a quiet drift. Nothing is ever forced,
-# stashed, or discarded.
+# Self-heals the safe drift: a clean, detached HEAD that holds no unique commits
+# (it is an ancestor of <base>/<default>). When <default> is free to check out
+# here it is re-attached and then fast-forwarded ("recovered:"). When git's own
+# worktree exclusivity holds <default> checked out in another worktree of this
+# same clone - the shape every pooled firstmate home is leased in, including a
+# firstmate-repo ship task's own project when that project IS a pooled home; see
+# bin/fm-update.sh and bin/fm-ff-lib.sh - re-attaching is impossible, so the
+# detached HEAD is advanced straight to the fetched tip instead, staying
+# detached ("advanced:"). Every other off-default state - a non-default named
+# branch, a detached HEAD with unique commits, a dirty tree, or a local
+# <default> branch ref that itself diverged - may hold real work, so it is left
+# untouched and reported as a quantified, loud "STUCK: ... N commits behind
+# ... - needs attention" warning rather than a quiet drift. Nothing is ever
+# forced, stashed, or discarded.
 # Still skips (benignly) local-only projects, a clone with no base remote,
 # missing remotes/branches, and fetch failures.
 # Pruning never deletes the checked-out branch or a branch that still has a
@@ -280,15 +286,43 @@ stuck_state() {
     s="detached HEAD"
   elif ! git -C "$PROJ" merge-base --is-ancestor HEAD "$BASE" 2>/dev/null; then
     s="detached HEAD with unique commits"
-  elif default_checked_out_elsewhere; then
-    s="detached HEAD ($DEFAULT checked out in another worktree)"
-  elif ! local_default_safe_for_recovery; then
-    s="detached HEAD (local $DEFAULT diverged from $BASE)"
   else
-    s="detached HEAD"
+    # A clean, ancestor-of-base detached HEAD only ever reaches report_stuck
+    # when local_default_safe_for_recovery is false (a local <default> branch
+    # ref that itself diverged from $BASE): default_checked_out_elsewhere alone
+    # no longer blocks recovery, see sync_project's advance_detached_in_place.
+    s="detached HEAD (local $DEFAULT diverged from $BASE)"
   fi
   [ "$dirty" = no ] || s="$s with uncommitted changes"
   printf '%s\n' "$s"
+}
+
+# Advance a detached HEAD straight to $BASE without re-attaching to $DEFAULT -
+# used when $DEFAULT is checked out in another worktree of $PROJ (git's own
+# worktree exclusivity), so re-attachment is impossible even though the
+# detached HEAD itself is clean and an ancestor of $BASE. Touches only the
+# detached HEAD pointer, never the $DEFAULT branch ref, so it cannot disturb
+# whatever that other worktree is doing with it.
+advance_detached_in_place() {
+  local before after out reason
+  before=$(git -C "$PROJ" rev-parse --short HEAD) || {
+    echo "$label: skipped: cannot read HEAD"
+    return 0
+  }
+  if [ "$(git -C "$PROJ" rev-parse HEAD)" = "$(git -C "$PROJ" rev-parse "$BASE")" ]; then
+    echo "$label: already current (detached; $DEFAULT checked out in another worktree)"
+    return 0
+  fi
+  if ! out=$(git -C "$PROJ" merge --ff-only "$BASE" 2>&1); then
+    reason="fast-forward failed"
+    if [ -n "$out" ]; then
+      reason="$reason: $(first_line "$out")"
+    fi
+    echo "$label: skipped: $reason"
+    return 0
+  fi
+  after=$(git -C "$PROJ" rev-parse --short HEAD)
+  echo "$label: advanced $before..$after (detached; $DEFAULT checked out in another worktree)"
 }
 
 # Loud, quantified report for a clone we deliberately leave untouched. Includes
@@ -366,18 +400,25 @@ EOF
   recovered=no
 
   if [ "$cur" != "$DEFAULT" ]; then
-    # Off the default branch. Auto-recover only the one unambiguously safe drift:
-    # a clean, detached HEAD that holds no unique commits (it is an ancestor of
-    # origin/<default>) and whose <default> branch is free to check out here.
-    # Re-attaching to an already-published commit strands nothing, and the
-    # fast-forward path below then catches the clone up. Anything else - a
-    # non-default named branch, a detached HEAD with unique commits, a dirty tree,
-    # or <default> already checked out elsewhere - may hold real work, so it is
-    # reported loudly and left untouched.
+    # Off the default branch. Auto-recover the safe drift: a clean, detached
+    # HEAD that holds no unique commits (it is an ancestor of origin/<default>).
+    # When <default> is free to check out here, re-attach to the
+    # already-published commit (strands nothing) and let the fast-forward path
+    # below catch the clone up. When <default> is checked out in another
+    # worktree of this same clone instead - git's own worktree exclusivity,
+    # the shape every pooled firstmate home is leased in - re-attaching is
+    # impossible, so advance_detached_in_place advances the detached HEAD
+    # straight to the fetched tip and leaves it detached. Anything else - a
+    # non-default named branch, a detached HEAD with unique commits, a dirty
+    # tree, or a local <default> branch ref that itself diverged - may hold
+    # real work, so it is reported loudly and left untouched.
     if [ -z "$cur" ] && [ "$dirty" = no ] \
         && git -C "$PROJ" merge-base --is-ancestor HEAD "$BASE" 2>/dev/null \
-        && ! default_checked_out_elsewhere \
         && local_default_safe_for_recovery; then
+      if default_checked_out_elsewhere; then
+        advance_detached_in_place
+        return 0
+      fi
       if ! git -C "$PROJ" checkout --quiet "$DEFAULT" 2>/dev/null; then
         report_stuck "$(stuck_state)"
         return 0

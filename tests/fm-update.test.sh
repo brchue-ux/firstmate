@@ -3,9 +3,12 @@
 # firstmate repo and every registered secondmate home.
 #
 # The guarantees under test mirror fm-fleet-sync.sh and prime directive #3:
-#   - The running firstmate repo (on its default branch) fast-forwards from
-#     origin; a leased secondmate home (detached HEAD on the default branch)
-#     fast-forwards the same way.
+#   - The running firstmate repo fast-forwards from origin, whether it is
+#     genuinely on its default branch (the canonical clone) or leased at a
+#     detached HEAD on the default branch (a pooled home - the shape every
+#     pooled firstmate home is leased in, itself included, not just its
+#     secondmates); either way it stays in that same shape after advancing. A
+#     leased secondmate home fast-forwards the same detached way.
 #   - FAST-FORWARD ONLY: a dirty, diverged, offline, or wrong-branch target is
 #     skipped and reported, never forced or stashed, so unlanded work survives.
 #   - The update is a single-parent fast-forward (never a merge commit) and a
@@ -253,20 +256,84 @@ test_firstmate_wrong_branch_skipped() {
   pass "T9 firstmate off its default branch is skipped, not forced"
 }
 
-test_firstmate_detached_head_skipped() {
-  local w out before
+# --- T10: a pooled firstmate home (clean, detached, behind) self-updates -----
+# Every pooled firstmate home - not just its secondmates - is leased at a
+# detached HEAD on the default branch (git will not let the same branch be
+# checked out in more than one worktree, and main is normally held elsewhere).
+# A clean, strictly-behind detached HEAD must therefore advance in place, still
+# detached: no branch created, no checkout of main.
+test_firstmate_detached_head_advances() {
+  local w out before after
   w=$(new_world t10)
   bump_origin "$w" instr
   git -C "$w/main" checkout -q --detach HEAD
-  before=$(git -C "$w/main" rev-parse HEAD)
+  before=$(git -C "$w/main" rev-parse --short HEAD)
 
   out=$(run_update "$w")
 
-  assert_contains "$out" "firstmate: skipped: detached HEAD, expected main" "detached firstmate skipped"
-  assert_contains "$out" "reread-firstmate: no" "no reread when detached firstmate was skipped"
+  assert_contains "$out" "firstmate: updated $before.." "detached firstmate fast-forwards in place"
+  assert_contains "$out" "instructions changed: AGENTS.md, bin, .agents/skills" "instruction change surfaced"
+  assert_contains "$out" "reread-firstmate: yes" "instruction change while detached still triggers reread"
+  after=$(git -C "$w/main" rev-parse HEAD)
+  [ "$after" = "$(git -C "$w/main" rev-parse origin/main)" ] \
+    || fail "detached firstmate HEAD not at origin/main"
+  git -C "$w/main" symbolic-ref -q HEAD >/dev/null \
+    && fail "detached firstmate worktree was checked out onto a branch"
+  pass "T10 clean detached firstmate home advances in place, still detached"
+}
+
+test_firstmate_detached_dirty_skipped() {
+  local w out before
+  w=$(new_world t10b)
+  bump_origin "$w" instr
+  git -C "$w/main" checkout -q --detach HEAD
+  before=$(git -C "$w/main" rev-parse HEAD)
+  printf 'uncommitted local edit\n' >> "$w/main/AGENTS.md"
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "firstmate: skipped: dirty working tree" "dirty detached firstmate skipped"
+  assert_contains "$out" "reread-firstmate: no" "no reread when dirty firstmate was skipped"
   [ "$(git -C "$w/main" rev-parse HEAD)" = "$before" ] \
-    || fail "detached firstmate HEAD moved"
-  pass "T10 firstmate detached HEAD is skipped"
+    || fail "dirty detached firstmate HEAD moved"
+  grep -q 'uncommitted local edit' "$w/main/AGENTS.md" \
+    || fail "dirty edit was discarded"
+  pass "T10b dirty detached firstmate home is skipped, edit preserved"
+}
+
+test_firstmate_detached_diverged_skipped() {
+  local w out before
+  w=$(new_world t10c)
+  git -C "$w/main" checkout -q --detach HEAD
+  printf 'fork work\n' >> "$w/main/README.md"
+  git -C "$w/main" add -A
+  git -C "$w/main" commit -qm local-work
+  before=$(git -C "$w/main" rev-parse HEAD)
+  bump_origin "$w" instr
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "firstmate: skipped: diverged from origin/main" "diverged detached firstmate skipped"
+  assert_contains "$out" "reread-firstmate: no" "no reread when diverged firstmate was skipped"
+  [ "$(git -C "$w/main" rev-parse HEAD)" = "$before" ] \
+    || fail "diverged detached firstmate HEAD moved (unlanded work at risk)"
+  pass "T10c diverged detached firstmate home is skipped, local commit preserved"
+}
+
+test_firstmate_detached_already_current() {
+  local w out
+  w=$(new_world t10d)
+  bump_origin "$w" instr
+  git -C "$w/main" checkout -q --detach HEAD
+  run_update "$w" >/dev/null   # first run advances it
+
+  out=$(run_update "$w")       # second run: nothing to do
+
+  assert_contains "$out" "firstmate: already current" "detached firstmate already current"
+  assert_contains "$out" "reread-firstmate: no" "no reread when nothing changed"
+  git -C "$w/main" symbolic-ref -q HEAD >/dev/null \
+    && fail "already-current detached firstmate was checked out onto a branch"
+  pass "T10d detached firstmate home already current reports current, not an error"
 }
 
 test_unsafe_secondmate_home_skipped_before_git_update() {
@@ -298,7 +365,10 @@ test_diverged_secondmate_skipped
 test_idempotent_already_current
 test_registry_backstop_dedup_and_self_exclusion
 test_firstmate_wrong_branch_skipped
-test_firstmate_detached_head_skipped
+test_firstmate_detached_head_advances
+test_firstmate_detached_dirty_skipped
+test_firstmate_detached_diverged_skipped
+test_firstmate_detached_already_current
 test_unsafe_secondmate_home_skipped_before_git_update
 
 echo "# all fm-update tests passed"
