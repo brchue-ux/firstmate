@@ -2,7 +2,6 @@
 name: afk
 description: >-
   Enter away-mode supervision when the captain invokes /afk, says they are going afk, `state/.afk` exists, an incoming message starts with `FM_INJECT_MARK`, or any `state/.subsuper-*` marker is involved.
-  It sets a durable away-mode flag so the sub-supervisor daemon can self-handle routine wakes and escalate captain-relevant events plus bounded declared-external-wait rechecks as batched digests during walk-away stretches, then exits automatically when any real unmarked message returns firstmate to full per-wake responsiveness.
 user-invocable: true
 metadata:
   internal: true
@@ -10,11 +9,8 @@ metadata:
 
 # afk
 
-Away-mode supervision. When invoked, `/afk` makes the daemon's token-saving
-tradeoff **consented** and **explicit**: the captain is stepping away, so the
-sub-supervisor may triage routine wakes in bash instead of waking firstmate's
-LLM for each one. Escalations still reach the captain, but as one pre-read,
-batched digest rather than per-wake injections.
+Away-mode supervision.
+`/afk` is the captain's explicit consent to the daemon's token-saving tradeoff: the sub-supervisor triages routine wakes in bash instead of waking firstmate's LLM for each one, and escalations still reach the captain, but as one pre-read, batched digest rather than per-wake injections.
 
 ## What it does
 
@@ -74,9 +70,7 @@ a false exit is self-correcting (the captain re-runs `/afk`).
 ## Orthogonal to approval authority
 
 afk changes how aggressively firstmate surfaces things, **not who approves what**.
-"Away" never means "approves more" or "approves less."
-A PR ready for merge or a needs-decision finding keeps the same configured authority and exceptions from `AGENTS.md` section 7, while anything requiring the captain still waits for the captain's explicit word.
-The daemon only batches the notification.
+A PR ready for merge or a needs-decision finding keeps the same configured authority and exceptions from `AGENTS.md` section 7, while anything requiring the captain still waits for the captain's explicit word; the daemon only batches the notification.
 
 ## Operational prefix contract
 
@@ -100,13 +94,12 @@ backend (tmux or herdr; see "Auto-discovered supervisor pane" below):
   It preserves proven idle composers as empty but requires a genuine container around shell glyphs; see `docs/herdr-backend.md` "Composer and injection safety" for the operator contract.
   `pane_input_pending` is the tested fail-closed predicate for callers that need to know whether the composer is unsafe: it treats every result except exact `empty` as pending.
 
-A busy primary pane, or any composer verdict other than `empty`, defers the injection; the buffered escalation survives in `state/.subsuper-escalations` and is retried on the next housekeeping tick.
-In afk mode the composer guard is belt-and-suspenders (no human is typing), but it protects against the race window between the captain returning and their message landing, a dead shell, and the daemon's own previous injection sitting unsent.
+Either condition, or any composer verdict other than `empty`, defers the injection; the buffered escalation survives in `state/.subsuper-escalations` and is retried on the next housekeeping tick.
+Even in afk mode, where no human is typing, the composer guard protects against the race window between the captain returning and their message landing, a dead shell, and the daemon's own previous injection sitting unsent.
 
 **Max-defer escape (the daemon must never silently wedge).**
 If anything stays buffered past `FM_MAX_DEFER_SECS` (default 300), the daemon
 attempts one normal flush, which still requires an idle pane and an affirmatively empty composer.
-The alarm is defense in depth rather than a substitute for keeping every genuinely idle supported composer injectable.
 If that submit cannot be confirmed, it raises a loud, rate-limited wedge alarm:
 an ERROR in the daemon log, a durable
 `state/.subsuper-inject-wedged` marker (surface it on the "while you were out"
@@ -125,6 +118,7 @@ For tmux that confirmation is normally a proven cleared composer from the shared
 Without that baseline, busy state never converts an `unknown` composer into confirmation.
 For herdr, normal idle-baseline submits are confirmed by native agent-state showing a real turn started; the shared classifier remains the affirmative-empty pre-injection guard and conservative fallback for non-idle or unreadable baselines.
 A bordered-empty or ghost-only composer is recognized as empty where that backend uses composer confirmation, rather than mistaken for a swallowed Enter.
+`empty` is the backend submit primitive's caller-facing success verdict, and for tmux it means the shared-ghost-aware, border-aware composer cleared.
 `fm-send.sh` uses the same primitive and exits non-zero
 when a steer's Enter is positively swallowed, so firstmate learns an instruction
 did not land instead of leaving it unsubmitted.
@@ -136,13 +130,9 @@ check alone false-positives on a swallowed Enter for every steer sent to a
 busy opencode pane. The shared `fm_tmux_submit_enter_core` falls back to
 `fm_pane_is_busy` once the Enter-retry budget is spent: a busy pane means the
 Enter was accepted and queued (reported as `empty` so the caller does not
-re-send), while an idle pane keeps `pending` as a genuine swallow. The
-strict-buffer-clears-only-on-`empty` policy above still holds for the daemon
-and the lenient-`pending`-fails-for-`fm-send` policy still holds for steer
-verification - this exception is a busy-queue is treated as a delivered
-Enter, not a swallowed one. The herdr adapter observes the same opencode
-behavior but needs a separate fix; the gap is recorded in
-`docs/herdr-backend.md` rather than papered over here.
+re-send), while an idle pane keeps `pending` as a genuine swallow.
+The strict-buffer-clears-only-on-`empty` policy still holds for the daemon and the lenient-`pending`-fails-for-`fm-send` policy still holds for steer verification: a busy queue counts as a delivered Enter, not a swallowed one.
+The herdr adapter observes the same opencode behavior but needs a separate fix, recorded as a gap in `docs/herdr-backend.md`.
 
 ## Classification policy
 

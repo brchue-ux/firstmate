@@ -43,6 +43,16 @@ export FM_GATE_REFUSE_BYPASS=1
 # launch line so it cannot follow a crewmate out of the suite.
 export FM_HOME_BINDING=test-harness
 
+# Hermetic browser state, for both readers of it at once. Left alone, the sweep
+# (bin/fm-browser-sweep.sh) reads the developer's real chrome-devtools-axi root,
+# so a browser session of their own left idle past the window would print a
+# BROWSER_SWEEP line into every suite that asserts bootstrap silence, and
+# bin/fm-teardown.sh would decide from that same real state whether a task's
+# stop is worth invoking. Both go through bin/fm-browser-session-lib.sh, which
+# owns where that state lives, so this one variable moves both; a suite that
+# needs a real fixture root sets it there. Pointed at a path that cannot exist.
+export FM_BROWSER_SESSION_ROOT=/nonexistent/fm-test-no-browser-state
+
 # Resolve the repo root from this library's own location. Consumed by sourcing
 # test files, not by this library, so it reads as "unused" here.
 # shellcheck disable=SC2034
@@ -102,6 +112,12 @@ FM_TEST_OWNER_IDENTITY=$(fm_test_pid_identity "$$") || {
   return 1
 }
 
+# Ends on an explicit success, exactly as fm_kill_pids does. With no directory
+# registered - the ordinary case, since the `root=$(fm_test_tmproot p)` form runs
+# in a subshell - the loop's last test is a failed [ -n "" ] and the function
+# would otherwise return 1. A suite whose EXIT trap ends in this call then fails
+# with every one of its cases passing, which is a suite failure nothing in the
+# output explains.
 fm_test_cleanup() {
   local d
   for d in "${FM_TEST_CLEANUP_DIRS[@]:-}"; do
@@ -113,6 +129,7 @@ fm_test_cleanup() {
     done < "$FM_TEST_CLEANUP_REGISTRY"
     rm -f "$FM_TEST_CLEANUP_REGISTRY"
   fi
+  return 0
 }
 
 fm_test_tmproot() {
@@ -209,6 +226,52 @@ fi
 exit 0
 SH
   chmod +x "$fakebin/$tool"
+}
+
+# --- fixture processes ------------------------------------------------------
+#
+# fm_start_marked_process <dir> <basename> starts a real, running process whose
+# ps command line carries <basename>, and echoes its pid. Callers that assert on
+# process identity - the browser sweep and cleanup both read a recorded pid's
+# argv - need a genuine process rather than a stub, and they distinguish
+# processes only by that name, so one parameterized helper covers "a bridge",
+# "a chrome-devtools-axi CLI call", and "something unrelated" alike.
+#
+# The caller owns killing what it starts; fm_kill_pids is the usual EXIT trap.
+
+FM_TEST_STARTED_PIDS=()
+
+fm_kill_pids() {
+  local pid
+  for pid in "${FM_TEST_STARTED_PIDS[@]:-}"; do
+    [ -n "$pid" ] && kill "$pid" 2>/dev/null
+  done
+  return 0
+}
+
+fm_start_marked_process() {
+  local dir=$1 name=$2 script pid attempt=0
+  mkdir -p "$dir"
+  script="$dir/$name"
+  printf '%s\n' '#!/usr/bin/env bash' 'sleep 300' > "$script"
+  chmod +x "$script"
+  # Detached from this function's stdout: it is read through a command
+  # substitution, and a background child holding that pipe open would make the
+  # caller wait for the child instead of for the pid.
+  "$script" >/dev/null 2>&1 &
+  pid=$!
+  FM_TEST_STARTED_PIDS+=("$pid")
+  # A backgrounded script still shows its PARENT's command line between fork and
+  # exec, so anything reading argv in that window sees the wrong process - a
+  # flake with nothing to do with the behavior under test.
+  while [ "$attempt" -lt 200 ]; do
+    case "$(ps -o args= -p "$pid" 2>/dev/null)" in
+      *"$name"*) printf '%s\n' "$pid"; return 0 ;;
+    esac
+    sleep 0.05
+    attempt=$((attempt + 1))
+  done
+  fail "fixture process $pid never showed '$name' in its command line"
 }
 
 # --- deterministic git identity and fixtures --------------------------------

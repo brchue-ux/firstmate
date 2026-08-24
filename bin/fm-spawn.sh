@@ -215,8 +215,7 @@ case "${1:-}" in
 esac
 
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
-# FM_HOME resolution, including the refusal on an ambiently inherited home,
-# has one owner: bin/fm-home-anchor-lib.sh.
+# FM_HOME resolution: see bin/fm-home-anchor-lib.sh ("Why this exists").
 # shellcheck source=bin/fm-home-anchor-lib.sh
 . "$SCRIPT_DIR/fm-home-anchor-lib.sh"
 fm_home_anchor_resolve "$FM_ROOT" || exit 1
@@ -1913,11 +1912,23 @@ case "$BACKEND" in
       HERDR_LABEL_HOME=$PROJ_ABS
       HERDR_LAUNCHER_RELATIONSHIP=other-home
     fi
+    # The home workspace is anchored at the HOME directory, not at the project
+    # this particular task happens to use. The workspace represents the home
+    # (its label is derived from FM_HOME), so a project-clone cwd was only ever
+    # an artifact of whichever task created it first, and it left the workspace
+    # sitting in an unrelated repository. Anchoring it at the home is what lets
+    # fm_backend_herdr_workspace_ensure give a secondmate home - a linked
+    # worktree of the firstmate repo - a worktree-backed workspace that herdr's
+    # sidebar indents under the primary home, and what keeps the primary home's
+    # own workspace the un-indented repo parent by construction. This cwd only
+    # ever seeds the workspace's auto-created default tab, which firstmate
+    # prunes; every task tab still opens in its own project cwd below.
+    HERDR_HOME_CWD=$(resolved_existing_dir "$HERDR_LABEL_HOME" 2>/dev/null || printf '%s' "$HERDR_LABEL_HOME")
     HERDR_PRESENTATION_JOURNAL=$(fm_backend_herdr_projection_journal_path "$STATE" "$ID")
     HERDR_PROJECTED=0
+    HERDR_PARENT_LABEL=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_workspace_label)
     if [ "$KIND" != secondmate ] && fm_backend_herdr_presentation_enabled "$CONFIG" "$STATE"; then
       HERDR_SES=$(fm_backend_herdr_session)
-      HERDR_PARENT_LABEL=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_workspace_label)
       if [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; then
         fm_backend_herdr_server_ensure "$HERDR_SES" || {
           echo "error: herdr presentation recovery could not ensure its exact named session" >&2
@@ -2033,7 +2044,7 @@ case "$BACKEND" in
       fi
     fi
     if [ "$HERDR_PROJECTED" -ne 1 ]; then
-      HERDR_CONTAINER_RAW=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_container_ensure "$PROJ_ABS" "$HERDR_LAUNCHER_RELATIONSHIP") || exit 1
+      HERDR_CONTAINER_RAW=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_container_ensure "$HERDR_HOME_CWD" "$HERDR_LAUNCHER_RELATIONSHIP") || exit 1
       # fm_backend_herdr_container_ensure echoes "<session>:<workspace_id>\t<seeded_default_tab_id>"
       # (the second field empty when this call ADOPTED a pre-existing workspace
       # rather than creating a fresh one). Split on the guaranteed single tab
@@ -2052,6 +2063,14 @@ EOF
     if [ -z "$HERDR_TAB_ID" ] || [ -z "$HERDR_PANE_ID" ]; then
       echo "error: herdr did not return a tab/pane id for $W" >&2
       exit 1
+    fi
+    # Stamp the calling mate's own moniker onto this WORKER's pane, for both
+    # the flat and the projected layouts. A secondmate is a mate, not a worker,
+    # so its pane is deliberately left unstamped: herdr's agents panel filters
+    # to workers on the token's EXISTENCE, so stamping a mate would put it back
+    # in the worker list. Best effort - display only, never fails a spawn.
+    if [ "$KIND" != secondmate ]; then
+      fm_backend_herdr_report_owner_token "$HERDR_SES" "$HERDR_PANE_ID" "$HERDR_PARENT_LABEL"
     fi
     T="$HERDR_SES:$HERDR_PANE_ID"
     ;;

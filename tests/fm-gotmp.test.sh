@@ -81,6 +81,14 @@ make_fake_root() {
   ln -s "$ROOT/bin/fm-x-lib.sh" "$fake/bin/fm-x-lib.sh"
   ln -s "$ROOT/bin/fm-secondmate-registry-lib.sh" "$fake/bin/fm-secondmate-registry-lib.sh"
   ln -s "$ROOT/bin/fm-secondmate-parent-lib.sh" "$fake/bin/fm-secondmate-parent-lib.sh"
+  # fm-browser-session-lib.sh, plus the home tag it sources: teardown sources it
+  # unconditionally to derive the browser session it stops, so without it
+  # teardown aborts on that source line before reaching anything asserted here.
+  ln -s "$ROOT/bin/fm-browser-session-lib.sh" "$fake/bin/fm-browser-session-lib.sh"
+  ln -s "$ROOT/bin/fm-backend-hometag-lib.sh" "$fake/bin/fm-backend-hometag-lib.sh"
+  # fm-treehouse-spelling-lib.sh: teardown sources it unconditionally to
+  # translate the treehouse-return spelling boundary.
+  ln -s "$ROOT/bin/fm-treehouse-spelling-lib.sh" "$fake/bin/fm-treehouse-spelling-lib.sh"
   # fm-guard.sh: stub (teardown calls it with `|| true`).
   cat > "$fake/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash
@@ -162,6 +170,14 @@ test_teardown_skips_gracefully_without_tasktmp() {
   ln -s "$ROOT/bin/fm-x-lib.sh" "$fake/bin/fm-x-lib.sh"
   ln -s "$ROOT/bin/fm-secondmate-registry-lib.sh" "$fake/bin/fm-secondmate-registry-lib.sh"
   ln -s "$ROOT/bin/fm-secondmate-parent-lib.sh" "$fake/bin/fm-secondmate-parent-lib.sh"
+  # fm-browser-session-lib.sh, plus the home tag it sources: teardown sources it
+  # unconditionally to derive the browser session it stops, so without it
+  # teardown aborts on that source line before reaching anything asserted here.
+  ln -s "$ROOT/bin/fm-browser-session-lib.sh" "$fake/bin/fm-browser-session-lib.sh"
+  ln -s "$ROOT/bin/fm-backend-hometag-lib.sh" "$fake/bin/fm-backend-hometag-lib.sh"
+  # fm-treehouse-spelling-lib.sh: teardown sources it unconditionally to
+  # translate the treehouse-return spelling boundary.
+  ln -s "$ROOT/bin/fm-treehouse-spelling-lib.sh" "$fake/bin/fm-treehouse-spelling-lib.sh"
   cat > "$fake/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash
 exit 0

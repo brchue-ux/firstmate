@@ -49,6 +49,100 @@ tree_digest() {
 
 # --- tests ------------------------------------------------------------------
 
+# skipped=true alone cannot tell a consumer whether a home's absence from
+# items[] means "nothing open here" or "we could not tell". Most skips are the
+# former and are the ordinary steady state of a fleet, so a consumer that
+# refuses on skipped would refuse forever; work_unknown is the per-home answer
+# it acts on instead, and getting the mapping wrong in either direction is
+# either a permanently inert consumer or a home's live work read as absent.
+test_work_unknown_separates_a_real_gap_from_an_ordinary_skip() {
+  local main empty unreadable json
+  main=$(new_home main-workunknown)
+  empty=$(new_home mate-noback)
+  unreadable=$(new_home mate-unreadable)
+  cat > "$main/data/backlog.md" <<'EOF'
+## In flight
+- [ ] wu-main - this home's own open work (repo: firstmate) (since 2026-07-01)
+## Queued
+## Done
+EOF
+  # $empty is deliberately never given a backlog, which is exactly the state
+  # bin/fm-home-seed.sh leaves a freshly provisioned home in.
+  cat > "$unreadable/data/backlog.md" <<'EOF'
+## In flight
+- [ ] wu-hidden - open work nobody outside this home can see (repo: alpha) (since 2026-07-02)
+## Queued
+## Done
+EOF
+  register "$main" noback "$empty"
+  register "$main" unreadable "$unreadable"
+  register "$main" missing "$TMP_ROOT/mate-does-not-exist"
+  # A second registry id pointing at a home already indexed: its items are
+  # counted under the first visit, so nothing is missing.
+  register "$main" noback-again "$empty"
+
+  if [ "$(id -u)" -eq 0 ]; then
+    echo "skip: running as root, file permissions do not deny reads"
+    return 0
+  fi
+  chmod 000 "$unreadable/data/backlog.md"
+
+  json=$(run_index "$main" --json) || fail "--json failed on a mixed-skip fleet"
+  unknown_for() { printf '%s' "$json" | jq -r --arg m "$1" '.homes[] | select(.mate == $m) | .work_unknown'; }
+
+  [ "$(unknown_for main)" = false ] \
+    || fail "a fully read home was reported as an unknown-work gap"
+  [ "$(unknown_for noback)" = false ] \
+    || fail "a home with no backlog file at all was reported as an unknown-work gap"
+  [ "$(unknown_for noback-again)" = false ] \
+    || fail "a home already indexed under an earlier registry id was reported as an unknown-work gap"
+  [ "$(unknown_for unreadable)" = true ] \
+    || fail "a home whose backlog exists but cannot be read was reported as fully counted"
+  [ "$(unknown_for missing)" = true ] \
+    || fail "a registered home that does not exist was reported as fully counted"
+
+  # The skipped[] projection carries it too, since that is where a consumer
+  # reading only the skips would look.
+  [ "$(printf '%s' "$json" | jq -r '.skipped[] | select(.mate == "unreadable") | .work_unknown')" = true ] \
+    || fail "the skipped projection dropped the unknown-work answer"
+  # The ordinary skips are still skips, so this narrows what a skip MEANS
+  # without hiding any home.
+  [ "$(printf '%s' "$json" | jq -r '.totals.homes_skipped')" -ge 3 ] \
+    || fail "narrowing the meaning of a skip removed homes from the skipped count"
+
+  chmod 644 "$unreadable/data/backlog.md"
+  pass "work_unknown marks an unreadable or missing home as a gap and an ordinary skip as fully counted"
+}
+
+# A home whose own registry cannot be read hides an entire subtree of homes and
+# every open item in them, even though that home itself was indexed and is not
+# skipped at all.
+test_work_unknown_is_true_for_an_unenumerable_subtree() {
+  local main json
+  if [ "$(id -u)" -eq 0 ]; then
+    echo "skip: running as root, file permissions do not deny reads"
+    return 0
+  fi
+  main=$(new_home main-wu-subtree)
+  cat > "$main/data/backlog.md" <<'EOF'
+## In flight
+- [ ] wu-subtree - this home's own work is readable (repo: firstmate) (since 2026-07-01)
+## Queued
+## Done
+EOF
+  register "$main" unnameable "$TMP_ROOT/mate-unnameable-wu"
+  chmod 000 "$main/data/secondmates.md"
+
+  json=$(run_index "$main" --json) || fail "--json aborted on an unreadable registry"
+  [ "$(printf '%s' "$json" | jq -r '.homes[0].skipped')" = false ] \
+    || fail "the home itself was skipped rather than indexed"
+  [ "$(printf '%s' "$json" | jq -r '.homes[0].work_unknown')" = true ] \
+    || fail "an indexed home hiding an unenumerable subtree was reported as fully counted"
+
+  chmod 644 "$main/data/secondmates.md"
+  pass "work_unknown is true for an indexed home whose secondmate subtree could not be enumerated"
+}
+
 test_indexes_main_home_and_every_registered_mate() {
   local main sub_a sub_b out json
   main=$(new_home main-basic)
@@ -673,6 +767,8 @@ EOF
   pass "a registry entry with no home names no fabricated backlog path"
 }
 
+test_work_unknown_separates_a_real_gap_from_an_ordinary_skip
+test_work_unknown_is_true_for_an_unenumerable_subtree
 test_indexes_main_home_and_every_registered_mate
 test_missing_backlog_skips_that_home_only
 test_unreadable_backlog_skips_that_home_only

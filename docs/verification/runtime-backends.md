@@ -331,6 +331,53 @@ HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
 
 Observed guarantee: the primary and secondmate used distinct home workspaces, a child launched by the secondmate stayed in that secondmate workspace, list-live remained home-scoped, and exact cleanup did not affect sibling homes.
 
+Home workspace grouping and the worker owner token are owned by:
+
+```sh
+HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
+  tests/fm-backend-herdr-space-grouping-e2e.test.sh
+```
+
+The suite ran on 2026-07-28 against Herdr 0.7.5:
+
+```text
+ok - real herdr E2E: with no space open on the repo parent, a secondmate spawn falls back flat and invents no stray parent workspace
+ok - real herdr E2E: the primary home's space opens anchored at the home itself
+ok - real herdr E2E: a secondmate home gets a worktree-backed space naming the primary home as its repo parent
+ok - real herdr E2E: the primary and secondmate spaces share one repo key with exactly one un-indented parent - herdr's grouping precondition
+ok - real herdr E2E: space lookup by label still resolves both homes to exactly the right space
+ok - real herdr E2E: a worker pane is stamped with its calling mate's moniker and a secondmate pane is left unstamped
+ok - real herdr E2E: a worker spawned by a secondmate is stamped with that secondmate's moniker and lands in its space
+ok - real herdr E2E: a workspace already open on a home checkout keeps its own name and the home still gets its own labelled space
+```
+
+The Herdr behaviors this depends on were established directly against the real binary and are not modeled by any fake:
+
+| Behavior | Command shape | Result |
+| --- | --- | --- |
+| A plain create never groups | `herdr workspace create --cwd <checkout> --label <l>` | The workspace reported `worktree: null` for both a main checkout and a linked worktree. |
+| A child must originate from the parent | `herdr worktree open --workspace <child> --path <child>` | Refused with `linked_worktree_source`, "New and open worktree actions start from the repo parent workspace." |
+| A parent probe is read-only | `herdr worktree open --workspace <parent> --path <linked>` after `herdr worktree list --cwd <path>` | The list call left an empty session's workspace list untouched, and the open call produced `is_linked_worktree: true` under the parent's repo root. |
+| Membership must be stamped at creation | plain create at a repo root, then task tab, then seeded-tab prune | The workspace stopped resolving as the repo parent once its seeded tab was pruned; a workspace opened through the worktree path kept its membership. |
+| An open call can adopt any workspace on that checkout | `herdr worktree open --workspace <parent> --path <home>` with no `--label`, against a checkout already carrying a hand-named workspace | Reported `already_open: true` for that workspace, which kept its own name; Firstmate labelled only workspaces the call itself created, with `herdr workspace rename <id> <label>` afterwards. |
+| Pane id is positional | `herdr pane report-metadata <pane> --source <s> --token owner=<v>` | Read back as `.result.pane.tokens.owner`; the pane id must precede the options despite the `--help` synopsis showing it last. |
+
+The worktree-backed path is never gated on a protocol or version number, and no failure it can hit fails a spawn; each one degrades to an existing or ungrouped home workspace.
+
+`worktree open` is never passed `--label`, so Firstmate itself names a workspace only through the explicit `workspace rename`, and only one the call reported creating.
+That alone does not make the fallback safe for the PRIMARY home.
+Herdr's `fallback_label_from_cwd` (`src/workspace/git/discovery.rs:31-43`) returns the checkout directory's basename, and `WorkspaceInfo.label` is the custom name if set and otherwise that basename (`src/app/creation.rs:496`, `src/workspace.rs:1123-1143`).
+A primary home is a clone of this repository, so its checkout directory is normally named `firstmate`, identical to the label `fm_backend_herdr_workspace_label` returns for the primary; a secondmate home's basename is unrelated to its `2ndmate-<id>` label and cannot collide.
+So a failed attempt can strand a workspace already reading as the primary's label, and the adapter re-runs its label lookup after any failed attempt and adopts a match before creating anything.
+It also waits for that re-find before reporting the failure, so a warning never suggests renaming or deleting a workspace the re-find has just adopted as the live home Space.
+
+A `worktree open` response missing `already_open` is unreachable across the supported range, established by reading the Herdr source rather than by running a command.
+Commit 9817820 ("feat: add worktree cli and socket api", v0.6.2~10, protocol 10) added the worktree CLI subcommands, the `WorktreeOpened` response variant and the `already_open` field in one commit.
+The field is declared `already_open: bool` at `src/api/schema/response.rs:80`, plain and non-`Option` with no `skip_serializing_if`, so serde always emits it; only that commit and the mechanical file split fbd20ad have ever touched it.
+`FM_BACKEND_HERDR_MIN_PROTOCOL` is 14, enforced as a hard floor, so every reachable client predates the floor by four protocol revisions with the field already present.
+A build old enough to lack the field lacks the worktree subcommands entirely and exits non-zero, which is the CLI-never-ran case that already falls back.
+The adapter still reads a missing flag as "reused" rather than trusting that, so an unexpected shape can never talk it into renaming a workspace it did not create.
+
 The complete projection suite ran on 2026-07-21 against Herdr 0.7.4 protocol 16:
 
 ```sh

@@ -1,18 +1,32 @@
 #!/usr/bin/env bash
 # Tear down a finished task: return the treehouse worktree, release the Orca
 # worktree, or retire a secondmate home; kill the recorded runtime endpoint,
+# stop the task's own pinned browser session (see stop_task_browser_session -
+# scoped to the task's own derived session name, never a blanket stop),
 # clear volatile state, refresh/prune the project's clone for PR-based ship
 # tasks, then print a backlog-refresh reminder for ship and scout teardowns
 # (a secondmate teardown prints none, since secondmates are not backlog items).
 # REFUSES if the worktree holds work that has not LANDED, because cleanup
 # hard-resets/removes the worktree and kills its processes. Work has landed when it is
-# reachable from any remote-tracking branch (a fork counts as a remote, so
-# upstream-contribution PRs pushed to a fork satisfy this in any mode), OR - for a
-# normal ship task whose commits are not so reachable - when its PR is merged and
-# GitHub reports a PR head that contains the current local work, or its content is
-# already present in the up-to-date default branch. This recognizes the common
-# squash-merge-then-delete-branch flow, where the branch's own commits live nowhere
-# on a remote yet the change is fully in main.
+# reachable from any remote-tracking branch EXCEPT no-mistakes' own local staging
+# remote (a fork counts as a landed remote, so upstream-contribution PRs pushed to
+# a fork satisfy this in any mode; the staging remote at .no-mistakes/repos/*.git
+# does not, because it is a mid-pipeline artifact of the CURRENT run, not a landed
+# destination - see unlanded_log), OR - for a normal ship task whose commits are
+# not so reachable - when its PR is merged and GitHub reports a PR head that
+# contains the current local work, or its content is already present in the
+# up-to-date default branch. This recognizes the common squash-merge-then-delete-
+# branch flow, where the branch's own commits live nowhere on a remote yet the
+# change is fully in main.
+# mode=direct-PR additionally requires its recorded PR to actually be landed
+# (merged, or its content already in the default branch) even when the branch
+# itself is fully pushed to origin: origin is a real remote, but for direct-PR
+# the worker pushes there only to OPEN the PR, so "on origin" alone does not mean
+# "landed" the way it does for no-mistakes (whose own pipeline pushes to origin
+# only once past every gate) or local-only (which never pushes to a remote at
+# all). Without this, a still-open direct-PR PR was reclaimed as soon as done:
+# was reported, destroying the metadata bin/fm-pr-merge.sh and bin/fm-pr-check.sh
+# need to track its merge.
 # The PR itself is resolved from the task's recorded pr= when present, or - when
 # no pr= was ever recorded (e.g. a yolo-authorized merge on a repo with no PR CI,
 # where the usual "checks green" fm-pr-check.sh trigger never fires) - by looking
@@ -65,6 +79,19 @@
 # with Unable to create '...index.lock': File exists. That lock is usually transient
 # (the dying process finishes or exits within seconds) and must never be force-deleted
 # while a live git process might still own it - the fix is patience, not rm.
+#
+# Spelling boundary (treehouse-symlinked-root): the worktree/home path recorded
+# in meta is the resolved real path (bin/fm-spawn.sh records it via `pwd -P`,
+# load-bearing for worktree-isolation checks elsewhere), but `treehouse`'s own
+# pool registry matches on the literal path it leased under, reached through
+# $HOME/.treehouse, without resolving symlinks. teardown_treehouse_return
+# translates the target through bin/fm-treehouse-spelling-lib.sh's
+# fm_treehouse_recognized_path immediately before every `treehouse return`
+# invocation (initial call and every retry), so a home whose $HOME/.treehouse
+# is itself a symlink still resolves to a spelling treehouse recognizes. That
+# translation is a no-op when no such symlink is involved, and refuses (rather
+# than guessing) when it cannot verify a candidate spelling names the same real
+# directory - see that library's header.
 #
 # On that failure signature only, teardown_treehouse_return:
 #   1. Retries up to FM_TREEHOUSE_RETURN_LOCK_RETRIES times (default 3), waiting
@@ -137,8 +164,7 @@ set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
-# FM_HOME resolution, including the refusal on an ambiently inherited home,
-# has one owner: bin/fm-home-anchor-lib.sh.
+# FM_HOME resolution: see bin/fm-home-anchor-lib.sh ("Why this exists").
 # shellcheck source=bin/fm-home-anchor-lib.sh
 . "$SCRIPT_DIR/fm-home-anchor-lib.sh"
 fm_home_anchor_resolve "$FM_ROOT" || exit 1
@@ -168,10 +194,18 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
 # shellcheck source=bin/fm-secondmate-parent-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-parent-lib.sh"
-# shellcheck source=bin/fm-wake-lib.sh
-. "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
+# Translates a resolved real worktree/home path to the spelling `treehouse`'s
+# own pool registry recognizes, at the boundary where teardown_treehouse_return
+# invokes the `treehouse` CLI. See that file's header for why this exists.
+# shellcheck source=bin/fm-treehouse-spelling-lib.sh
+. "$SCRIPT_DIR/fm-treehouse-spelling-lib.sh"
+# The pinned browser session name has one owner, shared with bin/fm-brief.sh
+# (which briefs it) and bin/fm-browser-sweep.sh (which decides who still owns
+# one). Deriving it a second time here is how a stop stops nothing.
+# shellcheck source=bin/fm-browser-session-lib.sh
+. "$SCRIPT_DIR/fm-browser-session-lib.sh"
 if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
   echo "error: invalid teardown request" >&2
   exit 2
@@ -1064,11 +1098,20 @@ cleanup_stale_lock_for_safety_check() {
 # stale git index.lock left by a killed crew process. See the script header.
 teardown_treehouse_return() {
   local dir=$1 cd_dir=$2 label=$3 post_cleanup_check=${4:-}
-  local out lock attempt=0 max_retries lock_desc
+  local out lock attempt=0 max_retries lock_desc treehouse_dir
+
+  # Translate once, up front: every invocation below (initial call and every
+  # retry) must hand treehouse the spelling its registry recognizes, not the
+  # resolved real path meta records. See the script header
+  # ("Spelling boundary") and bin/fm-treehouse-spelling-lib.sh.
+  treehouse_dir=$(fm_treehouse_recognized_path "$dir") || {
+    echo "teardown: cannot establish a treehouse-recognized spelling for $label $dir; refusing rather than guessing" >&2
+    return 1
+  }
 
   # Capture stdout+stderr so non-lock failures stay visible and lock failures can
   # be matched by signature even when the lock file is already gone mid-check.
-  if out=$( ( cd "$cd_dir" && treehouse return --force "$dir" ) 2>&1 ); then
+  if out=$( ( cd "$cd_dir" && treehouse return --force "$treehouse_dir" ) 2>&1 ); then
     [ -n "$out" ] && printf '%s\n' "$out"
     return 0
   fi
@@ -1093,7 +1136,7 @@ teardown_treehouse_return() {
     echo "teardown: $label return failed with transient git lock ($lock_desc); waiting ${TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS}s and retrying ($attempt/${max_retries})" >&2
     sleep "$TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS"
 
-    if out=$( ( cd "$cd_dir" && treehouse return --force "$dir" ) 2>&1 ); then
+    if out=$( ( cd "$cd_dir" && treehouse return --force "$treehouse_dir" ) 2>&1 ); then
       [ -n "$out" ] && printf '%s\n' "$out"
       echo "teardown: $label return succeeded on retry; lock cleared on its own" >&2
       return 0
@@ -1120,7 +1163,7 @@ teardown_treehouse_return() {
           return 1
         fi
       fi
-      if out=$( ( cd "$cd_dir" && treehouse return --force "$dir" ) 2>&1 ); then
+      if out=$( ( cd "$cd_dir" && treehouse return --force "$treehouse_dir" ) 2>&1 ); then
         [ -n "$out" ] && printf '%s\n' "$out"
         echo "teardown: $label return succeeded after stale-lock cleanup" >&2
         return 0
@@ -1136,6 +1179,34 @@ teardown_treehouse_return() {
 
   echo "teardown: $label return failed: git index.lock signature persisted across ${max_retries} retries (waiting ${TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS}s each) even after the lock file disappeared" >&2
   return 1
+}
+
+# Names of $WT's remotes whose URL is no-mistakes' own local staging repo
+# (same unspoofable path pattern as fm-gate-refuse-lib.sh's gate-agent
+# detection: */.no-mistakes/repos/*.git). A push there is a mid-run pipeline
+# artifact, never a landed destination.
+staging_remote_names() {
+  local name url
+  git -C "$WT" remote 2>/dev/null | while IFS= read -r name; do
+    url=$(git -C "$WT" remote get-url "$name" 2>/dev/null) || continue
+    case "$url" in
+      */.no-mistakes/repos/*.git) printf '%s\n' "$name" ;;
+    esac
+  done
+}
+
+# Like `git log HEAD --not --remotes`, except a push to the staging remote
+# above never counts as covering HEAD - closes the gap where an in-flight
+# no-mistakes run's own intermediate push satisfied "reachable from a remote"
+# and unlocked teardown of work that had not actually landed anywhere durable.
+unlanded_log() {
+  local args=(log --oneline HEAD --not) name
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    args+=(--exclude="$name/*")
+  done < <(staging_remote_names)
+  args+=(--remotes --)
+  git -C "$WT" "${args[@]}" 2>/dev/null
 }
 
 validate_worktree_teardown_safety() {
@@ -1156,7 +1227,7 @@ validate_worktree_teardown_safety() {
   fi
   dirty=$(printf '%s\n' "$dirty_raw" | grep -vE '^\?\? (\.claude/|\.fm-(grok|kimi)-turnend$)' | head -1 || true)
 
-  if ! unpushed_raw=$(git -C "$WT" log --oneline HEAD --not --remotes -- 2>/dev/null); then
+  if ! unpushed_raw=$(unlanded_log); then
     if worktree_safety_blocked_by_lock "commits not on a remote"; then
       return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
     fi
@@ -1199,6 +1270,24 @@ validate_worktree_teardown_safety() {
       echo "REFUSED: worktree $WT has work not on any remote and not landed." >&2
       printf 'unpushed commits:\n%s\n' "$unpushed" >&2
       echo "Push the branch, land its PR, or get the captain's explicit OK to discard, then --force." >&2
+      return 1
+    fi
+  elif [ "$MODE" = direct-PR ]; then
+    # Nothing dirty and nothing unpushed: the branch is fully on a real remote
+    # (usually origin). That is enough to call it landed for no-mistakes (whose
+    # own pipeline only pushes there once past every gate) and local-only (which
+    # never pushes to a remote at all), but not for direct-PR, where the worker
+    # pushes to open the PR long before it is merged. Require the same
+    # merged-or-in-default proof the unpushed branch above requires.
+    branch=${TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY:-}
+    if [ -z "$branch" ]; then
+      branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
+      TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY=$branch
+    fi
+    if ! work_is_landed "$branch"; then
+      echo "REFUSED: direct-PR worktree $WT is pushed but its PR is not merged." >&2
+      [ -n "$PR_URL" ] && echo "recorded PR: $PR_URL" >&2
+      echo "Merge the PR, or get the captain's explicit OK to discard, then --force." >&2
       return 1
     fi
   fi
@@ -1672,6 +1761,53 @@ safe_rm_rf() {
   local target=$1 label=$2
   validate_removal_target "$target" "$label" >/dev/null || return 1
   rm -rf -- "$target"
+}
+
+# Best-effort stop of the browser session bin/fm-brief.sh pins to a task.
+# chrome-devtools-axi's bridge calls setsid() at startup, so it sits in neither
+# the endpoint's process group nor its session: closing the pane, returning the
+# worktree, and removing the worktree's files all miss it, and it keeps a
+# headless Chrome tree resident afterwards. Its own `stop` is the only thing
+# that ends it.
+#
+# SCOPED BY SESSION NAME ONLY. A bare `chrome-devtools-axi stop` would stop the
+# default session, which is a sibling home's live browser - the same class of
+# mistake AGENTS.md section 8 forbids for `pkill -f bin/fm-watch.sh`. The name
+# is derived from the task id AND its owning home through the same owner
+# bin/fm-brief.sh briefed it with, so this can only ever reach the session this
+# task's own brief told it to use, and can never miss it because the two
+# spellings drifted. The home is part of it because task ids are unique only
+# within a home while the browser session namespace is host-global: two homes
+# filing the same id would otherwise share one bridge, and this stop would kill
+# the other home's live worker.
+#
+# Failure is never fatal: the tool may not be installed, the task may never have
+# opened a browser, and a bridge that is already gone is the outcome we wanted.
+# It is time-bounded because a wedged bridge must not wedge cleanup.
+#
+# It is also gated on the session's record still naming a LIVE BRIDGE, because
+# the tool's own stop is not identity-guarded: it reads the recorded pid, checks
+# only that it is alive, and SIGTERMs then SIGKILLs it, with the bridge test
+# gating nothing but whether the process group goes too. A bridge that crashed
+# or was killed rather than stopped leaves its bridge.pid behind, so a stale
+# record is the ordinary case, and once that pid is reused this would kill an
+# unrelated process with no operator in the loop. That is the same invariant
+# bin/fm-browser-sweep.sh holds before it so much as REPORTS a session, and it
+# has one owner in bin/fm-browser-session-lib.sh rather than a second spelling
+# here. Nothing is given up by asking: with no record or a dead pid, the tool's
+# own stop does nothing anyway.
+stop_task_browser_session() {
+  local task_id=$1 home=${2:-$FM_HOME} session
+  [ -n "$task_id" ] || return 0
+  command -v chrome-devtools-axi >/dev/null 2>&1 || return 0
+  session=$(fm_browser_session_name "$task_id" "$home") || return 0
+  fm_browser_session_has_live_bridge "$session" || return 0
+  if command -v timeout >/dev/null 2>&1; then
+    CHROME_DEVTOOLS_AXI_SESSION="$session" timeout 20 chrome-devtools-axi stop >/dev/null 2>&1 || true
+  else
+    CHROME_DEVTOOLS_AXI_SESSION="$session" chrome-devtools-axi stop >/dev/null 2>&1 || true
+  fi
+  return 0
 }
 
 safe_rm_rf_child_worktree() {
@@ -2220,6 +2356,10 @@ cleanup_firstmate_home_children() {
         fm_backend_kill "$child_backend" "$child_t" "$(meta_value "$child_meta" zellij_tab_id)" "fm-$child_id" 2>/dev/null || true
       fi
     fi
+    # As with the zellij tab titles above, the session name is scoped by the
+    # owning home, so a child's browser must be derived as that child home and
+    # never as the parent doing the retiring.
+    stop_task_browser_session "$child_id" "$home"
     if [ "$child_kind" = secondmate ]; then
       child_home=$(meta_value "$child_meta" home)
       [ -n "$child_home" ] || child_home=$child_wt
@@ -2504,6 +2644,10 @@ elif [ "$BACKEND" = herdr ]; then
 elif [ "$BACKEND" != orca ]; then
   fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
 fi
+# Alongside the endpoint kill above, and unconditional because the Orca branch
+# closes its terminal earlier: a detached browser bridge outlives every one of
+# those paths.
+stop_task_browser_session "$ID"
 if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
   if [ "$(fm_backend_herdr_pane_agent_state "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_PANE")" = dead ]; then
     rm -f "$HERDR_PRESENTATION_JOURNAL"

@@ -2395,65 +2395,13 @@ test_config_reread_bootstrap_path_and_spawn_flexibility() {
   pass "B18 bootstrap config reread path works; spawn flexibility remains defaults-only"
 }
 
-test_bootstrap_respawns_before_config_reread() {
-  local w head fakebin log report stale
-  w=$(new_world config-reread-respawn-order)
-  head=$(git -C "$w/main" rev-parse HEAD)
-  add_sm_worktree "$w" sm "$head"
-  mkdir -p "$w/sm/config" "$w/sm/data" "$w/sm/state"
-  # The dead mate this test respawns needs pending work of its own: under the
-  # fleet-startup launch policy (captain decision 2026-08-03) a dead secondmate
-  # with an empty backlog is deliberately left down. This test is about respawn
-  # ORDER versus the config reread, not about that gate.
-  printf '## In flight\n\n## Queued\n- [ ] backlog-item - a queued item for sm\n\n## Done\n' \
-    > "$w/sm/data/backlog.md"
-  printf 'harness=codex\n' >> "$w/home/state/sm.meta"
-  printf '%s' old > "$w/sm/config/crew-harness"
-  printf '%s' codex > "$w/home/config/crew-harness"
-  report="$w/sm/state/stale-reread.report"
-  printf '%s\n' $'crew-harness\tpushed\t' > "$report"
-  stale="$w/sm/state/.fm-inherited-config-reread.stale-generation"
-  fm_config_write_reread_instruction "$w/sm" "$report" "$stale" \
-    || fail "could not create stale reread generation"
-  fm_config_reread_mark_pending "$stale" "$stale.pending" \
-    || fail "could not create stale reread marker"
-  log="$w/config-reread-respawn-order.log"
-
-cat > "$w/main/bin/fm-spawn.sh" <<SH
-#!/usr/bin/env bash
-. '$w/main/bin/fm-config-inherit-lib.sh'
-printf '%s' spawn >> '$log'
-printf '%s' codex > '$w/sm/config/crew-harness'
-printf '%s\n' 7500 > '$w/sm/config/startup-memory-budget'
-SH
-  chmod +x "$w/main/bin/fm-spawn.sh"
-  fakebin=$(make_fake_toolchain "$w")
-  cat > "$fakebin/tmux" <<SH
-#!/usr/bin/env bash
-case "\$*" in
-  *display-message*'#{pane_current_command}'*) printf '%s' zsh ;;
-  *display-message*'#{pane_id}'*) printf '%s' '%1' ;;
-  *display-message*'#{cursor_y}'*) printf '%s' 0 ;;
-  *capture-pane*) printf '❯\n'
-    ;;
-  *send-keys*) printf '%s' send-keys >> '$log' ;;
-esac
-SH
-  chmod +x "$fakebin/tmux"
-  PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
-    FM_SEND_SETTLE=0 FM_FAKE_TMUX_LOG="$log" \
-    "$ROOT/bin/fm-bootstrap.sh" >/dev/null 2>&1
-  assert_contains "$(cat "$log")" "spawn" \
-    "bootstrap did not respawn the dead secondmate"
-  assert_not_contains "$(cat "$log")" "send-keys" \
-    "bootstrap nudged a secondmate before its respawn completed"
-  assert_present "$stale" "bootstrap removed the stale generation before relaunch handling"
-  assert_present "$stale.pending" "bootstrap removed the stale marker before relaunch handling"
-  fm_config_reread_discard_pending "$w/sm" || fail "could not clean respawn test generation"
-  assert_no_reread_pending "$w/sm"
-  assert_no_reread_instructions "$w/sm"
-  pass "B19 bootstrap respawns before inherited-config reread"
-}
+# B19 (bootstrap respawns a dead secondmate before inherited-config reread) is
+# retired: it exercised secondmate_liveness_sweep respawning a dead secondmate
+# during the session-start bootstrap run, a mechanic session start no longer
+# has under the 2026-08-22 never-relaunch-at-session-start policy
+# (tests/fm-secondmate-liveness.test.sh's
+# test_sweep_never_respawns_confirmed_dead_secondmate and siblings cover that
+# policy directly).
 
 test_spawn_quarantines_pending_rereads_on_cleanup_failure() {
   local w sm report stale fakebin real_rm out status launchlog quarantine_root quarantined_count
@@ -2572,7 +2520,6 @@ test_config_reread_cleanup_runs_after_mixed_delivery_failure
 test_config_reread_stops_after_failed_generation
 test_config_reread_skips_when_unchanged_and_reads_after_push
 test_config_reread_bootstrap_path_and_spawn_flexibility
-test_bootstrap_respawns_before_config_reread
 test_spawn_quarantines_pending_rereads_on_cleanup_failure
 test_bootstrap_detect_only_does_not_create_state
 

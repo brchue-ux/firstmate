@@ -70,8 +70,7 @@
 # pre-P3 behavior when a test does not care about home-specific labeling).
 FM_BACKEND_HERDR_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-${FM_ROOT:-$FM_BACKEND_HERDR_ROOT}}"
-# FM_HOME resolution, including the refusal on an ambiently inherited home,
-# has one owner: bin/fm-home-anchor-lib.sh.
+# FM_HOME resolution: see bin/fm-home-anchor-lib.sh ("Why this exists").
 # shellcheck source=bin/fm-home-anchor-lib.sh
 . "$FM_BACKEND_HERDR_ROOT/bin/fm-home-anchor-lib.sh"
 fm_home_anchor_resolve "$FM_ROOT" || exit 1
@@ -145,6 +144,11 @@ FM_BACKEND_HERDR_SECONDMATE_MARKER=".fm-secondmate-home"
 # spawn can replace one verified agent-free husk under the session lock.
 # No send, capture, Treehouse, or general task-ownership path reads it.
 FM_BACKEND_HERDR_PRESENTATION_JOURNAL_SUFFIX=".herdr-presentation"
+# Metadata source firstmate reports display-only pane tokens under. Herdr keys
+# report sequences per source but merges every source's tokens into one map, so
+# a distinct source keeps firstmate's `owner` token from clobbering, or being
+# clobbered by, tokens a statusline script publishes under its own source.
+FM_BACKEND_HERDR_METADATA_SOURCE="firstmate-spawn"
 
 # The config item a home writes to opt out of, or explicitly in to, the
 # projection.
@@ -1689,6 +1693,206 @@ fm_backend_herdr_workspace_prune_seeded_default_tab() {  # <session> <workspace_
   fi
 }
 
+# fm_backend_herdr_worktree_kind: classify <cwd> as "linked" (a `git worktree
+# add` checkout) or "main" (a repository's primary checkout), failing when it
+# is not a git work tree at all or git cannot resolve it. A linked worktree's
+# per-worktree git dir (.git/worktrees/<name>) differs from the shared common
+# dir (.git); a main checkout's two are the same path. --path-format=absolute
+# keeps both sides comparable regardless of <cwd> (bin/fm-ff-lib.sh uses the
+# same form). Herdr derives its own repo grouping from exactly this
+# distinction, so this mirrors herdr's own notion of parent versus child.
+fm_backend_herdr_worktree_kind() {  # <cwd>
+  local cwd=$1 gitdir commondir
+  command -v git >/dev/null 2>&1 || return 1
+  git -C "$cwd" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 1
+  gitdir=$(git -C "$cwd" rev-parse --path-format=absolute --git-dir 2>/dev/null) || return 1
+  commondir=$(git -C "$cwd" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
+  [ -n "$gitdir" ] && [ -n "$commondir" ] || return 1
+  if [ "$gitdir" != "$commondir" ]; then printf 'linked'; else printf 'main'; fi
+}
+
+# fm_backend_herdr_worktree_parent_workspace: echo the workspace id herdr
+# already treats as the REPO PARENT for <cwd>'s repository, or fail when there
+# is none. Read-only: `worktree list` never creates, adopts, or mutates a
+# workspace (verified against the real binary - probing a session with no
+# workspaces at all leaves the workspace list empty). For a linked-worktree
+# <cwd>, herdr resolves .result.source.source_workspace_id by looking up the
+# workspace open on the repo's MAIN checkout, which is exactly the parent a
+# worktree action must originate from.
+fm_backend_herdr_worktree_parent_workspace() {  # <session> <cwd>
+  local session=$1 cwd=$2 out parent
+  out=$(fm_backend_herdr_cli "$session" worktree list --cwd "$cwd" 2>/dev/null) || return 1
+  parent=$(printf '%s' "$out" | jq -r '.result.source.source_workspace_id // empty' 2>/dev/null)
+  [ -n "$parent" ] || return 1
+  printf '%s' "$parent"
+}
+
+# fm_backend_herdr_workspace_create_worktree_backed: create this home's
+# workspace through herdr's WORKTREE path rather than a plain `workspace
+# create`, so the resulting workspace carries a populated `worktree` block.
+# Herdr's sidebar (src/ui/sidebar.rs) groups workspaces by repo key, picks the
+# one member whose worktree is not linked as the un-indented parent, and
+# indents every other member - but it reads that grouping ONLY from the
+# workspace's stored worktree membership. A plain `workspace create --cwd
+# <path>` leaves `worktree` null no matter what the path is, so a home created
+# that way never groups, and neither does anything under it.
+#
+# Both kinds of home go through here, because the grouping needs BOTH sides:
+#
+#   linked worktree (a secondmate home) - opened against an already-resolved
+#     --workspace <parent>. Herdr refuses a worktree action whose source is
+#     itself linked (error linked_worktree_source, "New and open worktree
+#     actions start from the repo parent workspace"), so the action has to
+#     originate from the repo parent's own workspace.
+#   main checkout (the primary home) - opened with --cwd and --path both set to
+#     the home itself, which herdr resolves as target-is-source: it stamps
+#     worktree membership on that one workspace and creates nothing else.
+#
+# Stamping the parent AT CREATION is load-bearing, not cosmetic. A workspace's
+# git identity is otherwise derived from its live panes, and firstmate prunes
+# the home workspace's seeded default tab as soon as the first task tab exists
+# - after which the workspace's only panes sit in task worktrees of other
+# repositories entirely. Verified against the real binary: a parent workspace
+# created with a plain `workspace create --cwd <repo root>` stops resolving as
+# the repo parent the moment that seeded tab is pruned, while stored worktree
+# membership survives it.
+#
+# Sets the same two globals fm_backend_herdr_workspace_ensure documents, and is
+# only ever called by it. EVERY failure path here is a safe fallback to the
+# plain `workspace create --label <label>`, and none of them can ever fail a
+# spawn: grouping is cosmetic, and losing it must never cost the ability to
+# launch an agent.
+#
+# The `worktree open` call carries NO --label at all, so firstmate never
+# DELIBERATELY names anything but through the explicit `workspace rename`
+# below, and only a workspace the call itself reported creating. That is not
+# enough on its own: herdr labels a workspace it creates from the checkout
+# directory's BASENAME, and the primary home's basename is literally
+# "firstmate" - byte-identical to what fm_backend_herdr_workspace_label returns
+# for the primary. So a failed attempt CAN strand a workspace already reading
+# as this home's label (a secondmate home cannot collide this way, since its
+# directory basename is unrelated to its 2ndmate-<id> label). A second
+# workspace under one label makes fm_backend_herdr_workspace_find (label match,
+# head -1) non-deterministic, which is why fm_backend_herdr_workspace_ensure
+# re-runs that find and ADOPTS any match before it mints anything. Every
+# failure below is safe only in combination with that re-find.
+#
+# Fallback is taken when:
+#   - <cwd> is not a git work tree, or is a subdirectory rather than a checkout
+#     root (herdr finds no matching worktree entry and the call errors).
+#   - <cwd> is a linked worktree and no workspace is open on the repo's main
+#     checkout yet. This guard is the load-bearing one: given only --cwd, herdr
+#     would INVENT a parent workspace at the repo root, labelled from the repo
+#     directory's basename. For the firstmate repo that basename is literally
+#     "firstmate", so a stray second workspace would collide with the primary
+#     home's own label. Passing an already-resolved --workspace <parent>
+#     instead makes inventing a parent structurally impossible: herdr only
+#     creates one when it has no source workspace index.
+#   - The CLI call itself failed, including a client too old to have the
+#     worktree subcommands at all (it exits non-zero on an unknown subcommand).
+#   - The response carried no readable workspace id, or no readable
+#     already_open flag.
+#   - herdr ADOPTED a workspace already open at <cwd> (see below).
+#   - The rename failed, leaving a workspace firstmate created but could not
+#     name.
+#
+# Of those, the unreadable response and the failed rename set
+# FM_BACKEND_HERDR_WT_DEGRADE_REASON ("unreadable" / "rename-failed") and, when
+# a workspace id was readable, _WS, rather than reporting here, because what
+# the failure actually cost is not known yet:
+# fm_backend_herdr_report_worktree_degrade says it once the caller's re-find
+# has resolved. An ADOPTION sets no reason and reports nothing: it is the
+# routine, accepted outcome of never relabelling a workspace firstmate did not
+# create, not a fault, and warning on it would fire on ordinary spawns.
+#
+# already_open discipline: herdr reuses an existing workspace whose checkout is
+# <cwd> instead of creating a second one, and reports already_open=true. That
+# workspace is one firstmate did not create - the reachable set is ANY
+# workspace open on that checkout, including one the captain opened by hand -
+# so it is never relabelled and never becomes this home's Space. It serves
+# purely as the grouping parent, and this home's own Space comes from the
+# ordinary label-first create. An UNREADABLE flag is read the same way as
+# true, the conservative direction: firstmate renames only what it is certain
+# it just created. That also keeps FM_BACKEND_HERDR_WS_SEEDED_TAB_ID empty for
+# an adopted workspace, so its tabs can never enter the destructive
+# default-tab prune path.
+fm_backend_herdr_workspace_create_worktree_backed() {  # <session> <cwd> <label>
+  local session=$1 cwd=$2 label=$3 kind parent out wsid already
+  kind=$(fm_backend_herdr_worktree_kind "$cwd") || return 1
+  if [ "$kind" = linked ]; then
+    parent=$(fm_backend_herdr_worktree_parent_workspace "$session" "$cwd") || return 1
+    [ -n "$parent" ] || return 1
+    out=$(fm_backend_herdr_cli "$session" worktree open \
+      --workspace "$parent" --path "$cwd" --no-focus 2>/dev/null) || return 1
+  else
+    out=$(fm_backend_herdr_cli "$session" worktree open \
+      --cwd "$cwd" --path "$cwd" --no-focus 2>/dev/null) || return 1
+  fi
+  wsid=$(printf '%s' "$out" | jq -r '.result.workspace.workspace_id // empty' 2>/dev/null)
+  # `// empty` cannot read already_open: jq's `//` treats false as absent, and
+  # false is the one value that says this call owns the workspace. Read a
+  # MISSING flag as "adopted" instead, so an unreadable response can never talk
+  # firstmate into renaming a workspace it did not create.
+  already=$(printf '%s' "$out" \
+    | jq -r 'if (.result.already_open | type) == "boolean" then (.result.already_open | tostring) else "unknown" end' 2>/dev/null)
+  if [ -z "$wsid" ] || [ "$already" = unknown ]; then
+    FM_BACKEND_HERDR_WT_DEGRADE_REASON=unreadable
+    FM_BACKEND_HERDR_WT_DEGRADE_WS=$wsid
+    return 1
+  fi
+  [ "$already" = false ] || return 1
+  fm_backend_herdr_cli "$session" workspace rename "$wsid" "$label" >/dev/null 2>&1 || {
+    FM_BACKEND_HERDR_WT_DEGRADE_REASON=rename-failed
+    FM_BACKEND_HERDR_WT_DEGRADE_WS=$wsid
+    return 1
+  }
+  FM_BACKEND_HERDR_WS_ID=$wsid
+  FM_BACKEND_HERDR_WS_SEEDED_TAB_ID=$(printf '%s' "$out" | jq -r '.result.tab.tab_id // empty' 2>/dev/null)
+  return 0
+}
+
+# fm_backend_herdr_report_worktree_degrade: report what a failed worktree-backed
+# attempt actually cost, AFTER fm_backend_herdr_workspace_ensure's re-find has
+# resolved. Which outcome a failure produces is not knowable at the point it
+# happens: the same rename failure either leaves a stranded workspace behind,
+# or - when herdr's own basename-derived name already reads as this home's
+# label - leaves the workspace the re-find then ADOPTS as this home's Space.
+# Advice written before that resolves would tell an operator to rename or
+# delete the live home Space, which is why nothing is emitted until here.
+# <adopted> is the workspace the re-find matched, empty when it matched none.
+fm_backend_herdr_report_worktree_degrade() {  # <cwd> <label> <adopted_workspace_id>
+  local cwd=$1 label=$2 adopted=$3 stranded=${FM_BACKEND_HERDR_WT_DEGRADE_WS:-} saw
+  case ${FM_BACKEND_HERDR_WT_DEGRADE_REASON:-} in
+    unreadable)
+      # The condition that got here is an OR, so say which half failed. With a
+      # readable id, firstmate still could not tell whether that workspace is
+      # one this call created or one it merely reused, so the id is named but
+      # never carries rename-or-delete advice.
+      if [ -n "$stranded" ]; then
+        saw="reported workspace $stranded with no readable already_open flag, so firstmate could not tell whether it created that workspace and left its name alone"
+      else
+        saw="reported no readable workspace id"
+      fi
+      if [ -n "$adopted" ] && [ "$adopted" = "$stranded" ]; then
+        echo "warning: herdr worktree open exited 0 for $cwd but $saw; herdr's own name for it already reads as '$label', so it IS this home's space - worktree-backed, grouped and in use. No action needed." >&2
+      elif [ -n "$adopted" ]; then
+        echo "warning: herdr worktree open exited 0 for $cwd but $saw; firstmate named nothing itself, and the existing workspace labelled '$label' ($adopted) is this home's space" >&2
+      else
+        echo "warning: herdr worktree open exited 0 for $cwd but $saw; nothing was named '$label' and this home's space falls back to the flat, ungrouped create" >&2
+      fi
+      ;;
+    rename-failed)
+      if [ -n "$adopted" ] && [ "$adopted" = "$stranded" ]; then
+        echo "warning: herdr created workspace $adopted at $cwd but firstmate could not apply the label '$label' to it; herdr's own name for it already reads as '$label', so it IS this home's space - worktree-backed, grouped and in use. No action needed." >&2
+      elif [ -n "$adopted" ]; then
+        echo "warning: herdr created workspace $stranded at $cwd but it could not be renamed to '$label'; this home's space is $adopted instead, and $stranded is left over at that checkout under herdr's own name - rename or delete $stranded, never $adopted" >&2
+      else
+        echo "warning: herdr created workspace $stranded at $cwd but it could not be renamed to '$label'; it keeps herdr's own name and stays the repo-parent row at that checkout, and this home's space falls back to the flat, ungrouped create until $stranded is renamed to '$label' or deleted" >&2
+      fi
+      ;;
+  esac
+}
+
 # fm_backend_herdr_workspace_ensure: the workspace this spawn's task tab
 # belongs in inside <session> - the launching agent's own exact workspace when
 # it has one, otherwise this HOME's persistent workspace, created in <cwd> if
@@ -1705,7 +1909,10 @@ fm_backend_herdr_workspace_prune_seeded_default_tab() {  # <session> <workspace_
 #                                      `workspace create` response's
 #                                      `.result.tab.tab_id` (verified
 #                                      empirically against the real binary -
-#                                      no follow-up tab-list call needed).
+#                                      no follow-up tab-list call needed), or
+#                                      from the equivalent field of the
+#                                      `worktree open` response when the
+#                                      worktree-backed path created it.
 #                                      Empty whenever this call instead
 #                                      ADOPTED a pre-existing workspace -
 #                                      either the launcher's own
@@ -1755,6 +1962,8 @@ fm_backend_herdr_workspace_ensure() {  # <session> <cwd> [<launcher-relationship
   local session=$1 cwd=$2 relationship=${3:-launcher-home} wsid out label matches count status
   FM_BACKEND_HERDR_WS_ID=""
   FM_BACKEND_HERDR_WS_SEEDED_TAB_ID=""
+  FM_BACKEND_HERDR_WT_DEGRADE_REASON=""
+  FM_BACKEND_HERDR_WT_DEGRADE_WS=""
   if [ "$relationship" = launcher-home ]; then
     fm_backend_herdr_launcher_identity "$session" && status=0 || status=$?
     case "$status" in
@@ -1775,6 +1984,34 @@ fm_backend_herdr_workspace_ensure() {  # <session> <cwd> [<launcher-relationship
     return 3
   fi
   wsid=${matches%%$'\n'*}
+  if [ -n "$wsid" ]; then
+    FM_BACKEND_HERDR_WS_ID=$wsid
+    printf '%s' "$wsid"
+    return 0
+  fi
+  # Preferred shape: a worktree-BACKED workspace, so herdr's sidebar renders
+  # this home indented under its repo parent. Every way it can fail degrades to
+  # the plain create below, and never fails the spawn
+  # (fm_backend_herdr_workspace_create_worktree_backed).
+  if fm_backend_herdr_workspace_create_worktree_backed "$session" "$cwd" "$label"; then
+    printf '%s' "$FM_BACKEND_HERDR_WS_ID"
+    return 0
+  fi
+  # A failed attempt can leave a workspace behind that ALREADY carries this
+  # home's label, because herdr names one it creates from the checkout
+  # directory's basename and the primary home's basename is literally
+  # "firstmate". Re-running the label find here is what keeps the plain create
+  # below from minting a second workspace under one label. This spawn-time
+  # lookup stays ambiguity-safe like the one above (fm_backend_herdr_workspace_find
+  # is deliberately not used here - see its own header comment), and a genuine
+  # collision degrades to the plain create rather than guessing. A resolved
+  # match is ADOPTED, so FM_BACKEND_HERDR_WS_SEEDED_TAB_ID stays empty and none
+  # of its tabs can enter the destructive default-tab prune path.
+  matches=$(fm_backend_herdr_workspace_find_all "$session")
+  count=$(printf '%s' "$matches" | grep -c '[^[:space:]]' || true)
+  wsid=""
+  [ "$count" != 1 ] || wsid=${matches%%$'\n'*}
+  fm_backend_herdr_report_worktree_degrade "$cwd" "$label" "$wsid"
   if [ -n "$wsid" ]; then
     FM_BACKEND_HERDR_WS_ID=$wsid
     printf '%s' "$wsid"
@@ -3037,6 +3274,32 @@ fm_backend_herdr_pane_for_tab() {  # <session> <workspace_id> <tab_id>
   panes=$(fm_backend_herdr_cli "$session" pane list --workspace "$wsid" 2>/dev/null) || return 1
   printf '%s' "$panes" | jq -r --arg tab "$tab_id" \
     '.result.panes[]? | select(.tab_id == $tab) | .pane_id' 2>/dev/null | head -1
+}
+
+# fm_backend_herdr_report_owner_token: stamp <owner-label> onto <pane_id> as
+# the display-only `owner` metadata token, naming the mate that called this
+# worker. Herdr's agents panel can render it as a custom $owner row token and
+# filter on its EXISTENCE, so the token's absence is what identifies a mate:
+# only workers (crewmates and scouts) ever carry it, never a firstmate or
+# secondmate pane. Callers enforce that; this function stamps whatever it is
+# given.
+#
+# Firstmate has to publish this at spawn because a worker cannot name its own
+# parent: fm-spawn.sh puts FM_HOME on the launch line only for a secondmate, so
+# a crewmate's or scout's environment carries no FM_HOME for a statusline
+# script to derive an owner from.
+#
+# Display-only and strictly best effort: a failure here never fails a spawn,
+# mirroring the fm_backend_herdr_kill `|| true` contract. Reported with no TTL
+# so the token lives as long as the pane rather than expiring mid-task, and
+# under firstmate's own metadata source so it merges with, rather than
+# replaces, tokens any statusline script publishes under its own source.
+fm_backend_herdr_report_owner_token() {  # <session> <pane_id> <owner-label>
+  local session=$1 pane=$2 owner=$3
+  [ -n "$pane" ] && [ -n "$owner" ] || return 0
+  fm_backend_herdr_cli "$session" pane report-metadata "$pane" \
+    --source "$FM_BACKEND_HERDR_METADATA_SOURCE" --token "owner=$owner" >/dev/null 2>&1 || true
+  return 0
 }
 
 # fm_backend_herdr_resolve_bare_selector: the live-tab-listing fallback for an

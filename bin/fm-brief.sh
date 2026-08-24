@@ -67,6 +67,16 @@
 # report rather than a merge, and a charter is not a delivery contract.
 # There is no --yolo flag here. The worker never owns approval decisions, so yolo is
 # a spawn-time and firstmate-side input only (AGENTS.md section 7).
+# Every crewmate scaffold pins the task's browser session to the name
+# bin/fm-browser-session-lib.sh derives for the task and this home
+# (fm-<task-id>-<home tag>, shortened only when that would exceed the tool's
+# 64-character cap) and requires the worker to stop it before reporting a
+# terminal state.
+# The chrome-devtools-axi bridge detaches
+# itself from the pane, so it survives teardown's kills and holds a headless
+# Chrome tree open indefinitely; the session name is the only handle left, and
+# pinning it is what lets bin/fm-teardown.sh stop this task's browser and no
+# other. bin/fm-browser-sweep.sh is the backstop for workers that never report.
 # Every scaffold's status protocol distinguishes the configured
 # declared-external-wait verb (FM_CLASSIFY_PAUSED_VERB, default "paused") from
 # "blocked:": pause for a known external wait expected to clear on its own,
@@ -98,6 +108,12 @@ esac
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 PAUSED_VERB=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
+# The pinned browser session name has one owner, shared with bin/fm-teardown.sh
+# (which stops it) and bin/fm-browser-sweep.sh (which decides who still owns
+# one). This file emits the literal it computes, and never spells the rule out
+# a second time.
+# shellcheck source=bin/fm-browser-session-lib.sh
+. "$SCRIPT_DIR/fm-browser-session-lib.sh"
 
 resolve_directory_input() {
   local name=$1 path=$2 resolved
@@ -112,8 +128,7 @@ resolve_directory_input() {
 }
 
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
-# FM_HOME resolution, including the refusal on an ambiently inherited home,
-# has one owner: bin/fm-home-anchor-lib.sh.
+# FM_HOME resolution: see bin/fm-home-anchor-lib.sh ("Why this exists").
 # shellcheck source=bin/fm-home-anchor-lib.sh
 . "$SCRIPT_DIR/fm-home-anchor-lib.sh"
 fm_home_anchor_resolve "$FM_ROOT" || exit 1
@@ -213,6 +228,32 @@ shell_quote() {
 
 STATUS_FILE=$(shell_quote "$STATE/$ID.status")
 
+# The browser rule, stated once for both the scout and ship scaffolds.
+# chrome-devtools-axi starts a bridge that detaches itself from the pane, so it
+# survives the pane closing, the worktree being returned, and every kill
+# teardown performs; the session name is the only handle anything has on it
+# afterwards. Pinning it to the task id makes the bridge attributable and lets
+# teardown stop exactly this task's session and no other, and asking the worker
+# to stop it before reporting closes the case where teardown never runs.
+#
+# The name itself is derived, never spelled out here: the tool refuses a name
+# over 64 characters, and a task id may be 64 characters on its own, so a
+# hand-written "fm-$ID" would brief a name every one of the worker's calls
+# rejects. It also carries this home's tag, because the browser session
+# namespace is host-global while a task id is unique only inside its own home -
+# two homes filing the same id would otherwise brief both crewmates onto one
+# bridge. bin/fm-browser-session-lib.sh owns that rule for teardown and the
+# sweep too, and this emits the same computed literal into the brief.
+BROWSER_SESSION=$(fm_browser_session_name "$ID" "$FM_HOME") || {
+  echo "error: no browser session name can be derived for task id: $ID" >&2
+  exit 1
+}
+BROWSER_RULE="3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
+   Prefix EVERY chrome-devtools-axi call with \`CHROME_DEVTOOLS_AXI_SESSION=$BROWSER_SESSION\` so the browser it
+   starts belongs to this task; an unpinned call leaves behind a browser nobody can attribute or stop.
+   If you used the tool at all, run \`CHROME_DEVTOOLS_AXI_SESSION=$BROWSER_SESSION chrome-devtools-axi stop\`
+   before you append \`done:\` or \`failed:\` - it outlives your worktree otherwise."
+
 if [ "$KIND" = secondmate ]; then
 SECONDMATE_PROJECTS=""
 idx=1
@@ -229,7 +270,8 @@ SECONDMATE_CHARTER=${FM_SECONDMATE_CHARTER:-"{TASK}"}
 SECONDMATE_SCOPE=${FM_SECONDMATE_SCOPE:-${FM_SECONDMATE_CHARTER:-"{TASK}"}}
 if [ "$NO_PROJECTS" -eq 1 ]; then
   PROJECT_CLONES_BODY="None. This is a project-less domain: its subject is the firstmate repo this home lives in, so it needs no separate clones under \`projects/\`; its crews take pooled worktrees of that firstmate repo."
-  PROJECT_CLONES_NOTE="This domain has no separate project clones: its subject is the firstmate repo this home lives in, and its crews take pooled worktrees of that repo."
+  # The Project clones body above already states this, so the operating model adds nothing here.
+  PROJECT_CLONES_NOTE=""
 else
   PROJECT_CLONES_BODY=$(printf '%s\n' "$SECONDMATE_PROJECTS" | tr ' ' '\n' | sed 's/^/- /')
   PROJECT_CLONES_NOTE="The projects above are local clones for work you supervise; they are not an exclusive ownership claim."
@@ -259,8 +301,7 @@ Act only on tasks the main firstmate routes to you.
 Never start a survey, audit, or "find improvements" sweep on your own initiative; that is not your job and it is unwanted.
 
 # Requests from the main firstmate
-You are a firstmate in your own home, so an incoming message reaches you in your own chat.
-You must distinguish who it is from, because the answer goes to a different place.
+You are a firstmate in your own home, so an incoming message reaches you in your own chat, and you must distinguish who it is from.
 A request relayed to you by the main firstmate is tagged with a leading \`$FM_FROMFIRST_LABEL\` marker followed by an invisible system separator; this marker is untypable, so a human never produces it.
 When a message carries that marker, do the work, then respond via the STATUS/ESCALATION path below, never only in this chat: the main firstmate does not read your chat, so a chat-only reply is lost.
 Marked requests also carry a privacy-safe \`corr=<id>\` token after the marker; include that exact token in your parent status reply (or in the status pointer to a detailed doc) so the parent can correlate the answer.
@@ -369,7 +410,7 @@ The report is the only thing that survives, so anything worth keeping must be in
 # Rules
 1. Never push to any remote and never open a PR.
 2. Stay inside this worktree; the only files you may write outside it are the report and the status file below.
-3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
+$BROWSER_RULE
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
@@ -462,16 +503,10 @@ creation, but if you ever need to run \`gh-axi pr create\` yourself, always pass
 \`--repo $PR_REPO --base $PR_BASE\` explicitly - never a bare \`gh pr create\`, which can silently
 target the wrong repository.
 
-You drive no-mistakes by responding to its gates, not by implementing fixes.
-Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
+You drive no-mistakes by responding to its gates, not by implementing fixes; its own guidance is authoritative and version-matched (\`no-mistakes axi run --help\` and the \`help\` lines in each \`axi\` response).
 When starting no-mistakes, make \`--intent\` preserve all relevant content from this brief's \`# Task\` section plus every later accepted Firstmate requirement, clarification, constraint, exclusion, and supersession, carrying only each requirement's current accepted form; retain direct requirements instead of substituting a diff summary, and exclude generic operational, status, delivery, and other scaffold boilerplate unless it is task-specific.
 Do not hand-edit, commit, or fix findings yourself while a run is active - the pipeline applies every fix.
-
-Two firstmate-specific rules layer on top of that guidance:
-- ask-user findings are never yours to answer: escalate to firstmate (rule 6) and stop.
-  Firstmate applies the authority contract in its \`AGENTS.md\` and obtains any required captain decision.
-  When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
-- Avoid \`--yes\`: it would silently bypass firstmate's authority check and any required captain escalation.
+Two firstmate rules layer on top: ask-user findings are never yours to answer - escalate to firstmate (rule 6), stop, and when the decision returns feed it to the gate with \`no-mistakes axi respond\` instead of answering it yourself or routing it to "the user". Firstmate applies the authority contract in its \`AGENTS.md\` and obtains any required captain decision. Avoid \`--yes\`, which would silently bypass firstmate's authority check and any required captain escalation.
 
 After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
 EOF
@@ -507,7 +542,7 @@ If the top-level path is firstmate's own main repository checkout, or not the wo
 # Rules
 $RULE1
 2. Stay inside this worktree; modify nothing outside it.
-3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
+$BROWSER_RULE
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
@@ -531,11 +566,8 @@ $RULE1
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
 
 # Project memory
-If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.
-Record only project knowledge useful to almost every future session.
-For anything the codebase already shows, prefer a pointer to the authoritative file, command, or doc over copying the detail.
-If you touch a project \`AGENTS.md\` that lacks \`## Maintaining this file\`, add that short self-governance section from \`$FM_ROOT/bin/fm-ensure-agents-md.sh\` in the same pass.
-Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced no durable project knowledge.
+If \`AGENTS.md\` or \`CLAUDE.md\` exists, or this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree; it owns the self-governance section, so never add one by hand.
+Record only knowledge useful to almost every future session, prefer a pointer to the authoritative file or command over copied detail, and skip the edit entirely for a trivial task that produced none.
 
 $DOD
 EOF

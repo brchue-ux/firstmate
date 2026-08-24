@@ -291,6 +291,71 @@ ROWS
   pass "fm-brief.sh: --yolo and scout/secondmate --mode are refused, never silently dropped"
 }
 
+# The chrome-devtools-axi bridge outlives the pane, the worktree and every kill
+# teardown performs, so the session name is the only handle anything keeps on it.
+# Pinning it to the task id is what lets bin/fm-teardown.sh stop this task's
+# browser and no other, and it has to hold for scouts too - the audited orphans
+# came from one-off investigation sessions, not from ship tasks.
+test_browser_session_is_pinned_to_the_task() {
+  local home id brief session
+  home="$TMP_ROOT/browser-session-home"
+  write_registry "$home"
+  # shellcheck source=bin/fm-browser-session-lib.sh disable=SC1091
+  . "$ROOT/bin/fm-browser-session-lib.sh"
+
+  for id in brief-browser-ship brief-browser-scout; do
+    session=$(fm_browser_session_name "$id" "$home")
+    case "$id" in
+      *scout) FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" someproj --scout >/dev/null ;;
+      *) FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" someproj --pr-repo owner/someproj --pr-base main >/dev/null ;;
+    esac
+    brief="$home/data/$id/brief.md"
+    # The name leads with the task id, which is what keeps a bridge attributable
+    # by reading it, and carries this home's tag so another home filing the same
+    # id does not land on the same browser.
+    assert_grep "CHROME_DEVTOOLS_AXI_SESSION=fm-$id-" "$brief" \
+      "$id: brief does not pin the browser session to the task id"
+    assert_grep "CHROME_DEVTOOLS_AXI_SESSION=$session chrome-devtools-axi stop" "$brief" \
+      "$id: brief does not require stopping the task's own browser session"
+    # shellcheck disable=SC2016 # The backticks are literal brief prose, not a command substitution.
+    assert_grep 'before you append `done:` or `failed:`' "$brief" \
+      "$id: stopping the browser is not tied to reporting a terminal state"
+    # A bare stop would take the default session down with it, which is a
+    # sibling home's live browser.
+    grep -n 'chrome-devtools-axi stop' "$brief" | grep -qv "CHROME_DEVTOOLS_AXI_SESSION=$session" \
+      && fail "$id: brief tells the worker to run an unscoped chrome-devtools-axi stop"
+  done
+  pass "fm-brief.sh: ship and scout briefs pin the browser session to the task and require a scoped stop before a terminal report"
+}
+
+# A task id may be 64 characters (bin/fm-pr-lib.sh's fm_task_id_creation_valid),
+# while chrome-devtools-axi refuses a session name over 64. Briefing the naive
+# fm-<id> for such a task would hand the worker a name that throws on EVERY call
+# it makes, so the brief has to carry the derived one - and it has to be the
+# same derivation bin/fm-teardown.sh and bin/fm-browser-sweep.sh use, or the
+# bridge it does start is one nothing can stop or attribute.
+test_browser_session_fits_the_tool_cap_for_a_maximum_length_task_id() {
+  local home id brief session
+  home="$TMP_ROOT/browser-session-long-home"
+  write_registry "$home"
+  id="long-brief-task-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+  [ "${#id}" -eq 64 ] || fail "fixture task id is ${#id} characters, wanted 64"
+
+  # shellcheck source=bin/fm-browser-session-lib.sh disable=SC1091
+  . "$ROOT/bin/fm-browser-session-lib.sh"
+  session=$(fm_browser_session_name "$id" "$home") || fail "no session name derived for a 64-character id"
+  [ "${#session}" -le 64 ] \
+    || fail "the shared derivation produced a ${#session}-character name: $session"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" someproj --scout >/dev/null
+  brief="$home/data/$id/brief.md"
+  assert_grep "CHROME_DEVTOOLS_AXI_SESSION=$session chrome-devtools-axi stop" "$brief" \
+    "the brief does not pin the derived session name teardown and the sweep use"
+  assert_no_grep "CHROME_DEVTOOLS_AXI_SESSION=fm-$id" "$brief" \
+    "the brief pinned a session name chrome-devtools-axi would refuse on every call"
+  pass "fm-brief.sh: a maximum-length task id is briefed with the shared derived session name, inside the tool's cap"
+}
+
 test_faster_paths_use_configured_authority_without_stacked_review() {
   local home id brief
   home="$TMP_ROOT/configured-authority-home"
@@ -331,7 +396,7 @@ test_no_mistakes_dod_wording() {
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes --pr-repo owner/some-proj --pr-base main >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
   assert_present "$brief" "brief was not scaffolded"
-  assert_grep "no-mistakes itself provides for the mechanics" "$brief" \
+  assert_grep "its own guidance is authoritative and version-matched" "$brief" \
     "no-mistakes DOD lost its guidance-reference sentence"
   # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
   assert_grep '`no-mistakes axi run --help`' "$brief" \
@@ -364,12 +429,12 @@ test_ship_project_memory_wording() {
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes --pr-repo owner/some-proj --pr-base main >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
   assert_present "$brief" "brief was not scaffolded"
-  assert_grep "Record only project knowledge useful to almost every future session." "$brief" \
+  assert_grep "Record only knowledge useful to almost every future session" "$brief" \
     "project-memory contract lost the durable-knowledge bar"
-  assert_grep "prefer a pointer to the authoritative file, command, or doc over copying the detail" "$brief" \
+  assert_grep "prefer a pointer to the authoritative file or command over copied detail" "$brief" \
     "project-memory contract lost pointer-over-copy guidance"
-  assert_grep "lacks \`## Maintaining this file\`, add that short self-governance section" "$brief" \
-    "project-memory contract lost the self-governance add-in-same-pass rule"
+  assert_grep "it owns the self-governance section, so never add one by hand" "$brief" \
+    "project-memory contract lost the never-hand-write-self-governance rule"
   pass "fm-brief.sh: ship project-memory wording carries the AGENTS.md authoring bar"
 }
 
@@ -457,8 +522,8 @@ test_secondmate_no_projects_charter() {
   assert_grep "# Project clones" "$brief" "project-less charter dropped the Project clones heading"
   assert_grep "None. This is a project-less domain" "$brief" \
     "project-less charter did not render a sensible no-clones note"
-  assert_grep "its crews take pooled worktrees of that repo" "$brief" \
-    "project-less charter operating model lost the pooled-worktree note"
+  assert_grep "its crews take pooled worktrees of that firstmate repo" "$brief" \
+    "project-less charter lost the pooled-worktree note"
   assert_no_grep "The projects above are local clones" "$brief" \
     "project-less charter kept the with-projects operating-model line"
   assert_grep 'working [key=<work-slug>]' "$brief" \
@@ -842,6 +907,8 @@ test_ship_modes_generate_clean_briefs
 test_ship_mode_is_required_and_closed_set
 test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
+test_browser_session_is_pinned_to_the_task
+test_browser_session_fits_the_tool_cap_for_a_maximum_length_task_id
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
 test_ship_project_memory_wording

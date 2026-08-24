@@ -557,9 +557,10 @@ EOF
   printf '%s\n' "$id" > "$mate/.fm-secondmate-home"
   printf '# Firstmate\n' > "$mate/AGENTS.md"
   printf 'Second mate charter.\n' > "$mate/data/charter.md"
-  # A queued backlog item: the recovery paths below relaunch a dead or missing
-  # secondmate only when its own durable records show pending work (captain
-  # decision 2026-08-03). An idle mate is deliberately left down, which is the
+  # A queued backlog item proves session start never relaunches a dead or
+  # missing secondmate even when its own durable records show pending work
+  # (captain decision 2026-08-22, superseding the 2026-08-03 pending-work
+  # relaunch rule). The dedicated pending-work-vs-idle FYI reporting is the
   # subject of tests/fm-secondmate-liveness.test.sh, not of these boundary tests.
   printf '## In flight\n\n## Queued\n- [ ] backlog-item - a queued item for %s\n\n## Done\n' "$id" \
     > "$mate/data/backlog.md"
@@ -604,7 +605,8 @@ EOF
   printf '%s\n' "$id" > "$mate/.fm-secondmate-home"
   printf '# Firstmate\n' > "$mate/AGENTS.md"
   printf 'Second mate charter.\n' > "$mate/data/charter.md"
-  # Pending work, for the same launch-policy reason as the tmux helper above.
+  # Pending work, for the same never-relaunch-at-session-start reason as the
+  # tmux helper above.
   printf '## In flight\n\n## Queued\n- [ ] backlog-item - a queued item for %s\n\n## Done\n' "$id" \
     > "$mate/data/backlog.md"
   printf '%s\n' herdr > "$home/config/backend"
@@ -1173,8 +1175,8 @@ EOF
 
 # --- session-start secondmate recovery boundary -----------------------------
 
-test_session_start_relaunches_missing_pi_secondmate() {
-  local rec root home fakebin mate log spawned out first_calls second_calls
+test_session_start_never_relaunches_missing_pi_secondmate() {
+  local rec root home fakebin mate log spawned out
   rec=$(prepare_session_start_secondmate secondmate-missing-pi)
   IFS='|' read -r root home fakebin mate log spawned <<EOF
 $rec
@@ -1182,55 +1184,25 @@ EOF
 
   out=$(run_session_start_secondmate "$root" "$home" "$fakebin" "$mate" "$log" "$spawned" missing)
 
-  # The relaunch now runs off the blocking path, so the digest's own liveness
-  # read may legitimately still show the pre-relaunch endpoint. What must NOT
-  # happen is silence: the section names the relaunch as either done or not yet
-  # confirmed.
-  assert_contains "$out" "NETWORK CHECKS" "the digest lost its deferred network-check section"
-  assert_contains "$out" "dead-secondmate relaunch" \
-    "the digest never accounted for the dead-secondmate relaunch"
-
-  wait_for_network_stage "$home" "$root" \
-    || fail "the deferred network stage never published: $(network_stage_report "$home" "$root")"
-
-  assert_not_contains "$(network_stage_report "$home" "$root")" "SECONDMATE_LIVENESS:" \
-    "successful missing-window recovery should stay non-actionable"
-  assert_contains "$(cat "$log")" "new-window" "the deferred stage did not relaunch the missing Pi secondmate"
-  assert_not_contains "$(cat "$log")" "kill-window" "the deferred stage tried to kill an already-absent window"
+  assert_not_contains "$out" "SECONDMATE_LIVENESS:" "a missing secondmate left down should stay non-actionable by default"
+  assert_not_contains "$(cat "$log")" "new-window" \
+    "session start must never relaunch a missing secondmate, even with pending work of its own"
+  assert_not_contains "$(cat "$log")" "kill-window" "session start tried to kill an already-absent window"
+  # The cheap fleet-digest presence read (unlike the rigorous inventory-based
+  # classifier this sweep uses) falls for tmux's own active-window fallback
+  # quirk here and reads the window "alive" even though it was never
+  # relaunched - a pre-existing display-only limitation, not evidence of a
+  # relaunch. assert_grep below is what actually proves nothing was spawned.
+  assert_contains "$out" "endpoint: alive (backend=tmux window=firstmate:fm-$SESSION_START_SECOND_MATE_ID)" \
+    "the cheap fleet-digest presence read should behave exactly as before, unaffected by never relaunching"
   assert_grep 'harness=pi' "$home/state/$SESSION_START_SECOND_MATE_ID.meta" \
-    "the real respawn path did not preserve the Pi harness: $(cat "$home/state/$SESSION_START_SECOND_MATE_ID.meta")"
+    "leaving the secondmate down must not disturb its recorded Pi harness: $(cat "$home/state/$SESSION_START_SECOND_MATE_ID.meta")"
 
-  first_calls=$(grep -c 'new-window' "$log" || true)
   rm -f "$home/state/.lock"
   run_session_start_secondmate "$root" "$home" "$fakebin" "$mate" "$log" "$spawned" missing >/dev/null
-  wait_for_network_stage "$home" "$root" \
-    || fail "the second pass's deferred network stage never published"
-  second_calls=$(grep -c 'new-window' "$log" || true)
-  [ "$first_calls" -eq 1 ] && [ "$second_calls" -eq 1 ] \
-    || fail "a second session-start pass duplicated the relaunched Pi secondmate: $(cat "$log")"
-  pass "session start: an absent recorded tmux window relaunches its Pi secondmate exactly once, off the blocking path"
-}
-
-# The relaunch is the sharpest deferral: it mutates the very endpoint record the
-# digest printed moments earlier. Silence would leave that stale record looking
-# authoritative, so the deferred pass reports it whether or not verbose facts are
-# on, and the report says the digest's records are now behind.
-test_deferred_relaunch_is_always_reported() {
-  local rec root home fakebin mate log spawned report
-  rec=$(prepare_session_start_secondmate secondmate-relaunch-reported)
-  IFS='|' read -r root home fakebin mate log spawned <<EOF
-$rec
-EOF
-
-  run_session_start_secondmate "$root" "$home" "$fakebin" "$mate" "$log" "$spawned" missing >/dev/null
-  wait_for_network_stage "$home" "$root" || fail "the deferred network stage never published"
-
-  report=$(network_stage_report "$home" "$root")
-  assert_contains "$report" "secondmate $SESSION_START_SECOND_MATE_ID relaunched" \
-    "a relaunch performed after the digest was composed went unreported"
-  assert_contains "$report" "re-read any record" \
-    "the report did not tell the reader the digest's records are now behind"
-  pass "session start: a deferred relaunch is always reported, so the digest's stale endpoint record cannot stand"
+  assert_not_contains "$(cat "$log")" "new-window" \
+    "a second session-start pass must not relaunch the still-missing Pi secondmate either: $(cat "$log")"
+  pass "session start: a missing secondmate with pending work of its own is still never relaunched"
 }
 
 test_session_start_preserves_ambiguous_pi_process() {
@@ -1271,7 +1243,7 @@ EOF
   pass "session start: transient tmux unreadability never licenses a relaunch"
 }
 
-test_session_start_preserves_proven_bare_shell_recovery() {
+test_session_start_never_relaunches_proven_bare_shell() {
   local rec root home fakebin mate log spawned out
   rec=$(prepare_session_start_secondmate secondmate-bare-shell)
   IFS='|' read -r root home fakebin mate log spawned <<EOF
@@ -1282,14 +1254,21 @@ EOF
   wait_for_network_stage "$home" "$root" || fail "the deferred network stage never published"
 
   out=$(network_stage_report "$home" "$root")
-  assert_not_contains "$out" "SECONDMATE_LIVENESS:" "successful bare-shell recovery should stay non-actionable"
+  assert_not_contains "$out" "SECONDMATE_LIVENESS:" "a left-down confirmed-dead endpoint should stay non-actionable by default"
   assert_contains "$(cat "$log")" "kill-window -t =firstmate:=fm-$SESSION_START_SECOND_MATE_ID" \
-    "the proven bare-shell path did not remove its existing dead endpoint"
-  assert_contains "$(cat "$log")" "new-window" "the proven bare-shell path did not relaunch"
-  pass "session start: the proven bare-shell recovery path remains intact"
+    "session start still removes a confirmed-dead endpoint even though it is left down"
+  assert_not_contains "$(cat "$log")" "new-window" \
+    "session start must never relaunch a confirmed-dead secondmate, even with pending work of its own"
+  # As in the missing-window test above, the cheap fleet-digest presence read
+  # falls for tmux's active-window fallback quirk and reads "alive" here too -
+  # a pre-existing display-only limitation. assert_not_contains above on
+  # new-window is what actually proves nothing was spawned.
+  assert_contains "$out" "endpoint: alive (backend=tmux window=firstmate:fm-$SESSION_START_SECOND_MATE_ID)" \
+    "the cheap fleet-digest presence read should behave exactly as before, unaffected by never relaunching"
+  pass "session start: a confirmed-dead secondmate is cleaned up but never relaunched"
 }
 
-test_session_start_relaunches_herdr_husk_secondmate() {
+test_session_start_never_relaunches_herdr_husk_secondmate() {
   local rec root home fakebin mate log state out
   rec=$(prepare_session_start_herdr_secondmate secondmate-herdr-husk)
   IFS='|' read -r root home fakebin mate log state <<EOF
@@ -1300,12 +1279,13 @@ EOF
   wait_for_network_stage "$home" "$root" || fail "the deferred network stage never published"
 
   out=$(network_stage_report "$home" "$root")
-  assert_not_contains "$out" "SECONDMATE_LIVENESS:" "successful Herdr husk recovery should stay non-actionable"
+  assert_not_contains "$out" "SECONDMATE_LIVENESS:" "a left-down Herdr husk should stay non-actionable by default"
   assert_contains "$(cat "$log")" "pane close p-old" "session start did not close the confirmed Herdr husk"
-  assert_contains "$(cat "$log")" "tab create" "session start did not relaunch the Herdr secondmate"
-  assert_grep 'herdr_pane_id=p-new' "$home/state/$SESSION_START_HERDR_SECOND_MATE_ID.meta" \
-    "the real respawn path did not record the replacement Herdr pane"
-  pass "session start: a confirmed Herdr husk is closed and relaunched"
+  assert_not_contains "$(cat "$log")" "tab create" \
+    "session start must never relaunch a confirmed Herdr husk, even with pending work of its own"
+  assert_contains "$out" "endpoint: dead (backend=herdr window=default:p-old)" \
+    "the later fleet read should confirm the Herdr secondmate stayed down"
+  pass "session start: a confirmed Herdr husk is closed but never relaunched"
 }
 
 # --- endpoint liveness: tmux and herdr, live and dead ------------------------
@@ -1420,7 +1400,7 @@ EOF
   assert_contains "$out" "SESSION START" "the digest did not complete"
   assert_contains "$out" "IN PROGRESS - the deferred network checks have not finished yet." \
     "the digest did not disclose that its network checks were still running"
-  assert_contains "$out" "NOT yet confirmed: GitHub authentication, dead-secondmate relaunch" \
+  assert_contains "$out" "NOT yet confirmed: GitHub authentication, secondmate liveness" \
     "the digest did not name the checks it has not confirmed"
   assert_not_contains "$out" "NEEDS_GH_AUTH" \
     "the digest reported a GitHub-auth verdict it could not yet have"
@@ -1430,8 +1410,8 @@ EOF
     || fail "the deferred stage never finished: $(network_stage_report "$home" "$root")"
   assert_contains "$(network_stage_report "$home" "$root")" "NEEDS_GH_AUTH" \
     "the deferred stage lost the GitHub-auth verdict it was deferring"
-  assert_contains "$(cat "$log")" "new-window" \
-    "the deferred stage lost the dead-secondmate relaunch"
+  assert_not_contains "$(cat "$log")" "new-window" \
+    "the deferred stage must never relaunch a missing secondmate, even off the blocking path"
   pass "session start: an unreachable host delays a reported check, not the digest"
 }
 
@@ -2414,16 +2394,15 @@ test_session_lock_concurrent_single_winner
 test_output_ordering_diagnostics_lead
 test_read_once_contract_is_stated_once_before_its_subject
 test_herdr_backend_diagnostics_follow_real_session_start
-test_session_start_relaunches_missing_pi_secondmate
-test_deferred_relaunch_is_always_reported
+test_session_start_never_relaunches_missing_pi_secondmate
 test_unreachable_network_never_blocks_the_digest
 test_deferred_result_reaches_the_agent_when_the_digest_cannot_print_it
 test_read_only_session_declares_skipped_network_checks
 test_tasks_axi_compatibility_is_probed_once
 test_session_start_preserves_ambiguous_pi_process
 test_session_start_preserves_transiently_unreadable_tmux
-test_session_start_preserves_proven_bare_shell_recovery
-test_session_start_relaunches_herdr_husk_secondmate
+test_session_start_never_relaunches_proven_bare_shell
+test_session_start_never_relaunches_herdr_husk_secondmate
 test_status_tail_bounding
 test_status_tail_line_cap
 test_orphan_status_logs_are_printed

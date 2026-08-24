@@ -12,10 +12,7 @@ metadata:
 # bearings
 
 Generate a complete current snapshot from the fleet's current state, so the captain can resume in one read after a break, a night, or a context reset.
-Plain `/bearings` returns only the concise four-section chat digest.
-Only `/bearings file` writes the dated markdown report artifact and then returns the concise four-section chat digest linked to that report.
-This skill is operationally read-only in both modes.
-It never tears down a task, merges a PR, dispatches new work, steers a worker, answers a decision, cleans up work, mutates backlog or task state, or writes any file except the single dated report in explicit file mode.
+This skill is operationally read-only in both modes; "Supervision discipline" below owns exactly what that forbids.
 
 ## Invocation modes
 
@@ -45,8 +42,7 @@ It never tears down a task, merges a PR, dispatches new work, steers a worker, a
    Render it under Charted Next with the related `omitted` disclosure, never invent an Underway row from backlog-only state, and never move it into Captain's Call.
 
 2. **Compose the four-section chat digest from the fresh snapshot.**
-   The gather step is deterministic; your judgment is scoped to ranking the command's facts by what matters right now and writing scannable captain-facing prose.
-   The chat response uses the four complete sections in the chat-response contract below, in the same order, each always present.
+   The gather step is deterministic; your judgment is scoped to ranking the command's facts by what matters right now and writing scannable captain-facing prose in the four sections the contract below requires.
    Plain mode stops here and writes no report artifact.
 
 3. **In explicit file mode only, compose and replace the detailed report file.**
@@ -96,8 +92,7 @@ Rules that keep the contract unambiguous:
 ## Tone and content rules
 
 - The optional file-mode report is a private, captain-facing internal artifact that lives in gitignored `data/`, so unlike normal captain chat it MAY reference task ids, PR URLs, and repo names.
-- The captain works with those directly and needs them to resume; keep the report organized and scannable, not a raw dump.
-- Every PR reference is a full `https://...` URL, never a bare `#number`.
+- Keep it organized and scannable, not a raw dump.
 - Never include PHI or secret values; the report is an operational artifact, but it is still subject to the same security and compliance rules that govern everything else in this fleet.
 
 ## Supervision discipline
