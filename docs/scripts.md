@@ -91,6 +91,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-pr-check.sh`         | Record validated `pr=` and `pr_head=` values, then atomically arm a static merge poll |
 | `fm-pr-merge.sh`         | Record PR metadata, then merge a task's canonical full GitHub URL                    |
 | `fm-promote.sh`          | Promote a scout task in place to a protected ship task                               |
+| `fm-treehouse-spelling-lib.sh` | Translate a resolved real worktree/home path to the spelling `treehouse`'s own pool registry recognizes, for `fm-teardown.sh` and `fm-home-seed.sh` |
 | `fm-teardown.sh`         | Fail-closed teardown: return landed ship worktrees, require completed scout deliverables, retire secondmate homes |
 | `fm-idle-sweep.sh`       | Heartbeat-cadence cleanup: offer this home's finished tasks that still hold a pane or worktree to `fm-teardown.sh`, bounded and backed off |
 | `fm-herdr-outcome-publish.sh` | Decoration-only: publish a real learned work outcome (PR merged, task landed) into herdr as a signal plus durable metadata, when the task's own meta names a herdr workspace target |

@@ -78,6 +78,19 @@
 # (the dying process finishes or exits within seconds) and must never be force-deleted
 # while a live git process might still own it - the fix is patience, not rm.
 #
+# Spelling boundary (treehouse-symlinked-root): the worktree/home path recorded
+# in meta is the resolved real path (bin/fm-spawn.sh records it via `pwd -P`,
+# load-bearing for worktree-isolation checks elsewhere), but `treehouse`'s own
+# pool registry matches on the literal path it leased under, reached through
+# $HOME/.treehouse, without resolving symlinks. teardown_treehouse_return
+# translates the target through bin/fm-treehouse-spelling-lib.sh's
+# fm_treehouse_recognized_path immediately before every `treehouse return`
+# invocation (initial call and every retry), so a home whose $HOME/.treehouse
+# is itself a symlink still resolves to a spelling treehouse recognizes. That
+# translation is a no-op when no such symlink is involved, and refuses (rather
+# than guessing) when it cannot verify a candidate spelling names the same real
+# directory - see that library's header.
+#
 # On that failure signature only, teardown_treehouse_return:
 #   1. Retries up to FM_TREEHOUSE_RETURN_LOCK_RETRIES times (default 3), waiting
 #      FM_TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS (default 1s; falls back to the older
@@ -123,6 +136,11 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# Translates a resolved real worktree/home path to the spelling `treehouse`'s
+# own pool registry recognizes, at the boundary where teardown_treehouse_return
+# invokes the `treehouse` CLI. See that file's header for why this exists.
+# shellcheck source=bin/fm-treehouse-spelling-lib.sh
+. "$SCRIPT_DIR/fm-treehouse-spelling-lib.sh"
 # The pinned browser session name has one owner, shared with bin/fm-brief.sh
 # (which briefs it) and bin/fm-browser-sweep.sh (which decides who still owns
 # one). Deriving it a second time here is how a stop stops nothing.
@@ -614,11 +632,20 @@ cleanup_stale_lock_for_safety_check() {
 # stale git index.lock left by a killed crew process. See the script header.
 teardown_treehouse_return() {
   local dir=$1 cd_dir=$2 label=$3 post_cleanup_check=${4:-}
-  local out lock attempt=0 max_retries lock_desc
+  local out lock attempt=0 max_retries lock_desc treehouse_dir
+
+  # Translate once, up front: every invocation below (initial call and every
+  # retry) must hand treehouse the spelling its registry recognizes, not the
+  # resolved real path meta records. See the script header
+  # ("Spelling boundary") and bin/fm-treehouse-spelling-lib.sh.
+  treehouse_dir=$(fm_treehouse_recognized_path "$dir") || {
+    echo "teardown: cannot establish a treehouse-recognized spelling for $label $dir; refusing rather than guessing" >&2
+    return 1
+  }
 
   # Capture stdout+stderr so non-lock failures stay visible and lock failures can
   # be matched by signature even when the lock file is already gone mid-check.
-  if out=$( ( cd "$cd_dir" && treehouse return --force "$dir" ) 2>&1 ); then
+  if out=$( ( cd "$cd_dir" && treehouse return --force "$treehouse_dir" ) 2>&1 ); then
     [ -n "$out" ] && printf '%s\n' "$out"
     return 0
   fi
@@ -643,7 +670,7 @@ teardown_treehouse_return() {
     echo "teardown: $label return failed with transient git lock ($lock_desc); waiting ${TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS}s and retrying ($attempt/${max_retries})" >&2
     sleep "$TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS"
 
-    if out=$( ( cd "$cd_dir" && treehouse return --force "$dir" ) 2>&1 ); then
+    if out=$( ( cd "$cd_dir" && treehouse return --force "$treehouse_dir" ) 2>&1 ); then
       [ -n "$out" ] && printf '%s\n' "$out"
       echo "teardown: $label return succeeded on retry; lock cleared on its own" >&2
       return 0
@@ -670,7 +697,7 @@ teardown_treehouse_return() {
           return 1
         fi
       fi
-      if out=$( ( cd "$cd_dir" && treehouse return --force "$dir" ) 2>&1 ); then
+      if out=$( ( cd "$cd_dir" && treehouse return --force "$treehouse_dir" ) 2>&1 ); then
         [ -n "$out" ] && printf '%s\n' "$out"
         echo "teardown: $label return succeeded after stale-lock cleanup" >&2
         return 0
