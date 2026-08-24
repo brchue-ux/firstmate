@@ -1079,6 +1079,34 @@ mv -f "$TMP_ROOT/remote-ios-before-liveness-legacy.meta" "$remote_route_meta"
 rm -f "$TMUX_STATE"
 pass "startup reports alive legacy backends without changing their routes"
 
+# A confirmed-missing remote endpoint must never be relaunched at session
+# start, matching the local endpoint's never-relaunch policy (captain decision
+# 2026-08-22). The remote and local liveness paths share no code, so this is
+# exercised independently of the local confirmed-dead sweep test.
+cp "$remote_route_meta" "$TMP_ROOT/remote-ios-before-missing.meta"
+cp "$PARENT/state/ios.meta" "$TMP_ROOT/parent-ios-before-missing.meta"
+cp "$PARENT/data/secondmates.md" "$TMP_ROOT/registry-before-missing.md"
+rm -f "$remote_route_meta"
+[ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh state ios 2>/dev/null)" = missing ] \
+  || fail "the removed remote endpoint metadata fixture did not report missing"
+launches_before_missing=$(grep -c '^tab create' "$HERDR_LOG" || true)
+BOOT_MISSING=$(remote_env "$ROOT/bin/fm-bootstrap.sh")
+assert_not_contains "$BOOT_MISSING" "SECONDMATE_LIVENESS: secondmate ios:" \
+  "a missing remote endpoint left down should be handled silently by default"
+launches_after_missing=$(grep -c '^tab create' "$HERDR_LOG" || true)
+[ "$launches_before_missing" -eq "$launches_after_missing" ] \
+  || fail "session start relaunched a missing remote secondmate endpoint"
+cmp -s "$TMP_ROOT/parent-ios-before-missing.meta" "$PARENT/state/ios.meta" \
+  || fail "a missing remote endpoint left down changed the parent route metadata"
+cmp -s "$TMP_ROOT/registry-before-missing.md" "$PARENT/data/secondmates.md" \
+  || fail "a missing remote endpoint left down changed the registry route"
+BOOT_MISSING_VERBOSE=$(FM_BOOTSTRAP_VERBOSE_FACTS=1 remote_env "$ROOT/bin/fm-bootstrap.sh")
+assert_contains "$BOOT_MISSING_VERBOSE" \
+  "BOOTSTRAP_INFO: secondmate ios left down after remote endpoint missing on its configured host (host=remote-mac)" \
+  "verbose diagnostics did not identify the missing remote endpoint being left down"
+mv -f "$TMP_ROOT/remote-ios-before-missing.meta" "$remote_route_meta"
+pass "session start never relaunches a remote secondmate whose endpoint is missing"
+
 # Host loss maps to unknown/unavailable and never creates a local replacement.
 launches_before=$(grep -c '^tab create' "$HERDR_LOG" || true)
 rm -rf -- "$PARENT/state/.watch.lock"
