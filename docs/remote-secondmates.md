@@ -160,7 +160,7 @@ A launch after a host has drifted out of readiness fails with the doctor's own g
 Raw launch commands are not accepted for remote secondmates.
 Backends that already refuse secondmate launch, currently Orca and cmux, remain unsupported on the remote host.
 
-Startup liveness recovery relaunches a dead or missing remote second mate through this same command, so recovery passes the same readiness gate rather than a weaker one.
+Session start never relaunches a secondmate, local or remote; a dead or missing remote endpoint is left down unconditionally and the captain reopens it manually with this same command, which still passes the same readiness gate ([`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md) "Recovery").
 
 Send routed requests normally:
 
