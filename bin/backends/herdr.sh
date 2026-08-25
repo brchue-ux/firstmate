@@ -1733,9 +1733,11 @@ fm_backend_herdr_worktree_parent_workspace() {  # <session> <cwd>
 # Herdr's sidebar (src/ui/sidebar.rs) groups workspaces by repo key, picks the
 # one member whose worktree is not linked as the un-indented parent, and
 # indents every other member - but it reads that grouping ONLY from the
-# workspace's stored worktree membership. A plain `workspace create --cwd
-# <path>` leaves `worktree` null no matter what the path is, so a home created
-# that way never groups, and neither does anything under it.
+# workspace's stored worktree membership. Whether a plain `workspace create
+# --cwd <path>` leaves `worktree` null is client-version-dependent and not
+# relied upon here; what matters is that only THIS path stamps worktree
+# membership reliably, so a home created via a plain create cannot be trusted
+# to group, and neither can anything under it.
 #
 # Both kinds of home go through here, because the grouping needs BOTH sides:
 #

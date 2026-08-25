@@ -136,8 +136,12 @@ GUARD_WSID=$(herdr pane get "$GUARD_PANE" --session "$SESSION_GUARD" 2>/dev/null
 [ -n "$GUARD_WSID" ] || fail "could not read the guard-scenario secondmate's workspace_id"
 [ "$(ws_field "$SESSION_GUARD" "$GUARD_WSID" .label)" = "2ndmate-e2egrp1" ] \
   || fail "the guard-scenario secondmate should still get its own labelled space"
-[ "$(ws_field "$SESSION_GUARD" "$GUARD_WSID" .worktree)" = "null" ] \
-  || fail "with no space on the repo's main checkout, the space must fall back to the flat shape, not a worktree-backed one"
+# Whether the fallback space's .worktree field itself reads null is
+# client-version-dependent (newer herdr clients populate a worktree block even
+# on a plain create) and not what this guard protects. The safety property is
+# that no stray parent workspace gets invented and labelled from the repo
+# directory's basename, colliding with the primary home's own "firstmate"
+# label - asserted by the two checks below.
 [ "$(ws_count_for_label "$SESSION_GUARD" firstmate)" = "0" ] \
   || fail "the guard must not let herdr invent a parent workspace labelled from the repo directory basename ('firstmate')"
 [ "$(herdr workspace list --session "$SESSION_GUARD" 2>/dev/null | jq -r '.result.workspaces | length')" = "1" ] \
@@ -156,7 +160,7 @@ fm_herdr_lab_prepare "$SESSION_MAIN" || fail "could not prepare the isolated gro
 # home's own space - anchored at the home, i.e. the repo's main checkout.
 CM1_OUT="$TMP_ROOT/cm1.out"; CM1_ERR="$TMP_ROOT/cm1.err"
 FM_SPAWN_NO_GUARD=1 FM_HOME="$PRIMARY_HOME" FM_ROOT_OVERRIDE="$ROOT" \
-  "$ROOT/bin/fm-spawn.sh" cm1 "$PROJ1" "sh -c 'echo primary-crew-ok'" --backend herdr \
+  "$ROOT/bin/fm-spawn.sh" cm1 "$PROJ1" "sh -c 'echo primary-crew-ok'" --mode no-mistakes --yolo off --backend herdr \
   >"$CM1_OUT" 2>"$CM1_ERR"
 rc=$?
 [ "$rc" -eq 0 ] || fail "the primary-shaped crewmate spawn failed"$'\n'"--- stdout ---"$'\n'"$(cat "$CM1_OUT")"$'\n'"--- stderr ---"$'\n'"$(cat "$CM1_ERR")"
@@ -221,7 +225,7 @@ mkdir -p "$SM_HOME/data/cm2"
 printf 'trivial e2e secondmate-owned crewmate brief: nothing to do.\n' > "$SM_HOME/data/cm2/brief.md"
 CM2_OUT="$TMP_ROOT/cm2.out"; CM2_ERR="$TMP_ROOT/cm2.err"
 FM_SPAWN_NO_GUARD=1 FM_HOME="$SM_HOME" FM_ROOT_OVERRIDE="$ROOT" \
-  "$ROOT/bin/fm-spawn.sh" cm2 "$PROJ1" "sh -c 'echo sm-crew-ok'" --backend herdr \
+  "$ROOT/bin/fm-spawn.sh" cm2 "$PROJ1" "sh -c 'echo sm-crew-ok'" --mode no-mistakes --yolo off --backend herdr \
   >"$CM2_OUT" 2>"$CM2_ERR"
 rc=$?
 [ "$rc" -eq 0 ] || fail "a crewmate spawned FROM the secondmate home failed"$'\n'"--- stdout ---"$'\n'"$(cat "$CM2_OUT")"$'\n'"--- stderr ---"$'\n'"$(cat "$CM2_ERR")"
