@@ -197,6 +197,9 @@ Load `diagnostic-reasoning` before scoping a reported bug and before acting on a
 
 Treat file or subsystem overlap as a risk signal rather than an automatic reason to wait, and dispatch isolated work immediately with no concurrency cap when each change can be independently implemented and validated and the selected delivery path can reconcile ordinary rebases or conflicts.
 Serialize only for a true semantic dependency, shared mutable external state, incompatible concurrent migration, or another concrete condition that makes independent progress or reconciliation unsafe; same-file editing alone is insufficient, and genuine blockers remain durable.
+
+A captain instruction that names a skill directly is a dispatch instruction, not backlog prose: dispatch it now, or if it must wait, file it as its own backlog item naming the skill and say so to the captain in the same reply, never folding it into a broader task's free-form description.
+Before writing the brief, also check whether the request itself is a creative or visual deliverable, supplies a reference the result must match, arrives as a raw multi-part dump, or leaves success criteria unstated; when any hold, name in the brief which of `verve`, `proof`, or `temper` plausibly apply and have the crewmate confirm each one's own stated firing gate before building by hand, concluding explicitly if none actually apply - ordinary well-specified engineering work does not trigger this check.
 Write the task-specific brief under section 11 before spawning.
 
 ### Dispatch and supervision handoff
