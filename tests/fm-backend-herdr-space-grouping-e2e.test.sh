@@ -27,6 +27,10 @@
 #     fm-spawn.sh resolves every worker placement through)
 #   - a worker pane carries owner=<calling mate>, and a secondmate pane
 #     carries no owner token at all
+#   - the presentation-spaces/grouping interaction: with presentation-spaces
+#     default-on, a worker spawned FROM an already-established secondmate
+#     home still lands as an ordinary tab in that secondmate's own space
+#     rather than getting projected into a fresh disposable child workspace
 #   - adoption discipline: a workspace already open on a home's checkout keeps
 #     its own name and the home still gets its own labelled space
 #   - the no-parent guard: with no space open on the repo's main checkout,
@@ -93,6 +97,13 @@ make_scratch_project() {  # <dir>
   printf '# scratch\n' > "$dir/README.md"
   git -C "$dir" add README.md
   git -C "$dir" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm initial
+  # fm-spawn.sh's freshen_spawn_worktree_base always fetches "origin" before
+  # launching from a treehouse-pooled worktree, and treehouse pools by taking
+  # a `git worktree add` of this very repo, which inherits whatever remotes
+  # it has. A self-remote keeps that fetch a real, deterministic no-op
+  # instead of refusing every spawn against an origin-less scratch project.
+  git -C "$dir" remote add origin "$dir"
+  git -C "$dir" remote set-head origin --auto >/dev/null 2>&1 || true
 }
 PROJ1="$TMP_ROOT/scratch-project-1"; make_scratch_project "$PROJ1"
 
@@ -220,7 +231,10 @@ pass "real herdr E2E: space lookup by label still resolves both homes to exactly
   || fail "a secondmate is a mate, not a worker: its pane must carry no owner token, got '$(pane_owner_token "$SESSION_MAIN" "$SM_PANE")'"
 pass "real herdr E2E: a worker pane is stamped with its calling mate's moniker and a secondmate pane is left unstamped"
 
-# A worker spawned FROM the secondmate home carries that secondmate's moniker.
+# A worker spawned FROM the secondmate home carries that secondmate's moniker,
+# and - even with presentation-spaces default-on - lands in that secondmate's
+# own already-established space rather than a fresh projected child, since the
+# secondmate's home already has its own workspace to reuse.
 mkdir -p "$SM_HOME/data/cm2"
 printf 'trivial e2e secondmate-owned crewmate brief: nothing to do.\n' > "$SM_HOME/data/cm2/brief.md"
 CM2_OUT="$TMP_ROOT/cm2.out"; CM2_ERR="$TMP_ROOT/cm2.err"

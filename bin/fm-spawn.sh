@@ -1976,6 +1976,16 @@ case "$BACKEND" in
         # live named-session socket before journal publication.
         if ! fm_backend_herdr_server_ensure "$HERDR_SES"; then
           echo "warning: herdr presentation could not ensure its session server; using the ordinary flat layout without projection" >&2
+        elif [ -f "$HERDR_LABEL_HOME/$FM_BACKEND_HERDR_SECONDMATE_MARKER" ] \
+          && [ -n "$(fm_backend_herdr_projection_parent_workspace_exact "$HERDR_SES" "$HERDR_PARENT_LABEL" 2>/dev/null)" ]; then
+          # This task's target home is ITSELF an established secondmate home -
+          # it already has its own herdr workspace to reuse, so presentation
+          # would fragment that mate's home instead of grouping under it.
+          # Skip projection and let the task land as an ordinary tab inside
+          # the secondmate's own existing workspace via the normal placement
+          # path below. Non-secondmate targets, and secondmate targets with
+          # no workspace of their own yet, are unaffected.
+          :
         elif [ "${FM_BACKEND_HERDR_PRESENTATION_PREFERENCE:-default}" = default ] \
           && ! fm_backend_herdr_presentation_default_supported "$STATE" "$HERDR_SES"; then
           :
