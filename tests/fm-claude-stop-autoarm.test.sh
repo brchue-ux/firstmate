@@ -199,6 +199,67 @@ test_reclaims_stale_session_lock_before_arming() {
   pass "auto-arm: a demonstrably dead recorded session owner is reclaimed through fm-lock.sh before arming"
 }
 
+# Combined auto-arm + guard fixtures for the recovery-visibility race below:
+# a deliberately slow fm-lock.sh stand-in (real ancestry resolution, delayed
+# write) so the reclaim's actual latency is controllable, and a copy of the
+# real guard so its own "does auto-arm already own recovery" predicate runs
+# unmodified against the auto-arm hook's real single-flight lock.
+install_guard_for_race_test() {
+  local dir=$1
+  cp "$ROOT/bin/fm-turnend-guard.sh" "$dir/bin/fm-turnend-guard.sh"
+  chmod +x "$dir/bin/fm-turnend-guard.sh"
+}
+
+write_slow_reclaim_lock_fixture() {
+  local dir=$1 delay=$2
+  cat > "$dir/bin/fm-lock.sh" <<SH
+#!/usr/bin/env bash
+set -u
+sleep $delay
+SCRIPT_DIR="\$(cd "\$(dirname "\${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=/dev/null
+. "\$SCRIPT_DIR/fm-session-lock-lib.sh"
+me=\$(fm_harness_ancestry_pid) || { echo "error: cannot locate harness process in ancestry" >&2; exit 1; }
+printf '%s\n' "\$me" > "\$FM_HOME/state/.lock"
+echo "lock acquired: harness pid \$me"
+SH
+  chmod +x "$dir/bin/fm-lock.sh"
+}
+
+test_guard_sees_early_owner_claim_during_slow_stale_lock_recovery() {
+  local dir expected_owner guard_rc autoarm_rc
+  dir=$(make_primary_dir "$TMP_ROOT/race-slow-recovery")
+  : > "$dir/state/task.meta"
+  printf '9999999\n' > "$dir/state/.lock"
+  write_arm_fixture "$dir" clean
+  write_slow_reclaim_lock_fixture "$dir" 1.5
+  install_guard_for_race_test "$dir"
+
+  FM_HOME="$dir" "$FAKE_CLAUDE" -c '
+    printf "%s\n" "$$" > "$FM_HOME/state/expected-owner"
+    printf "%s\n" "{\"session_id\":\"race\"}" \
+      | "$FM_HOME/bin/fm-claude-stop-autoarm.sh" >"$FM_HOME/state/autoarm.out" 2>&1 &
+    autoarm_pid=$!
+    # Enough time for the async hook to clear scope/identity/AFK/need and (with
+    # an early single-flight claim) grab the owner lock, but nowhere near the
+    # 1.5s-delayed reclaim finishing.
+    sleep 0.2
+    printf "%s\n" "{\"stop_hook_active\":false,\"session_id\":\"race\"}" \
+      | FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=400 "$FM_HOME/bin/fm-turnend-guard.sh" --claude \
+        >"$FM_HOME/state/guard.out" 2>"$FM_HOME/state/guard.err"
+    echo $? > "$FM_HOME/state/guard.rc"
+    wait "$autoarm_pid"; echo $? > "$FM_HOME/state/autoarm.rc"
+  '
+  guard_rc=$(cat "$dir/state/guard.rc")
+  autoarm_rc=$(cat "$dir/state/autoarm.rc" 2>/dev/null || true)
+  expected_owner=$(cat "$dir/state/expected-owner")
+  [ "$guard_rc" = 0 ] || fail "guard blocked a blind turn (rc=$guard_rc) even though the auto-arm's single-flight owner lock was already claimed for an in-progress stale-lock recovery: $(cat "$dir/state/guard.err" 2>/dev/null)"
+  [ ! -s "$dir/state/guard.err" ] || fail "guard produced block output while recovery was genuinely in progress: $(cat "$dir/state/guard.err")"
+  [ "$autoarm_rc" = 0 ] || fail "auto-arm hook exited $autoarm_rc instead of a clean close after the delayed reclaim"
+  [ "$(cat "$dir/state/.lock" 2>/dev/null)" = "$expected_owner" ] || fail "the slow reclaim never actually completed and reassigned the lock"
+  pass "auto-arm+guard: an early single-flight claim lets the guard see in-progress stale-lock recovery before a slow reclaim finishes"
+}
+
 test_inert_when_lock_held_by_other_harness() {
   local dir other out status owner_after
   dir=$(make_primary_dir "$TMP_ROOT/other-lock")
@@ -420,6 +481,7 @@ test_fm_lock_status_still_works_with_shared_lib() {
 test_inert_in_child_worktree
 test_inert_without_session_lock
 test_reclaims_stale_session_lock_before_arming
+test_guard_sees_early_owner_claim_during_slow_stale_lock_recovery
 test_inert_when_lock_held_by_other_harness
 test_inert_when_afk
 test_stale_lock_recovery_preserves_afk_and_need_gates
