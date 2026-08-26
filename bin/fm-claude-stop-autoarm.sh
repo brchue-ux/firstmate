@@ -23,7 +23,11 @@
 #   - Single-flight: Claude does not dedupe async hooks, so a home-scoped owner
 #     lock (state/.claude-autoarm.lock) admits exactly one owner; every other
 #     concurrent firing exits 0 without translating, which keeps one event
-#     epoch on exactly one recovery turn.
+#     epoch on exactly one recovery turn. Claimed before the stale-lock reclaim
+#     below (not only before the foreground arm), so its pid file - one of the
+#     synchronous guard's own "recovery already under way" signals - is visible
+#     within milliseconds of this hook committing to work, rather than only
+#     after the reclaim's extra subprocess and ancestry walk finish.
 #   - Foreground arm: the owner runs bin/fm-watch-arm.sh in the FOREGROUND of
 #     this hook-owned process tree (never shell &); Claude owns the process
 #     group, so its timeout/session teardown kills arm and watcher together.
@@ -98,6 +102,24 @@ need_supervision() {
 }
 need_supervision || exit 0
 
+# --- single-flight owner claim ------------------------------------------------
+# Claude runs one background process per firing with no dedupe. Exactly one
+# owner foregrounds the arm and translates its close; every other firing exits
+# 0 so one watcher cycle maps to at most one exit-2 rewake.
+# Claimed here, before stale-lock recovery rather than after it, so the
+# synchronous guard's "owner lock pid alive" check (bin/fm-turnend-guard.sh
+# --claude, autoarm_owns_recovery) becomes true within milliseconds of this
+# hook committing to work - not only after the reclaim (an extra fm-lock.sh
+# subprocess plus a second harness-ancestry walk) finishes. The guard's fixed
+# sync-wait budget has no other signal during that reclaim: measured live, it
+# adds several hundred ms over the already-owned path, comfortably enough to
+# blow the guard's default budget under real fleet load and force an
+# unnecessary blind-turn block even though recovery was genuinely under way.
+# A side benefit: two concurrent firings that both see a reclaimable stale
+# lock no longer both pay for the reclaim - only the single-flight winner does.
+fm_lock_try_acquire "$OWNER_LOCK" || exit 0
+trap 'fm_lock_release "$OWNER_LOCK"' EXIT
+
 # --- stale session-lock recovery ---------------------------------------------
 # Delegate the claim to fm-lock.sh so its live-owner refusal and write semantics
 # remain the single acquisition owner, then re-verify current-session identity
@@ -106,13 +128,6 @@ if [ "$RECOVER_SESSION_LOCK" -eq 1 ]; then
   "$SCRIPT_DIR/fm-lock.sh" >/dev/null 2>&1 || exit 0
   fm_session_lock_owned_by_self "$STATE" || exit 0
 fi
-
-# --- single-flight owner claim ------------------------------------------------
-# Claude runs one background process per firing with no dedupe. Exactly one
-# owner foregrounds the arm and translates its close; every other firing exits
-# 0 so one watcher cycle maps to at most one exit-2 rewake.
-fm_lock_try_acquire "$OWNER_LOCK" || exit 0
-trap 'fm_lock_release "$OWNER_LOCK"' EXIT
 
 write_epoch() {  # <outcome>
   local outcome=$1 seq tmp
