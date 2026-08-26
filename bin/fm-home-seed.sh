@@ -513,6 +513,11 @@ acquire_treehouse_home() {
   # live process and is skipped by later get/prune, so the home survives restarts
   # until teardown or rollback returns it. treehouse prints only the worktree path
   # to stdout (banners go to stderr), so command substitution captures the path.
+  # The leased worktree lands at a detached HEAD on the default branch (git
+  # will not let the same branch be checked out in more than one worktree, and
+  # main is normally held by the canonical clone) - the routine, self-updatable
+  # shape bin/fm-ff-lib.sh's ff_target and bin/fm-fleet-sync.sh both advance in
+  # place, not an anomaly.
   home=$(cd "$FM_ROOT" && treehouse get --lease --lease-holder "$id") || {
     echo "error: treehouse get --lease failed to lease a firstmate home" >&2
     return 1

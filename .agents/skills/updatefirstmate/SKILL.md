@@ -24,7 +24,7 @@ This touches only the firstmate repo and its own worktrees, never anything under
    ```sh
    bin/fm-update.sh
    ```
-   It fast-forwards this firstmate repo's default branch from origin, then fast-forwards every registered secondmate home (each a treehouse worktree of this same repo, leased at a detached HEAD on the default branch) the same way.
+   It fast-forwards this firstmate repo from origin - whether it is genuinely checked out on its default branch (the canonical clone) or leased at a detached HEAD on that branch (a pooled home, staying detached after advancing) - then fast-forwards every registered secondmate home (each a treehouse worktree of this same repo, leased the same detached way) the same way.
    It prints one status line per target (`updated <old>..<new>` / `already current` / `skipped: <reason>`), followed by two action lines that tell you exactly what to do next:
    - `reread-firstmate: yes|no`
    - `nudge-secondmates: fm-<id>...|none`

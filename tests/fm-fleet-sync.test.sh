@@ -3,9 +3,13 @@
 #
 # fm-fleet-sync fast-forwards a clone that is cleanly on its default branch. This
 # suite pins the two behavioral additions on top of that:
-#   - the one safe drift self-heals: a clean, detached HEAD that holds no unique
-#     commits (it is an ancestor of origin/<default>) and whose <default> is free
-#     to check out is re-attached and then fast-forwarded ("recovered:").
+#   - the safe drift self-heals: a clean, detached HEAD that holds no unique
+#     commits (it is an ancestor of origin/<default>). When <default> is free to
+#     check out it is re-attached and then fast-forwarded ("recovered:"); when
+#     <default> is checked out in another worktree of this same clone instead -
+#     git's own worktree exclusivity, the shape every pooled firstmate home is
+#     leased in (see bin/fm-update.sh, bin/fm-ff-lib.sh) - the detached HEAD is
+#     advanced straight to the fetched tip and stays detached ("advanced:").
 #   - every other off-default state is left untouched and reported as a loud,
 #     quantified "STUCK: ... N commits behind ... - needs attention" warning
 #     instead of a quiet skip.
@@ -296,6 +300,51 @@ test_detached_clean_ancestor_with_diverged_local_default_is_stuck_untouched() {
   ! git -C "$clone" symbolic-ref -q HEAD >/dev/null || fail "clone re-attached to local default"
   [ "$(git -C "$clone" rev-parse main)" = "$local_main" ] || fail "local default branch was moved"
   pass "detached clean ancestor with diverged local default is reported STUCK and left untouched"
+}
+
+test_detached_clean_ancestor_default_checked_out_elsewhere_advances() {
+  local home clone out before after other
+  home=$(new_home)
+  clone=$(build_pair "$home" sigma)
+  advance_origin "$home" sigma C1
+  before=$(head_sha "$clone")
+  git -C "$clone" checkout --detach --quiet
+  # Another worktree of this same clone holds `main` checked out - git will
+  # not allow this clone to re-attach to it, the shape every pooled firstmate
+  # home is leased in (see bin/fm-update.sh, bin/fm-ff-lib.sh).
+  other="$home/sigma-other-wt"
+  git -C "$clone" worktree add -q "$other" main
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "sigma: advanced " "checked-out-elsewhere clean ancestor advances in place"
+  assert_contains "$out" "checked out in another worktree" "advance names why it stayed detached"
+  assert_not_contains "$out" "STUCK" "advanced case is not flagged STUCK"
+  after=$(head_sha "$clone")
+  [ "$after" != "$before" ] || fail "expected fast-forward, HEAD unchanged"
+  [ "$after" = "$(git -C "$clone" rev-parse origin/main)" ] \
+    || fail "expected HEAD at origin/main after advance"
+  git -C "$clone" symbolic-ref -q HEAD >/dev/null \
+    && fail "expected clone to remain detached"
+  [ "$(git -C "$other" rev-parse --abbrev-ref HEAD)" = "main" ] \
+    || fail "other worktree's main checkout was disturbed"
+  pass "detached clean ancestor with default checked out elsewhere advances in place, stays detached"
+}
+
+test_detached_default_checked_out_elsewhere_already_current() {
+  local home clone out other
+  home=$(new_home)
+  clone=$(build_pair "$home" omega)
+  git -C "$clone" checkout --detach --quiet
+  other="$home/omega-other-wt"
+  git -C "$clone" worktree add -q "$other" main
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "omega: already current (detached; main checked out in another worktree)" \
+    "already-current detached-elsewhere clone reports current, not stuck"
+  assert_not_contains "$out" "STUCK" "already-current case is not flagged STUCK"
+  pass "detached clean ancestor with default checked out elsewhere, already current, reports current"
 }
 
 test_dirty_is_stuck_untouched() {
@@ -731,6 +780,8 @@ test_non_signature_fetch_failure_is_not_retried() {
 test_detached_clean_ancestor_recovers
 test_detached_unique_commit_is_stuck_untouched
 test_detached_clean_ancestor_with_diverged_local_default_is_stuck_untouched
+test_detached_clean_ancestor_default_checked_out_elsewhere_advances
+test_detached_default_checked_out_elsewhere_already_current
 test_dirty_is_stuck_untouched
 test_non_default_branch_is_stuck_untouched
 test_diverged_is_stuck_untouched

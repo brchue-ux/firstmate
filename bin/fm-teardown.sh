@@ -1395,6 +1395,11 @@ rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" \
   "$STATE/$ID.kimi-turnend-token"
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
+  # For a firstmate-repo ship task, $PROJ is itself a pooled firstmate home
+  # (a treehouse worktree leased at a detached HEAD on the default branch, the
+  # same shape bin/fm-update.sh advances). fm-fleet-sync.sh self-heals that
+  # exact shape - clean, ancestor of base, default checked out elsewhere - in
+  # place rather than reporting it STUCK; see that script's header.
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi
 echo "teardown $ID complete (window $T, worktree $WT)"

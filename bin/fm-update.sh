@@ -11,9 +11,21 @@
 # dirs (data/, state/, config/, projects/, .no-mistakes/), so a secondmate's
 # in-flight work is never disrupted. Worktrees of this repo share one object
 # store, so a single fetch refreshes them all; standalone-clone homes are
-# fetched on their own. Secondmate homes are leased at a detached HEAD on the
-# default branch, so a fast-forward there advances HEAD only and never touches
-# any other worktree's checkout or the shared `main` branch.
+# fetched on their own.
+#
+# EVERY pooled firstmate home - the running firstmate itself included, not just
+# its secondmates - is a treehouse worktree leased at a detached HEAD on the
+# default branch (git refuses to let the same branch be checked out in more
+# than one worktree, and `main` is normally held by the canonical clone). A
+# clean, strictly-behind detached HEAD is therefore the routine, self-updatable
+# shape, not an anomaly: it is advanced to the fetched default-branch tip in
+# place, staying detached - never checked out to `main`, never given a branch
+# of its own. A target genuinely checked out on the default branch (the
+# canonical clone) fast-forwards that branch ref directly, the same as always.
+# Either way the advance never touches any other worktree's checkout or the
+# shared `main` branch. Dirty, diverged, a real non-default branch, or an
+# offline fetch are still skipped and reported - see bin/fm-ff-lib.sh's
+# ff_target for the exact guards.
 #
 # The fast-forward mechanics live in bin/fm-ff-lib.sh (base_mode "origin" here);
 # the same library drives the local-HEAD secondmate sync used by fm-spawn.sh and
@@ -53,7 +65,9 @@ fi
 # --- main firstmate repo ---------------------------------------------------
 
 reread_firstmate="no"
-ff_target "$FM_ROOT" "firstmate" origin no no
+# allow_detached=yes: a pooled home is leased at a detached HEAD (see header);
+# ff_target advances it in place without checking out or branching main.
+ff_target "$FM_ROOT" "firstmate" origin yes no
 if [ "$FF_STATUS" = "updated" ] && [ -n "$FF_INSTR" ]; then
   reread_firstmate="yes"
 fi
