@@ -59,6 +59,8 @@ Both routes are implemented from the start rather than the fallback being retrof
 ## Limits
 
 - No per-window scope.
+- `screen` scope captures the whole virtual desktop in logical pixels on both routes, so under non-unity display scaling the result is not the monitor's native resolution.
+  On the captain's single output at scale 1.0 the two are the same thing.
 - The `portal` route always composites the pointer, so `cursor: false` is ignored there and the reply says so.
 - A region must fit inside the desktop; one that does not is refused rather than clamped.
 - A blanked or idle display captures as a genuinely black image on both routes.

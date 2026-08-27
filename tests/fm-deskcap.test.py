@@ -9,12 +9,16 @@ like total failures:
     Response subscription has to exist before the method call;
   - a session the compositor closed must be rebuilt, not reported as a failure;
   - the portal's output file must be removed after it is read, so captures never
-    accumulate in the captain's home directory.
+    accumulate in the captain's home directory;
+  - a close that arrives while a frame is being pulled must still be seen, which
+    only happens if the GLib default main context is pumped during the wait;
+  - one call gets one deadline, shared by the rebuild and by both routes.
 
 Live capture against the real compositor is not asserted here - it is
 docs/verification/desktop-capture.md plus `bin/fm-deskcap-mcp.py --selftest`.
 """
 import importlib.util
+import time
 import unittest
 from pathlib import Path
 
@@ -175,6 +179,260 @@ class ClosedSessionRebuildTest(unittest.TestCase):
             CAP._mutter_capture = original
         self.assertEqual(len(calls), 2)
 
+    def test_the_rebuild_gets_what_is_left_of_the_budget_not_a_fresh_one(self):
+        budgets = []
+
+        def flaky(scope, region, cursor, timeout):
+            budgets.append(timeout)
+            if len(budgets) == 1:
+                time.sleep(0.3)
+                raise CAP.SessionClosed("closed")
+            return PNG_1X1
+
+        original = CAP._mutter_capture
+        CAP._mutter_capture = flaky
+        try:
+            self.assertEqual(CAP._mutter_attempt("screen", None, True, 5.0), PNG_1X1)
+        finally:
+            CAP._mutter_capture = original
+        self.assertEqual(budgets[0], 5.0)
+        self.assertLess(budgets[1], budgets[0], "the rebuild restarted the timeout instead of continuing it")
+
+
+class MainContextPumpTest(unittest.TestCase):
+    """Signal callbacks only run while the default main context is iterated."""
+
+    def setUp(self):
+        if CAP._GI_IMPORT_ERROR is not None:
+            self.skipTest("GObject introspection bindings unavailable")
+        CAP._pump_main_context()
+
+    def test_pumping_delivers_a_callback_queued_on_the_default_context(self):
+        seen = {"ran": False}
+
+        def mark():
+            seen["ran"] = True
+            return False
+
+        CAP.GLib.idle_add(mark)
+        self.assertFalse(seen["ran"], "a queued callback must not run before the context is iterated")
+        CAP._pump_main_context()
+        self.assertTrue(seen["ran"], "a queued callback was not delivered by the pump")
+
+    def test_pumping_returns_promptly_when_nothing_is_queued(self):
+        started = time.monotonic()
+        CAP._pump_main_context()
+        self.assertLess(time.monotonic() - started, 1.0)
+
+
+class FakeSink:
+    """An appsink that never produces a sample, so the pull loop keeps waiting."""
+
+    def emit(self, _signal, _timeout_ns):
+        time.sleep(0.02)
+        return None
+
+
+class FakeGstBus:
+    def pop_filtered(self, _mask):
+        return None
+
+
+class FakePipeline:
+    def __init__(self):
+        self.states = []
+
+    def get_by_name(self, _name):
+        return FakeSink()
+
+    def set_state(self, state):
+        self.states.append(state)
+
+    def get_bus(self):
+        return FakeGstBus()
+
+
+class FakeGst:
+    MSECOND = 1000000
+    pipelines: list = []
+
+    class State:
+        PLAYING = "playing"
+        NULL = "null"
+
+    class MessageType:
+        ERROR = 1
+        EOS = 2
+
+    class MapFlags:
+        READ = 1
+
+    @classmethod
+    def parse_launch(cls, _description):
+        pipeline = FakePipeline()
+        cls.pipelines.append(pipeline)
+        return pipeline
+
+
+class ClosedDuringFramePullTest(unittest.TestCase):
+    """The window this covers is the one a headless RDP disconnect lands in."""
+
+    def setUp(self):
+        if CAP._GI_IMPORT_ERROR is not None:
+            self.skipTest("GObject introspection bindings unavailable")
+        CAP._pump_main_context()
+        FakeGst.pipelines = []
+        self.saved_gst = CAP.Gst
+        CAP.Gst = FakeGst
+
+    def tearDown(self):
+        CAP.Gst = self.saved_gst
+        CAP._pump_main_context()
+
+    def test_a_close_delivered_during_the_pull_ends_the_wait(self):
+        closed = {"seen": False}
+
+        def close_it():
+            closed["seen"] = True
+            return False
+
+        CAP.GLib.idle_add(close_it)
+        started = time.monotonic()
+        png = CAP._pull_png(7, 30.0, lambda: closed["seen"])
+        elapsed = time.monotonic() - started
+
+        self.assertEqual(png, b"", "a closed session must not be reported as a frame")
+        self.assertLess(elapsed, 5.0, "the close was not observed until the pull timed out")
+        self.assertEqual(len(FakeGst.pipelines), 1, "the pull never reached its wait loop")
+        self.assertEqual(FakeGst.pipelines[0].states[-1], FakeGst.State.NULL, "the pipeline was not torn down")
+
+    def test_an_already_closed_session_never_builds_a_pipeline(self):
+        self.assertEqual(CAP._pull_png(7, 30.0, lambda: True), b"")
+        self.assertEqual(FakeGst.pipelines, [])
+
+    def test_without_a_close_the_pull_still_gives_up_at_its_timeout(self):
+        started = time.monotonic()
+        self.assertEqual(CAP._pull_png(7, 0.3, lambda: False), b"")
+        self.assertLess(time.monotonic() - started, 5.0)
+
+
+class RecordingBus:
+    """A session bus that records D-Bus calls and can fire the stream signal."""
+
+    def __init__(self, node_id=None):
+        self.calls = []
+        self.node_id = node_id
+        self._next_sub = 1
+
+    def call_sync(self, _name, _path, _iface, method, args, _cancellable, _flags, timeout_ms, _extra):
+        self.calls.append(
+            {"method": method, "args": None if args is None else args.unpack(), "timeout_ms": timeout_ms}
+        )
+        if method == "CreateSession":
+            return CAP.GLib.Variant("(o)", ("/org/gnome/Mutter/ScreenCast/Session/u1",))
+        if method in ("RecordArea", "RecordMonitor"):
+            return CAP.GLib.Variant("(o)", ("/org/gnome/Mutter/ScreenCast/Session/u1/Stream/u1",))
+        return CAP.GLib.Variant("()", ())
+
+    def signal_subscribe(self, name, iface, signal, path, _arg0, _flags, callback):
+        sub = self._next_sub
+        self._next_sub += 1
+        if signal == "PipeWireStreamAdded" and self.node_id is not None:
+            node_id = self.node_id
+
+            def fire():
+                callback(self, name, path, iface, signal, CAP.GLib.Variant("(ua{sv})", (node_id, {})))
+                return False
+
+            CAP.GLib.idle_add(fire)
+        return sub
+
+    def signal_unsubscribe(self, _sub):
+        return None
+
+    def methods(self):
+        return [call["method"] for call in self.calls]
+
+    def args_for(self, method):
+        return [call["args"] for call in self.calls if call["method"] == method]
+
+
+class MutterStreamGeometryTest(unittest.TestCase):
+    """What the compositor route asks the compositor to record."""
+
+    TWO_MONITORS = {
+        "monitors": [
+            {"connector": "DP-1", "x": 0, "y": 0, "width": 1920, "height": 1080, "scale": 1.0, "primary": True},
+            {"connector": "DP-2", "x": 1920, "y": 0, "width": 1080, "height": 1200, "scale": 1.0, "primary": False},
+        ],
+        "primary": {"connector": "DP-1"},
+        "width": 3000,
+        "height": 1200,
+    }
+
+    def setUp(self):
+        if CAP._GI_IMPORT_ERROR is not None:
+            self.skipTest("GObject introspection bindings unavailable")
+        CAP._pump_main_context()
+        self.bus = RecordingBus(node_id=42)
+        self.saved = (CAP._session_bus, CAP._require_gst, CAP.display_state, CAP._pull_png)
+        CAP._session_bus = lambda: self.bus
+        CAP._require_gst = lambda: None
+        CAP.display_state = lambda *_args, **_kwargs: self.TWO_MONITORS
+        CAP._pull_png = lambda node_id, timeout, closed=None: PNG_1X1
+
+    def tearDown(self):
+        CAP._session_bus, CAP._require_gst, CAP.display_state, CAP._pull_png = self.saved
+        CAP._pump_main_context()
+
+    def test_screen_scope_records_the_whole_virtual_desktop(self):
+        self.assertEqual(CAP._mutter_capture("screen", None, True, 5.0), PNG_1X1)
+        areas = self.bus.args_for("RecordArea")
+        self.assertEqual(len(areas), 1, "screen scope did not record an area")
+        self.assertEqual(
+            tuple(areas[0][:4]),
+            (0, 0, 3000, 1200),
+            "screen scope recorded something other than the full virtual desktop",
+        )
+        self.assertNotIn("RecordMonitor", self.bus.methods())
+
+    def test_region_scope_records_exactly_the_requested_rectangle(self):
+        region = {"x": 10, "y": 20, "width": 30, "height": 40}
+        self.assertEqual(CAP._mutter_capture("region", region, True, 5.0), PNG_1X1)
+        self.assertEqual(tuple(self.bus.args_for("RecordArea")[0][:4]), (10, 20, 30, 40))
+
+    def test_the_session_is_started_and_stopped_around_the_capture(self):
+        CAP._mutter_capture("screen", None, True, 5.0)
+        methods = self.bus.methods()
+        self.assertEqual(methods[0], "CreateSession")
+        self.assertIn("Start", methods)
+        self.assertEqual(methods[-1], "Stop", "the screen-cast session was not torn down")
+
+    def test_no_d_bus_call_outlives_the_remaining_budget(self):
+        CAP._mutter_capture("screen", None, True, 1.0)
+        for call in self.bus.calls:
+            self.assertLessEqual(
+                call["timeout_ms"], 1000, f"{call['method']} was given longer than the whole capture budget"
+            )
+
+
+class ProbeWithoutBindingsTest(unittest.TestCase):
+    """probe() has to survive the machine it exists to diagnose."""
+
+    def test_a_broken_gi_import_is_reported_rather_than_raised(self):
+        saved = (CAP._GI_IMPORT_ERROR, CAP._GLIB_ERRORS)
+        CAP._GI_IMPORT_ERROR = "ValueError: Namespace Gst not available"
+        CAP._GLIB_ERRORS = ()
+        try:
+            report = CAP.probe()
+        finally:
+            CAP._GI_IMPORT_ERROR, CAP._GLIB_ERRORS = saved
+        for key in ("bindings", "gstreamer", "display", "mutter_route", "portal_route"):
+            self.assertIn(key, report)
+        self.assertIn("Namespace Gst not available", report["bindings"])
+        self.assertIn("Namespace Gst not available", report["mutter_route"])
+        self.assertIn("Namespace Gst not available", report["portal_route"])
+
 
 class RouteSelectionTest(unittest.TestCase):
     def setUp(self):
@@ -197,6 +455,52 @@ class RouteSelectionTest(unittest.TestCase):
         result = CAP.capture(scope="screen")
         self.assertEqual(result.route, "portal")
         self.assertTrue(any("screen cast refused" in note for note in result.notes))
+
+    def test_auto_falls_back_when_the_primary_route_raises_a_raw_glib_error(self):
+        if CAP._GI_IMPORT_ERROR is not None:
+            self.skipTest("GObject introspection bindings unavailable")
+        CAP._mutter_attempt = lambda *a: (_ for _ in ()).throw(
+            CAP.GLib.Error("no element videoconvert")
+        )
+        CAP._portal_capture = lambda *a: (PNG_1X1, [])
+        result = CAP.capture(scope="screen")
+        self.assertEqual(result.route, "portal")
+        self.assertTrue(any("videoconvert" in note for note in result.notes))
+
+    def test_a_raw_glib_error_on_a_pinned_route_is_reported_as_a_capture_failure(self):
+        if CAP._GI_IMPORT_ERROR is not None:
+            self.skipTest("GObject introspection bindings unavailable")
+        CAP._mutter_attempt = lambda *a: (_ for _ in ()).throw(CAP.GLib.Error("gst init failed"))
+        with self.assertRaises(CAP.CaptureError) as ctx:
+            CAP.capture(scope="screen", route="mutter")
+        self.assertIn("gst init failed", str(ctx.exception))
+
+    def test_the_fallback_continues_the_deadline_instead_of_restarting_it(self):
+        budgets = []
+
+        def slow_mutter(scope, region, cursor, timeout):
+            budgets.append(timeout)
+            time.sleep(0.3)
+            raise CAP.CaptureError("screen cast refused")
+
+        def portal(scope, region, cursor, timeout):
+            budgets.append(timeout)
+            return PNG_1X1, []
+
+        CAP._mutter_attempt = slow_mutter
+        CAP._portal_capture = portal
+        self.assertEqual(CAP.capture(scope="screen", timeout=5.0).route, "portal")
+        self.assertLessEqual(budgets[0], 5.0)
+        self.assertLess(budgets[1], budgets[0], "the portal route was handed a fresh budget")
+
+    def test_a_malformed_rectangle_is_refused_before_the_compositor_is_asked(self):
+        def refuse():
+            raise AssertionError("the display layout was read before the rectangle was checked")
+
+        CAP.display_state = refuse
+        CAP._mutter_attempt = lambda *a: (_ for _ in ()).throw(AssertionError("no capture must be attempted"))
+        with self.assertRaises(CAP.CaptureError):
+            CAP.capture(scope="region", region={"x": 0, "y": 0, "width": 0, "height": 10})
 
     def test_a_pinned_route_does_not_fall_back(self):
         CAP._mutter_attempt = lambda *a: (_ for _ in ()).throw(CAP.CaptureError("screen cast refused"))

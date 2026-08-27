@@ -63,12 +63,16 @@ $ find ~/Pictures -newermt '2026-08-27 10:20' -printf '%T+ %p\n'
 The only listed file predates every capture above, and the directory's own timestamp is the expected trace of files being created and removed again.
 
 A later sweep, taken after the display had blanked, returned an all-black 1920x1009 PNG on both routes.
-Both routes agreeing on black while `RecordMonitor` still succeeded is the expected reading of a blanked display rather than a failed capture or a torn-down monitor.
+Both routes agreeing on black while the compositor route's screen cast still succeeded is the expected reading of a blanked display rather than a failed capture or a torn-down monitor.
 
 ## What is not verified here
 
 - The rebuild after the compositor closes a screen-cast session is covered by unit tests over the retry contract, not by a real RDP disconnect and reconnect.
   A live disconnect test needs the captain's own client and was not performed.
 - Multiple monitors, non-unity scaling, and non-Meta connectors are untested, because this session has one virtual output at scale 1.0.
-  The connector and mode resolution is written for several monitors and is unit-tested against a two-monitor reply shape, but no real multi-monitor capture has been taken.
+  Both routes take `screen` scope as the full virtual desktop bounds by construction, the compositor route through `RecordArea(0, 0, width, height)`, so the two routes cannot disagree about what `screen` means on a multi-monitor layout.
+  What remains unverified there is the geometry itself: the connector and mode resolution that computes those bounds is unit-tested against a two-monitor reply shape, but no real multi-monitor capture has been taken.
+  Non-unity scaling is likewise unverified, and `screen` scope captures in logical pixels, so a scaled monitor would not be captured at its native resolution.
 - Long-lived behavior is untested beyond back-to-back captures; the longest run here was the 80-capture latency sweep above.
+- The compositor-route `screen` figures above were measured while that route recorded the primary monitor by connector.
+  It now records the full virtual desktop bounds instead, which is the same 1920x1009 rectangle on this single-output session, but the sweep has not been re-run since that change.

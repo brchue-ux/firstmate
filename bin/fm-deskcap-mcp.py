@@ -133,7 +133,7 @@ def tool_desktop_screenshot(arguments: dict[str, Any]) -> list[dict[str, Any]]:
             raise CAPTURE.CaptureError(
                 "scope 'region' needs " + ", ".join(missing) + "; give the rectangle in pixels"
             )
-        region = CAPTURE.normalize_region({k: arguments[k] for k in ("x", "y", "width", "height")})
+        region = {k: arguments[k] for k in ("x", "y", "width", "height")}
 
     result = CAPTURE.capture(
         scope=scope,

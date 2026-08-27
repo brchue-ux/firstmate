@@ -41,7 +41,19 @@ disconnects, and Mutter reuses PipeWire node ids across sessions. A per-call
 session cannot serve a stale frame, cannot outlive the monitor it recorded, and
 still lands around 100 ms. Session.Closed is handled on top of that: if the
 compositor closes the session mid-capture, the capture is rebuilt once rather
-than reported as a failure.
+than reported as a failure. That close is only observable while the GLib default
+main context is iterated, so the frame pull pumps it by hand rather than blocking
+on GStreamer alone.
+
+Both scopes record through RecordArea: `screen` is the full virtual desktop
+bounds, not the primary monitor, so both routes answer the same arguments with
+the same content on a multi-monitor layout. RecordArea works in logical pixels,
+which under non-unity scaling is not a monitor's native resolution.
+
+One capture gets one end-to-end deadline. The rebuild after a close and the
+fallback to the portal both spend what is left of it rather than each starting a
+fresh budget, and every D-Bus call is capped by the remainder, so a wedged
+compositor cannot stack timeouts against a caller serving requests in sequence.
 
 Environment: only XDG_RUNTIME_DIR and DBUS_SESSION_BUS_ADDRESS are required. No
 WAYLAND_DISPLAY, no DISPLAY, no desktop session inheritance - an agent process
@@ -87,6 +99,10 @@ SCOPES = ("screen", "region")
 
 DEFAULT_TIMEOUT = 15.0
 DBUS_CALL_TIMEOUT_MS = 10000
+# Floor on what any single attempt is given once the shared deadline is nearly
+# spent, so a late attempt fails fast instead of not being tried at all.
+MIN_ATTEMPT_SECONDS = 0.5
+MIN_CALL_TIMEOUT_MS = 100
 
 _GI_IMPORT_ERROR: str | None = None
 try:
@@ -99,6 +115,15 @@ try:
     from gi.repository import GdkPixbuf, Gio, GLib, Gst
 except Exception as err:  # noqa: BLE001 - reported as a clean CaptureError later
     _GI_IMPORT_ERROR = f"{type(err).__name__}: {err}"
+
+# Every `except` clause below reaches for this rather than naming GLib.Error
+# directly: when the import above failed the name GLib does not exist, and an
+# except clause that mentions it dies with NameError on exactly the broken
+# machine `probe` is meant to diagnose.
+if _GI_IMPORT_ERROR is None:
+    _GLIB_ERRORS: tuple[type[BaseException], ...] = (GLib.Error,)
+else:
+    _GLIB_ERRORS = ()
 
 
 class CaptureError(RuntimeError):
@@ -179,6 +204,34 @@ def _require_gst() -> None:
         raise CaptureError("the GStreamer element pngenc is missing; install gstreamer1.0-plugins-good")
 
 
+def _remaining(deadline: float) -> float:
+    """Seconds left before `deadline`, floored so an attempt is still made."""
+    return max(MIN_ATTEMPT_SECONDS, deadline - time.monotonic())
+
+
+def _call_timeout_ms(deadline: float) -> int:
+    """A single D-Bus call's timeout, never longer than what `deadline` allows."""
+    left = int((deadline - time.monotonic()) * 1000)
+    return max(MIN_CALL_TIMEOUT_MS, min(DBUS_CALL_TIMEOUT_MS, left))
+
+
+def _error_text(err: BaseException) -> str:
+    """A readable message from either a CaptureError or a raw GLib.Error."""
+    return getattr(err, "message", None) or str(err)
+
+
+def _pump_main_context() -> None:
+    """Deliver anything queued on the default main context without blocking.
+
+    D-Bus signal callbacks only run while that context is iterated. Code that
+    blocks on something other than a main loop has to pump it by hand, or a
+    signal that already arrived stays queued and is never observed.
+    """
+    context = GLib.MainContext.default()
+    while context.pending():
+        context.iteration(False)
+
+
 def _run_until(predicate, timeout: float) -> bool:
     """Iterate the default main context until `predicate()` is true or `timeout` elapses."""
     loop = GLib.MainLoop()
@@ -214,12 +267,13 @@ def _run_until(predicate, timeout: float) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def display_state() -> dict[str, Any]:
+def display_state(timeout_ms: int = DBUS_CALL_TIMEOUT_MS) -> dict[str, Any]:
     """The virtual desktop's connector name and bounds, from Mutter's DisplayConfig.
 
     On the captain's headless RDP session this is a single synthetic monitor
     (connector `Meta-0`), but the shape below handles several logical monitors
-    without assuming one.
+    without assuming one. `width`/`height` are the full virtual desktop bounds;
+    `monitors` keeps the per-monitor detail that probe output relies on.
     """
     bus = _session_bus()
     try:
@@ -231,7 +285,7 @@ def display_state() -> dict[str, Any]:
             None,
             None,
             Gio.DBusCallFlags.NONE,
-            DBUS_CALL_TIMEOUT_MS,
+            timeout_ms,
             None,
         ).unpack()
     except GLib.Error as err:
@@ -327,7 +381,7 @@ def _mutter_capture(scope: str, region: dict[str, int] | None, cursor: bool, tim
             GLib.Variant("(a{sv})", ({},)),
             None,
             Gio.DBusCallFlags.NONE,
-            DBUS_CALL_TIMEOUT_MS,
+            _call_timeout_ms(deadline),
             None,
         ).unpack()[0]
     except GLib.Error as err:
@@ -350,7 +404,7 @@ def _mutter_capture(scope: str, region: dict[str, int] | None, cursor: bool, tim
             args,
             None,
             Gio.DBusCallFlags.NONE,
-            DBUS_CALL_TIMEOUT_MS,
+            _call_timeout_ms(deadline),
             None,
         )
 
@@ -371,21 +425,22 @@ def _mutter_capture(scope: str, region: dict[str, int] | None, cursor: bool, tim
         )
 
         props = {"cursor-mode": GLib.Variant("u", CURSOR_EMBEDDED if cursor else CURSOR_HIDDEN)}
+        if scope == "region":
+            assert region is not None
+            area = region
+        else:
+            # `screen` means the whole virtual desktop, not the primary monitor,
+            # so both routes answer the same arguments with the same content.
+            bounds = display_state(_call_timeout_ms(deadline))
+            area = {"x": 0, "y": 0, "width": bounds["width"], "height": bounds["height"]}
         try:
-            if scope == "region":
-                assert region is not None
-                stream_path = _session_call(
-                    "RecordArea",
-                    GLib.Variant(
-                        "(iiiia{sv})",
-                        (region["x"], region["y"], region["width"], region["height"], props),
-                    ),
-                ).unpack()[0]
-            else:
-                connector = display_state()["primary"]["connector"]
-                stream_path = _session_call(
-                    "RecordMonitor", GLib.Variant("(sa{sv})", (connector, props))
-                ).unpack()[0]
+            stream_path = _session_call(
+                "RecordArea",
+                GLib.Variant(
+                    "(iiiia{sv})",
+                    (area["x"], area["y"], area["width"], area["height"], props),
+                ),
+            ).unpack()[0]
         except GLib.Error as err:
             raise CaptureError(f"Mutter refused the {scope} stream: {err.message}") from err
 
@@ -409,14 +464,12 @@ def _mutter_capture(scope: str, region: dict[str, int] | None, cursor: bool, tim
         except GLib.Error as err:
             raise CaptureError(f"Mutter refused to start the screen cast: {err.message}") from err
 
-        remaining = max(0.2, deadline - time.monotonic())
-        if not _run_until(lambda: node["id"] is not None or closed["seen"], remaining):
+        if not _run_until(lambda: node["id"] is not None or closed["seen"], _remaining(deadline)):
             raise CaptureError("Mutter never announced a PipeWire stream for the capture")
         if closed["seen"]:
             raise SessionClosed("the compositor closed the screen-cast session before it produced a frame")
 
-        remaining = max(0.5, deadline - time.monotonic())
-        png = _pull_png(int(node["id"]), remaining)
+        png = _pull_png(int(node["id"]), _remaining(deadline), lambda: closed["seen"])
         if not png and closed["seen"]:
             raise SessionClosed("the compositor closed the screen-cast session mid-capture")
         if not png:
@@ -432,13 +485,21 @@ def _mutter_capture(scope: str, region: dict[str, int] | None, cursor: bool, tim
             pass
 
 
-def _pull_png(node_id: int, timeout: float) -> bytes:
+def _pull_png(node_id: int, timeout: float, closed=None) -> bytes:
     """Encode exactly one frame off PipeWire node `node_id` to PNG, in memory.
 
     `num-buffers=1` plus `pngenc snapshot=true` guarantees a freshly presented
     frame rather than whatever a long-lived pipeline last held. The PNG is pulled
     out of an appsink instead of a filesink so a capture never touches the disk.
+
+    `closed`, when given, is polled for the compositor having closed the session
+    underneath this pipeline. Waiting here blocks on GStreamer rather than on a
+    main loop, so the default main context is pumped each pass; without that the
+    Session.Closed signal that sets `closed` would sit queued until after the
+    capture had already been given up on as a plain timeout.
     """
+    if closed is not None and closed():
+        return b""
     pipeline = Gst.parse_launch(
         f"pipewiresrc path={node_id} num-buffers=1 ! videoconvert ! "
         "pngenc snapshot=true ! "
@@ -449,6 +510,9 @@ def _pull_png(node_id: int, timeout: float) -> bytes:
     try:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
+            _pump_main_context()
+            if closed is not None and closed():
+                return b""
             # GstApp's typelib is not installed here, so the action signal is
             # used rather than the bound try_pull_sample() method.
             sample = sink.emit("try-pull-sample", 200 * Gst.MSECOND)
@@ -462,6 +526,9 @@ def _pull_png(node_id: int, timeout: float) -> bytes:
                 finally:
                     buf.unmap(info)
             msg = pipeline.get_bus().pop_filtered(Gst.MessageType.ERROR | Gst.MessageType.EOS)
+            _pump_main_context()
+            if closed is not None and closed():
+                return b""
             if msg is not None and msg.type == Gst.MessageType.ERROR:
                 err, _debug = msg.parse_error()
                 raise CaptureError(f"capture pipeline failed: {err.message}")
@@ -492,6 +559,7 @@ def _portal_request_path(bus: Any, token: str) -> str:
 
 def _portal_capture(scope: str, region: dict[str, int] | None, cursor: bool, timeout: float) -> tuple[bytes, list[str]]:
     bus = _session_bus()
+    deadline = time.monotonic() + timeout
     notes: list[str] = []
     if not cursor:
         notes.append("the portal route always composites the pointer; cursor=false was ignored")
@@ -526,13 +594,13 @@ def _portal_capture(scope: str, region: dict[str, int] | None, cursor: bool, tim
                 GLib.Variant("(sa{sv})", ("", options)),
                 None,
                 Gio.DBusCallFlags.NONE,
-                DBUS_CALL_TIMEOUT_MS,
+                _call_timeout_ms(deadline),
                 None,
             )
         except GLib.Error as err:
             raise CaptureError(f"the desktop portal refused a screenshot: {err.message}") from err
 
-        if not _run_until(lambda: "code" in answer, timeout):
+        if not _run_until(lambda: "code" in answer, _remaining(deadline)):
             raise CaptureError("the desktop portal never answered the screenshot request")
         if answer["code"] != 0:
             raise CaptureError(
@@ -619,35 +687,49 @@ def capture(
 
     `route="auto"` uses the compositor's own screen-cast API and falls back to
     the desktop portal if that route fails for any reason.
+
+    This is the single owner of region validation. The rectangle's own shape is
+    checked first, in its own statement, so a malformed one is refused before any
+    compositor call rather than depending on argument evaluation order.
+
+    `timeout` is one end-to-end budget for the whole call. It is shared by the
+    close-and-rebuild retry and by both routes, and every D-Bus call is capped by
+    what is left of it, so a wedged compositor cannot stack timeouts.
     """
     if scope not in SCOPES:
         raise CaptureError(f"scope must be one of {', '.join(SCOPES)} (window scope is not in this slice)")
     if route not in ROUTES:
         raise CaptureError(f"route must be one of {', '.join(ROUTES)}")
     if scope == "region":
-        region = fit_region(normalize_region(region), display_state())
+        region = normalize_region(region)
+        region = fit_region(region, display_state())
     else:
         region = None
 
     notes: list[str] = []
     started = time.monotonic()
+    deadline = started + timeout
     order = ("mutter", "portal") if route == "auto" else (route,)
     failures: list[str] = []
 
     for chosen in order:
         try:
+            budget = _remaining(deadline)
             if chosen == "mutter":
-                png = _mutter_attempt(scope, region, cursor, timeout)
+                png = _mutter_attempt(scope, region, cursor, budget)
             else:
-                png, portal_notes = _portal_capture(scope, region, cursor, timeout)
+                png, portal_notes = _portal_capture(scope, region, cursor, budget)
                 notes.extend(portal_notes)
             elapsed = (time.monotonic() - started) * 1000
             result = Capture(png, chosen, scope, elapsed, notes)
             if failures:
                 result.notes.append("fell back after: " + "; ".join(failures))
             return result
-        except CaptureError as err:
-            failures.append(f"{chosen}: {err}")
+        except (CaptureError, *_GLIB_ERRORS) as err:
+            # A raw GLib.Error out of GStreamer or D-Bus is a failure of that
+            # route, not of the call. Treating it as one is what keeps the
+            # fallback reachable when the primary route breaks.
+            failures.append(f"{chosen}: {_error_text(err)}")
 
     raise CaptureError("; ".join(failures))
 
@@ -656,12 +738,14 @@ def _mutter_attempt(scope: str, region: dict[str, int] | None, cursor: bool, tim
     """The primary route, retried once when the compositor closes the session.
 
     A headless RDP session's virtual monitor is rebuilt on reconnect, so a close
-    means "build a new session", not "capture is unavailable".
+    means "build a new session", not "capture is unavailable". The rebuild gets
+    what is left of `timeout`, not a fresh copy of it.
     """
+    deadline = time.monotonic() + timeout
     try:
         return _mutter_capture(scope, region, cursor, timeout)
     except SessionClosed:
-        return _mutter_capture(scope, region, cursor, timeout)
+        return _mutter_capture(scope, region, cursor, _remaining(deadline))
 
 
 def probe() -> dict[str, Any]:
@@ -685,6 +769,9 @@ def probe() -> dict[str, Any]:
         ("mutter", MUTTER_BUS, MUTTER_PATH, MUTTER_BUS),
         ("portal", PORTAL_BUS, PORTAL_PATH, PORTAL_SCREENSHOT_IFACE),
     ):
+        if _GI_IMPORT_ERROR is not None:
+            report[f"{label}_route"] = f"unknown: {_GI_IMPORT_ERROR}"
+            continue
         try:
             bus = _session_bus()
             bus.call_sync(
@@ -699,9 +786,8 @@ def probe() -> dict[str, Any]:
                 None,
             )
             report[f"{label}_route"] = "reachable"
-        except (CaptureError, GLib.Error) as err:
-            message = err.message if hasattr(err, "message") else str(err)
-            report[f"{label}_route"] = f"unreachable: {message}"
+        except (CaptureError, *_GLIB_ERRORS) as err:
+            report[f"{label}_route"] = f"unreachable: {_error_text(err)}"
     return report
 
 
