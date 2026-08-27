@@ -68,6 +68,12 @@
 #
 # `--ensure` runs a real `npm install` and is therefore never called from the spawn
 # path, which stays read-only and fast; firstmate or the captain runs it once per host.
+# Because the dispatch diagnostic names that command to every home on the host and
+# they all install into the same prefix, `--ensure` is single-flight: one run claims
+# an atomic mkdir lock beside the prefix and installs, and any concurrent run waits
+# for it and reports the entry point it produced rather than reifying a second npm
+# tree over the first. Two homes running the documented command in the same minute is
+# the ordinary case here, not an error, so the waiter exits 0 on the winner's result.
 set -u
 
 # The last chrome-devtools-mcp release whose take_snapshot/evaluate_script schemas
@@ -184,30 +190,65 @@ resolve_pin() {
   return 2
 }
 
-ensure_pin() {
-  local status entry root log npm_status
-  resolve_pin >/dev/null 2>&1
-  status=$?
-  case "$status" in
-    0) resolve_pin; return 0 ;;
-    3) return 3 ;;
+# Whether the process recorded in a claimed lock is still running. A lock with no
+# readable numeric pid is treated as not held, so a crash between the mkdir and the
+# pid write cannot wedge the prefix forever.
+install_lock_holder_alive() {
+  local lock=$1 pid
+  pid=$(cat "$lock/pid" 2>/dev/null || true)
+  case "$pid" in
+    ''|*[!0-9]*) return 1 ;;
   esac
+  kill -0 "$pid" 2>/dev/null
+}
 
-  # Only the fleet-managed location is ours to create. A configured or inherited
-  # path that does not exist is somebody's explicit choice pointing at nothing;
-  # installing something else underneath it would hide that, so report instead.
-  # (configured_pin covers both FM_BROWSER_MCP_PIN and config/browser-mcp-pin.)
-  if [ -n "${CHROME_DEVTOOLS_AXI_MCP_PATH:-}" ] || [ -n "$(configured_pin)" ]; then
-    resolve_pin
-    return 2
-  fi
+# The claim itself is the mkdir: it succeeds for exactly one process, so two runs
+# cannot both decide they are the installer the way a test-then-create lets them.
+install_lock_claim() {
+  local lock=$1
+  mkdir "$lock" 2>/dev/null || return 1
+  printf '%s\n' "$$" > "$lock/pid" 2>/dev/null || true
+  return 0
+}
 
-  root=$(pin_root)
-  entry=$(pin_entry_point)
-  if ! command -v npm >/dev/null 2>&1; then
-    echo "fm-browser-mcp-pin: npm is not on PATH; cannot install chrome-devtools-mcp $PIN_VERSION" >&2
-    return 2
-  fi
+# Reclaim a lock whose owner died. The removal happens only after claiming a
+# separate reclaim lock and re-reading liveness under it, so two runs that both
+# see the same dead owner cannot both remove it, and an owner that is merely slow
+# to write its pid is re-checked before anything of its is touched.
+install_lock_reclaim_if_stale() {
+  local lock=$1
+  local reclaim="$lock.reclaim"
+  install_lock_holder_alive "$lock" && return 1
+  mkdir "$reclaim" 2>/dev/null || return 1
+  install_lock_holder_alive "$lock" || rm -rf "$lock"
+  rm -rf "$reclaim"
+  return 0
+}
+
+install_lock_acquire() {
+  local lock=$1
+  install_lock_claim "$lock" && return 0
+  install_lock_reclaim_if_stale "$lock" || return 1
+  install_lock_claim "$lock"
+}
+
+# Wait out the run that holds the lock. Ends as soon as the entry point appears,
+# so the ordinary case (the winner finishes) costs the waiter only the install.
+install_lock_wait() {
+  local lock=$1 entry=$2 waited=0 limit
+  limit=$(( ${FM_BROWSER_MCP_INSTALL_WAIT:-120} * 5 ))
+  while [ -d "$lock" ]; do
+    [ -f "$entry" ] && return 0
+    [ "$waited" -ge "$limit" ] && return 1
+    sleep 0.2
+    waited=$((waited + 1))
+  done
+  [ -f "$entry" ]
+}
+
+# The install proper, always run with the prefix lock held.
+install_pin() {
+  local root=$1 entry=$2 log npm_status
   mkdir -p "$root/$PIN_VERSION" || {
     echo "fm-browser-mcp-pin: could not create $root/$PIN_VERSION" >&2
     return 2
@@ -239,6 +280,51 @@ ensure_pin() {
     return 2
   fi
   emit_pin "$entry"
+}
+
+ensure_pin() {
+  local status entry root lock
+  resolve_pin >/dev/null 2>&1
+  status=$?
+  case "$status" in
+    0) resolve_pin; return 0 ;;
+    3) return 3 ;;
+  esac
+
+  # Only the fleet-managed location is ours to create. A configured or inherited
+  # path that does not exist is somebody's explicit choice pointing at nothing;
+  # installing something else underneath it would hide that, so report instead.
+  # (configured_pin covers both FM_BROWSER_MCP_PIN and config/browser-mcp-pin.)
+  if [ -n "${CHROME_DEVTOOLS_AXI_MCP_PATH:-}" ] || [ -n "$(configured_pin)" ]; then
+    resolve_pin
+    return 2
+  fi
+
+  root=$(pin_root)
+  entry=$(pin_entry_point)
+  if ! command -v npm >/dev/null 2>&1; then
+    echo "fm-browser-mcp-pin: npm is not on PATH; cannot install chrome-devtools-mcp $PIN_VERSION" >&2
+    return 2
+  fi
+  mkdir -p "$root" || {
+    echo "fm-browser-mcp-pin: could not create $root" >&2
+    return 2
+  }
+
+  lock="$root/.$PIN_VERSION.install.lock"
+  if install_lock_acquire "$lock"; then
+    install_pin "$root" "$entry"
+    status=$?
+    rm -rf "$lock"
+    return "$status"
+  fi
+
+  if install_lock_wait "$lock" "$entry"; then
+    emit_pin "$entry"
+    return
+  fi
+  echo "fm-browser-mcp-pin: another --ensure run holds $lock and $entry is still absent; if no install is running, remove that lock and retry" >&2
+  return 2
 }
 
 case "${1:-path}" in
