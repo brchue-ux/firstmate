@@ -290,22 +290,21 @@ test_ensure_success_stays_quiet_and_prints_only_the_entry_point() {
   pass "a successful --ensure prints only the entry point and stays quiet"
 }
 
-test_concurrent_ensure_installs_exactly_once() {
-  local rec version entry marker out_a out_b status_a status_b installs CASE_PATH
+test_concurrent_ensure_publishes_exactly_one_tree() {
+  local rec version entry out_a out_b status_a status_b published leftovers CASE_PATH
   rec=$(make_pin_case ensure_concurrent)
   read_pin_case "$rec"
   version=$(run_pin "$HOME_DIR" "$ROOT_DIR" --version)
   entry="$ROOT_DIR/$version/node_modules/chrome-devtools-mcp/build/src/bin/chrome-devtools-mcp.js"
-  marker="$TMP_ROOT/ensure_concurrent/installs"
   mkdir -p "$TMP_ROOT/ensure_concurrent"
-  # A stand-in npm slow enough that the second caller is guaranteed to arrive while
-  # the first still holds the prefix, and that records every invocation so the
-  # assertion below counts real installs rather than trusting timing.
+  # A stand-in npm slow enough that both callers are guaranteed to be staging at
+  # once, stamping each staged tree with the pid that built it so the published
+  # tree can be shown to come from exactly one of them.
   CASE_PATH=$(make_fake_npm "$TMP_ROOT/ensure_concurrent/fake" \
-    "printf 'install\\n' >> '$marker'
-     sleep 1
+    "sleep 1
      mkdir -p node_modules/chrome-devtools-mcp/build/src/bin
-     printf '// installed\\n' > node_modules/chrome-devtools-mcp/build/src/bin/chrome-devtools-mcp.js")
+     printf '// installed\\n' > node_modules/chrome-devtools-mcp/build/src/bin/chrome-devtools-mcp.js
+     printf '%s\\n' \"\$PPID\" > node_modules/chrome-devtools-mcp/builder")
 
   CASE_PATH="$CASE_PATH" run_pin "$HOME_DIR" "$ROOT_DIR" --ensure > "$TMP_ROOT/ensure_concurrent/a.out" 2>"$TMP_ROOT/ensure_concurrent/a.err" &
   local pid_a=$!
@@ -315,41 +314,53 @@ test_concurrent_ensure_installs_exactly_once() {
   wait "$pid_b"; status_b=$?
 
   expect_code 0 "$status_a" "the first concurrent --ensure should succeed"
-  expect_code 0 "$status_b" "the second concurrent --ensure should succeed on the winner's install"
+  expect_code 0 "$status_b" "the second concurrent --ensure should succeed on the published tree"
   out_a=$(cat "$TMP_ROOT/ensure_concurrent/a.out")
   out_b=$(cat "$TMP_ROOT/ensure_concurrent/b.out")
   [ "$out_a" = "$entry" ] || fail "the first concurrent --ensure did not print the entry point: $out_a"
   [ "$out_b" = "$entry" ] || fail "the second concurrent --ensure did not print the entry point: $out_b"
-  installs=$(wc -l < "$marker")
-  [ "$installs" -eq 1 ] || fail "concurrent --ensure runs installed $installs times into one shared prefix"
-  [ ! -d "$ROOT_DIR/.$version.install.lock" ] || fail "--ensure left its install lock behind"
-  pass "concurrent --ensure runs install once and both report the resolved pin"
+  # Exactly one tree published: one builder stamp, and nothing nested under the
+  # live prefix by a rename that lost.
+  published=$(find "$ROOT_DIR/$version" -name builder | wc -l)
+  [ "$published" -eq 1 ] || fail "the live prefix holds $published published trees, not one"
+  leftovers=$(find "$ROOT_DIR" -maxdepth 1 -name ".$version.staging.*" | wc -l)
+  [ "$leftovers" -eq 0 ] || fail "concurrent --ensure runs left $leftovers staging directories behind"
+  pass "concurrent --ensure runs publish exactly one tree and both report the resolved pin"
 }
 
-test_ensure_recovers_from_a_lock_left_by_a_dead_process() {
-  local rec version entry out status CASE_PATH lock
-  rec=$(make_pin_case ensure_stale_lock)
+test_failed_install_never_publishes_a_partial_tree() {
+  local rec version live out err status CASE_PATH leftovers
+  rec=$(make_pin_case ensure_partial)
   read_pin_case "$rec"
   version=$(run_pin "$HOME_DIR" "$ROOT_DIR" --version)
-  entry="$ROOT_DIR/$version/node_modules/chrome-devtools-mcp/build/src/bin/chrome-devtools-mcp.js"
-  lock="$ROOT_DIR/.$version.install.lock"
-  # A lock naming a pid that is provably gone, which is what a killed --ensure
-  # leaves behind. Reclaiming it must not need a human.
-  mkdir -p "$lock"
-  ( exit 0 ) &
-  local dead=$!
-  wait "$dead" 2>/dev/null || true
-  printf '%s\n' "$dead" > "$lock/pid"
-  CASE_PATH=$(make_fake_npm "$TMP_ROOT/ensure_stale_lock/fake" \
+  live="$ROOT_DIR/$version"
+  err="$TMP_ROOT/ensure_partial.err"
+  # npm extracting the package's own entry point and then failing before its
+  # dependencies land is exactly what a killed or offline install leaves behind.
+  # Nothing downstream may ever see that tree, because [ -f entry ] is the only
+  # proof the launch line has that the pin is usable.
+  CASE_PATH=$(make_fake_npm "$TMP_ROOT/ensure_partial/fake" \
     'mkdir -p node_modules/chrome-devtools-mcp/build/src/bin
-     printf "// installed\n" > node_modules/chrome-devtools-mcp/build/src/bin/chrome-devtools-mcp.js')
+     printf "// half-extracted\n" > node_modules/chrome-devtools-mcp/build/src/bin/chrome-devtools-mcp.js
+     echo "npm error code ENOTFOUND" >&2
+     exit 1')
 
-  out=$(FM_BROWSER_MCP_INSTALL_WAIT=2 CASE_PATH="$CASE_PATH" \
-    run_pin "$HOME_DIR" "$ROOT_DIR" --ensure)
+  out=$(CASE_PATH="$CASE_PATH" run_pin "$HOME_DIR" "$ROOT_DIR" --ensure 2>"$err")
   status=$?
-  expect_code 0 "$status" "--ensure should reclaim a lock whose owner is gone"
-  [ "$out" = "$entry" ] || fail "--ensure did not install after reclaiming a stale lock: $out"
-  pass "a lock left by a killed --ensure is reclaimed rather than deadlocked on"
+  expect_code 2 "$status" "a failed install should refuse"
+  [ -z "$out" ] || fail "a failed install printed a path: $out"
+  assert_grep "ENOTFOUND" "$err" "npm's own failure reason was swallowed by the refusal"
+  [ ! -e "$live" ] || fail "a failed install published a partial tree at $live"
+  leftovers=$(find "$ROOT_DIR" -maxdepth 1 -name ".$version.staging.*" | wc -l)
+  [ "$leftovers" -eq 0 ] || fail "a failed install left $leftovers staging directories behind"
+
+  # The refusal must still be reachable afterwards rather than short-circuiting on
+  # a half-built prefix that was never published.
+  out=$(run_pin "$HOME_DIR" "$ROOT_DIR" path 2>/dev/null)
+  status=$?
+  expect_code 2 "$status" "a failed install must leave the pin unresolved, not resolved to nothing"
+  [ -z "$out" ] || fail "a failed install still resolved a pin: $out"
+  pass "a failed install leaves the live prefix absent instead of publishing a partial tree"
 }
 
 test_unknown_argument_is_refused() {
@@ -374,6 +385,6 @@ test_ensure_never_installs_over_an_explicit_pin
 test_ensure_is_a_no_op_once_the_pin_is_present
 test_ensure_failure_carries_npms_own_reason
 test_ensure_success_stays_quiet_and_prints_only_the_entry_point
-test_concurrent_ensure_installs_exactly_once
-test_ensure_recovers_from_a_lock_left_by_a_dead_process
+test_concurrent_ensure_publishes_exactly_one_tree
+test_failed_install_never_publishes_a_partial_tree
 test_unknown_argument_is_refused

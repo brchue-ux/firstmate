@@ -68,12 +68,17 @@
 #
 # `--ensure` runs a real `npm install` and is therefore never called from the spawn
 # path, which stays read-only and fast; firstmate or the captain runs it once per host.
-# Because the dispatch diagnostic names that command to every home on the host and
-# they all install into the same prefix, `--ensure` is single-flight: one run claims
-# an atomic mkdir lock beside the prefix and installs, and any concurrent run waits
-# for it and reports the entry point it produced rather than reifying a second npm
-# tree over the first. Two homes running the documented command in the same minute is
-# the ordinary case here, not an error, so the waiter exits 0 on the winner's result.
+# npm never reifies into the live prefix. It installs into a private staging directory
+# beside it, the entry point is verified there, and only a completed tree is published
+# with a single rename. Two consequences the rest of this script depends on:
+#   - `[ -f "$entry" ]` means a finished install, never a half-extracted one. A killed
+#     or failed `--ensure` leaves the live prefix exactly as it was, so a worker can
+#     never be pinned onto a tree whose dependencies never landed - which would stop
+#     the bridge from starting at all.
+#   - Concurrent runs need no mutex. The dispatch diagnostic names this command to
+#     every home on the host, so two of them running it in the same minute is ordinary;
+#     each stages its own tree, one rename wins, and the run whose rename loses
+#     discards its staging copy and reports the winner's entry point with exit 0.
 set -u
 
 # The last chrome-devtools-mcp release whose take_snapshot/evaluate_script schemas
@@ -101,12 +106,27 @@ pin_root() {
   printf '%s' "${XDG_CACHE_HOME:-$HOME/.cache}/firstmate/browser-mcp"
 }
 
-# The entry point npm lays down for a given install prefix. chrome-devtools-mcp
-# ships this path in every release in the supported range.
+# The entry point npm lays down under an install prefix, relative to that prefix.
+# chrome-devtools-mcp ships this path in every release in the supported range.
+ENTRY_REL=node_modules/chrome-devtools-mcp/build/src/bin/chrome-devtools-mcp.js
+
 pin_entry_point() {
-  printf '%s/%s/node_modules/chrome-devtools-mcp/build/src/bin/chrome-devtools-mcp.js' \
-    "$(pin_root)" "$PIN_VERSION"
+  printf '%s/%s/%s' "$(pin_root)" "$PIN_VERSION" "$ENTRY_REL"
 }
+
+# The staging directory this run owns, if any, so an interrupted `--ensure` takes
+# its half-built tree with it instead of leaving it in a cache directory nobody
+# looks at. Empty on the read-only `path` route, which creates nothing.
+STAGED_DIR=
+
+discard_staged() {
+  [ -n "$STAGED_DIR" ] || return 0
+  rm -rf "$STAGED_DIR"
+  STAGED_DIR=
+}
+trap discard_staged EXIT
+trap 'discard_staged; exit 130' INT
+trap 'discard_staged; exit 143' TERM
 
 # The home's configured pin: FM_BROWSER_MCP_PIN when set, otherwise the first
 # non-empty, non-comment line of config/browser-mcp-pin. Empty when neither is set.
@@ -190,73 +210,41 @@ resolve_pin() {
   return 2
 }
 
-# Whether the process recorded in a claimed lock is still running. A lock with no
-# readable numeric pid is treated as not held, so a crash between the mkdir and the
-# pid write cannot wedge the prefix forever.
-install_lock_holder_alive() {
-  local lock=$1 pid
-  pid=$(cat "$lock/pid" 2>/dev/null || true)
-  case "$pid" in
-    ''|*[!0-9]*) return 1 ;;
-  esac
-  kill -0 "$pid" 2>/dev/null
+# Sweep staging directories no live install could still own.
+sweep_abandoned_staging() {
+  local root=$1
+  find "$root" -maxdepth 1 -type d -name ".$PIN_VERSION.staging.*" -mmin +60 \
+    -exec rm -rf {} + 2>/dev/null || true
 }
 
-# The claim itself is the mkdir: it succeeds for exactly one process, so two runs
-# cannot both decide they are the installer the way a test-then-create lets them.
-install_lock_claim() {
-  local lock=$1
-  mkdir "$lock" 2>/dev/null || return 1
-  printf '%s\n' "$$" > "$lock/pid" 2>/dev/null || true
+# Move a verified staging tree into the live prefix. mv is a plain rename while the
+# destination does not exist, which is exactly the property this relies on: the
+# entry point becomes visible complete or not at all. If another run published
+# first the destination does exist and mv would put our tree inside it instead, so
+# the nested copy is recognized by its own unique name and discarded - the tree the
+# winner published is never touched. Returns 1 when this run did not publish.
+publish_staged() {
+  local staged=$1 live=$2 nested
+  nested="$live/$(basename "$staged")"
+  [ -e "$live" ] && return 1
+  mv "$staged" "$live" 2>/dev/null || return 1
+  STAGED_DIR=
+  if [ -d "$nested" ]; then
+    rm -rf "$nested"
+    return 1
+  fi
   return 0
 }
 
-# Reclaim a lock whose owner died. The removal happens only after claiming a
-# separate reclaim lock and re-reading liveness under it, so two runs that both
-# see the same dead owner cannot both remove it, and an owner that is merely slow
-# to write its pid is re-checked before anything of its is touched.
-install_lock_reclaim_if_stale() {
-  local lock=$1
-  local reclaim="$lock.reclaim"
-  install_lock_holder_alive "$lock" && return 1
-  mkdir "$reclaim" 2>/dev/null || return 1
-  install_lock_holder_alive "$lock" || rm -rf "$lock"
-  rm -rf "$reclaim"
-  return 0
-}
-
-install_lock_acquire() {
-  local lock=$1
-  install_lock_claim "$lock" && return 0
-  install_lock_reclaim_if_stale "$lock" || return 1
-  install_lock_claim "$lock"
-}
-
-# Wait out the run that holds the lock. Ends as soon as the entry point appears,
-# so the ordinary case (the winner finishes) costs the waiter only the install.
-install_lock_wait() {
-  local lock=$1 entry=$2 waited=0 limit
-  limit=$(( ${FM_BROWSER_MCP_INSTALL_WAIT:-120} * 5 ))
-  while [ -d "$lock" ]; do
-    [ -f "$entry" ] && return 0
-    [ "$waited" -ge "$limit" ] && return 1
-    sleep 0.2
-    waited=$((waited + 1))
-  done
-  [ -f "$entry" ]
-}
-
-# The install proper, always run with the prefix lock held.
-install_pin() {
-  local root=$1 entry=$2 log npm_status
-  mkdir -p "$root/$PIN_VERSION" || {
-    echo "fm-browser-mcp-pin: could not create $root/$PIN_VERSION" >&2
-    return 2
-  }
+# npm install into an already-created staging directory. Prints nothing on success.
+install_staged() {
+  local staged=$1 log npm_status
   # A private prefix with its own package.json keeps the install self-contained and
   # keeps npm from walking up into an unrelated project's manifest.
-  [ -f "$root/$PIN_VERSION/package.json" ] || \
-    printf '%s\n' '{"name":"firstmate-browser-mcp-pin","private":true}' > "$root/$PIN_VERSION/package.json"
+  printf '%s\n' '{"name":"firstmate-browser-mcp-pin","private":true}' > "$staged/package.json" || {
+    echo "fm-browser-mcp-pin: could not write the staging manifest in $staged" >&2
+    return 2
+  }
   # npm's own output is the only thing that separates an offline registry from a
   # proxy rejection, an EACCES cache or an unreachable version, and --ensure is the
   # one command the dispatch diagnostic tells a human to run - so keep it for the
@@ -266,24 +254,24 @@ install_pin() {
     echo "fm-browser-mcp-pin: could not create a temp file for the npm install log" >&2
     return 2
   }
-  (cd "$root/$PIN_VERSION" && npm install --no-audit --no-fund "chrome-devtools-mcp@$PIN_VERSION") >"$log" 2>&1
+  (cd "$staged" && npm install --no-audit --no-fund "chrome-devtools-mcp@$PIN_VERSION") >"$log" 2>&1
   npm_status=$?
   if [ "$npm_status" -ne 0 ]; then
-    echo "fm-browser-mcp-pin: npm install chrome-devtools-mcp@$PIN_VERSION failed in $root/$PIN_VERSION (exit $npm_status); npm said:" >&2
+    echo "fm-browser-mcp-pin: npm install chrome-devtools-mcp@$PIN_VERSION failed (exit $npm_status); npm said:" >&2
     cat "$log" >&2
     rm -f "$log"
     return 2
   fi
   rm -f "$log"
-  if [ ! -f "$entry" ]; then
-    echo "fm-browser-mcp-pin: install completed but $entry is absent" >&2
+  if [ ! -f "$staged/$ENTRY_REL" ]; then
+    echo "fm-browser-mcp-pin: npm install chrome-devtools-mcp@$PIN_VERSION reported success but left no $ENTRY_REL" >&2
     return 2
   fi
-  emit_pin "$entry"
+  return 0
 }
 
 ensure_pin() {
-  local status entry root lock
+  local status entry root live
   resolve_pin >/dev/null 2>&1
   status=$?
   case "$status" in
@@ -301,6 +289,7 @@ ensure_pin() {
   fi
 
   root=$(pin_root)
+  live="$root/$PIN_VERSION"
   entry=$(pin_entry_point)
   if ! command -v npm >/dev/null 2>&1; then
     echo "fm-browser-mcp-pin: npm is not on PATH; cannot install chrome-devtools-mcp $PIN_VERSION" >&2
@@ -310,20 +299,29 @@ ensure_pin() {
     echo "fm-browser-mcp-pin: could not create $root" >&2
     return 2
   }
+  sweep_abandoned_staging "$root"
 
-  lock="$root/.$PIN_VERSION.install.lock"
-  if install_lock_acquire "$lock"; then
-    install_pin "$root" "$entry"
-    status=$?
-    rm -rf "$lock"
-    return "$status"
+  STAGED_DIR=$(mktemp -d "$root/.$PIN_VERSION.staging.XXXXXX") || {
+    echo "fm-browser-mcp-pin: could not create a staging directory under $root" >&2
+    return 2
+  }
+  if ! install_staged "$STAGED_DIR"; then
+    discard_staged
+    return 2
   fi
-
-  if install_lock_wait "$lock" "$entry"; then
+  if publish_staged "$STAGED_DIR" "$live"; then
     emit_pin "$entry"
     return
   fi
-  echo "fm-browser-mcp-pin: another --ensure run holds $lock and $entry is still absent; if no install is running, remove that lock and retry" >&2
+
+  # Another run published while this one was staging, which is the ordinary
+  # outcome of two homes acting on the same dispatch diagnostic.
+  discard_staged
+  if [ -f "$entry" ]; then
+    emit_pin "$entry"
+    return
+  fi
+  echo "fm-browser-mcp-pin: $live already exists but holds no $ENTRY_REL; remove it and rerun --ensure" >&2
   return 2
 }
 
