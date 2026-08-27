@@ -53,6 +53,14 @@ export FM_HOME_BINDING=test-harness
 # needs a real fixture root sets it there. Pointed at a path that cannot exist.
 export FM_BROWSER_SESSION_ROOT=/nonexistent/fm-test-no-browser-state
 
+# Hermetic browser-MCP pin. bin/fm-spawn.sh forwards a resolved
+# chrome-devtools-mcp pin onto every launch line, so whether the developer
+# happens to have the fleet pin installed would otherwise decide what the launch
+# assertions see. Lifting the pin here keeps the suite's default launch lines
+# identical on every host; the pin's own suite sets its sources explicitly.
+export FM_BROWSER_MCP_PIN=off
+export FM_BROWSER_MCP_ROOT=/nonexistent/fm-test-no-browser-mcp-pin
+
 # Resolve the repo root from this library's own location. Consumed by sourcing
 # test files, not by this library, so it reads as "unused" here.
 # shellcheck disable=SC2034

@@ -275,6 +275,59 @@ test_unresolvable_relative_overrides_fail_loudly() {
   pass "unresolvable relative spawn overrides fail with named diagnostics"
 }
 
+test_resolved_browser_mcp_pin_rides_every_launch() {
+  local rec id out status launch pin
+  id=profile-mcp-pin-z24
+  rec=$(make_spawn_case profile-mcp-pin claude "$id")
+  read_case_record "$rec"
+  pin="$CASE_DIR/pinned-chrome-devtools-mcp.js"
+  printf '// pinned build\n' > "$pin"
+
+  out=$(FM_BROWSER_MCP_PIN="$pin" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "spawn with a resolved browser MCP pin should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "CHROME_DEVTOOLS_AXI_MCP_PATH='$pin'" \
+    "the launch line did not carry the resolved chrome-devtools-mcp pin"
+  pass "a resolved browser MCP pin is exported onto the crewmate launch line"
+}
+
+test_lifted_browser_mcp_pin_leaves_the_launch_line_alone() {
+  local rec id out status launch
+  id=profile-mcp-pin-off-z25
+  rec=$(make_spawn_case profile-mcp-pin-off claude "$id")
+  read_case_record "$rec"
+
+  # The suite lifts the pin by default, which is the same state a home reaches by
+  # writing "off" into config/browser-mcp-pin once upstream is fixed.
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "spawn with a lifted browser MCP pin should succeed"
+  assert_not_contains "$out" "fm-browser-mcp-pin" "a lifted pin reported a diagnostic at dispatch"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_not_contains "$launch" "CHROME_DEVTOOLS_AXI_MCP_PATH" \
+    "a lifted pin still pinned the crewmate's browser tooling"
+  pass "a lifted browser MCP pin leaves the launch line and dispatch output untouched"
+}
+
+test_unresolvable_browser_mcp_pin_is_reported_and_does_not_block_dispatch() {
+  local rec id out status launch
+  id=profile-mcp-pin-missing-z26
+  rec=$(make_spawn_case profile-mcp-pin-missing claude "$id")
+  read_case_record "$rec"
+
+  out=$(FM_BROWSER_MCP_PIN="$CASE_DIR/no-such-mcp.js" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "an unresolvable pin must not block dispatch"
+  assert_contains "$out" "no-such-mcp.js" "the unresolvable pin was not reported at dispatch"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_not_contains "$launch" "CHROME_DEVTOOLS_AXI_MCP_PATH" \
+    "an unresolvable pin still reached the launch line"
+  pass "an unresolvable browser MCP pin is reported at dispatch without blocking or pinning"
+}
+
 test_active_dispatch_profile_requires_explicit_harness_for_ship() {
   local rec id out status
   id=profile-required-ship-z11
@@ -713,5 +766,8 @@ test_non_claude_harness_ignores_config_dir
 test_claude_scopes_out_ambient_anthropic_api_key
 test_non_claude_harness_does_not_scope_anthropic_api_key
 test_active_dispatch_profile_does_not_block_secondmate_launch
+test_resolved_browser_mcp_pin_rides_every_launch
+test_lifted_browser_mcp_pin_leaves_the_launch_line_alone
+test_unresolvable_browser_mcp_pin_is_reported_and_does_not_block_dispatch
 
 echo "# all fm-spawn-dispatch-profile tests passed"

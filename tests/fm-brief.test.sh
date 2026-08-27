@@ -251,6 +251,32 @@ test_browser_session_is_pinned_to_the_task() {
   pass "fm-brief.sh: ship and scout briefs pin the browser session to the task and require a scoped stop before a terminal report"
 }
 
+# `chrome-devtools-axi screenshot` prints the destination path and exits 0 whether
+# or not a file was written: the browser only writes beneath its own temp root, and
+# the CLI never stats the result. Two separate investigations lost their evidence
+# that way and only noticed afterwards. Firstmate cannot change the tool, so the
+# brief has to steer the worker away from the failure and make it check.
+test_screenshot_destination_and_verification_are_briefed() {
+  local home id brief
+  home="$TMP_ROOT/browser-screenshot-home"
+  write_registry "$home"
+
+  for id in brief-shot-ship brief-shot-scout; do
+    case "$id" in
+      *scout) FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" someproj --scout >/dev/null ;;
+      *) FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" someproj --pr-repo owner/someproj --pr-base main >/dev/null ;;
+    esac
+    brief="$home/data/$id/brief.md"
+    assert_grep "under /tmp" "$brief" \
+      "$id: brief does not name the only destination a screenshot survives"
+    assert_grep "exits 0 either way" "$brief" \
+      "$id: brief does not warn that the success line is printed even when nothing is written"
+    assert_grep "confirm the file exists" "$brief" \
+      "$id: brief does not require confirming the captured file exists"
+  done
+  pass "fm-brief.sh: ship and scout briefs require a /tmp screenshot destination and a post-capture existence check"
+}
+
 # A task id may be 64 characters (bin/fm-pr-lib.sh's fm_task_id_creation_valid),
 # while chrome-devtools-axi refuses a session name over 64. Briefing the naive
 # fm-<id> for such a task would hand the worker a name that throws on EVERY call
@@ -812,6 +838,7 @@ test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
 test_browser_session_is_pinned_to_the_task
 test_browser_session_fits_the_tool_cap_for_a_maximum_length_task_id
+test_screenshot_destination_and_verification_are_briefed
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
 test_ship_project_memory_wording
