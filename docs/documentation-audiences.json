@@ -228,6 +228,10 @@
       "audience": "maintainer-architecture"
     },
     {
+      "path": "docs/desktop-capture.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/documentation-audiences.md",
       "audience": "maintainer-architecture"
     },
@@ -302,6 +306,10 @@
     {
       "path": "docs/turnend-guard.md",
       "audience": "operator-current"
+    },
+    {
+      "path": "docs/verification/desktop-capture.md",
+      "audience": "maintainer-verification"
     },
     {
       "path": "docs/verification/home-resolution.md",
