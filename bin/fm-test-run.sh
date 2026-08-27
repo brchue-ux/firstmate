@@ -976,6 +976,14 @@ families_for_changed_path() {
       printf '%s\n' backend-dispatch
       printf '%s\n' pure-contract-unit
       ;;
+    bin/fm-browser-mcp-pin.sh)
+      # Its own suite is pure-contract-unit, but bin/fm-spawn.sh depends on this
+      # script's exit codes when it builds a launch line, and that dependency is
+      # pinned in the backend-dispatch family. The bin/* basename scan below only
+      # reaches suites that name the script, so select both explicitly.
+      printf '%s\n' pure-contract-unit
+      printf '%s\n' backend-dispatch
+      ;;
     bin/fm-bearings-snapshot.sh|bin/fm-fleet-snapshot.sh|bin/fm-fleet-view.sh)
       printf '%s\n' snapshot-bearings
       ;;

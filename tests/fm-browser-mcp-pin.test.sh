@@ -128,6 +128,28 @@ test_configured_path_wins_over_the_installed_pin() {
   pass "a configured pin path wins over the installed one, past comments and blank lines"
 }
 
+test_relative_pins_resolve_to_absolute_paths() {
+  local rec out configured_abs inherited_abs
+  rec=$(make_pin_case relative)
+  read_pin_case "$rec"
+  mkdir -p "$HOME_DIR/vendor"
+  printf '// configured build\n' > "$HOME_DIR/vendor/configured-mcp.js"
+  printf '// inherited build\n' > "$HOME_DIR/vendor/inherited-mcp.js"
+  configured_abs=$(cd "$HOME_DIR" && pwd -P)/vendor/configured-mcp.js
+  inherited_abs=$(cd "$HOME_DIR" && pwd -P)/vendor/inherited-mcp.js
+  printf '%s\n' ./vendor/configured-mcp.js > "$HOME_DIR/config/browser-mcp-pin"
+
+  out=$(cd "$HOME_DIR" && run_pin "$HOME_DIR" "$ROOT_DIR" path)
+  expect_code 0 "$?" "a relative configured pin naming a real file should resolve"
+  [ "$out" = "$configured_abs" ] || fail "a relative configured pin was not absolutized"$'\n'"expected: $configured_abs"$'\n'"actual:   $out"
+
+  out=$(cd "$HOME_DIR" && CASE_INHERITED_PIN=./vendor/inherited-mcp.js \
+    run_pin "$HOME_DIR" "$ROOT_DIR" path)
+  expect_code 0 "$?" "a relative inherited pin naming a real file should resolve"
+  [ "$out" = "$inherited_abs" ] || fail "a relative inherited pin was not absolutized"$'\n'"expected: $inherited_abs"$'\n'"actual:   $out"
+  pass "a relative pin resolves to an absolute path that survives a different cwd"
+}
+
 test_configured_missing_path_refuses_rather_than_falling_back() {
   local rec out err status
   rec=$(make_pin_case configured_missing)
@@ -248,6 +270,7 @@ test_no_pin_anywhere_is_an_actionable_refusal
 test_configured_off_lifts_the_pin_silently
 test_installed_fleet_pin_resolves
 test_configured_path_wins_over_the_installed_pin
+test_relative_pins_resolve_to_absolute_paths
 test_configured_missing_path_refuses_rather_than_falling_back
 test_inherited_env_wins_over_configuration
 test_env_override_lifts_the_pin_without_touching_config

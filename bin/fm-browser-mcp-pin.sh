@@ -16,11 +16,17 @@
 #
 # Why this exists
 # ---------------
-# chrome-devtools-axi spawns its MCP transport as `npx -y chrome-devtools-mcp@latest`
-# whenever no explicit build is pointed at (bin/bridge.js resolveTransportSpec).
+# chrome-devtools-axi resolves its MCP transport in three steps
+# (resolveTransportSpec, dist/src/bridge.js in the installed package, which ships
+# only dist/): an explicit CHROME_DEVTOOLS_AXI_MCP_PATH always wins; otherwise it
+# auto-detects a global install at
+# $(npm prefix -g)/lib/node_modules/chrome-devtools-mcp/build/src/bin/chrome-devtools-mcp.js;
+# only with neither does it fall back to `npx -y chrome-devtools-mcp@latest`. An
+# unpinned worker therefore gets whichever of those last two the host happens to
+# have, and both are broken from 1.8.0 on.
 # chrome-devtools-mcp 1.8.0 made `pageId` a required argument on take_snapshot and
 # evaluate_script; chrome-devtools-axi 0.1.27 never sends it, so every bridge that
-# starts fresh against @latest fails every snapshot, eval, click, fill and type with
+# starts fresh against such a build fails every snapshot, eval, click, fill and type with
 #   MCP error -32602: Input validation error: Invalid arguments for tool take_snapshot: Required at pageId
 # while navigation-only commands keep working. A bridge started before 1.8.0 was
 # published keeps running fine, which is what makes the breakage look intermittent
@@ -40,7 +46,7 @@
 #
 # Resolution order (most to least specific)
 #   1. An inherited CHROME_DEVTOOLS_AXI_MCP_PATH - an explicit in-the-moment choice
-#      by whoever launched firstmate; forwarded verbatim when it names a file.
+#      by whoever launched firstmate; honored when it names a file.
 #   2. FM_BROWSER_MCP_PIN - a firstmate-scoped override for one process tree,
 #      holding either "off" or a path, read exactly like the config file below.
 #   3. config/browser-mcp-pin in the resolved FM_HOME - that home's durable choice.
@@ -53,6 +59,12 @@
 # single install serves every home on the host; FM_BROWSER_MCP_ROOT overrides it
 # (tests pin it to a temp directory so a resolved launch line never depends on
 # whatever the developer's own cache happens to hold).
+#
+# Whichever rank answers, the printed path is always absolute and physical. It is
+# read by a crewmate pane whose cwd is its own worktree, not firstmate's, so a
+# relative pin that resolved here would name nothing there - and a bridge that
+# cannot spawn its transport at all fails even navigation, which is worse than the
+# unpinned breakage this exists to fix.
 #
 # `--ensure` runs a real `npm install` and is therefore never called from the spawn
 # path, which stays read-only and fast; firstmate or the captain runs it once per host.
@@ -108,6 +120,23 @@ configured_pin() {
   done < "$file"
 }
 
+# Print a resolved pin in absolute physical form, whatever rank produced it.
+# CDPATH is cleared so a stray setting in the invoking shell cannot redirect the
+# cd into an unrelated directory of the same name.
+emit_pin() {
+  local path=$1 dir base abs_dir
+  dir=$(dirname -- "$path")
+  base=$(basename -- "$path")
+  if ! abs_dir=$(CDPATH='' cd -- "$dir" 2>/dev/null && pwd -P); then
+    echo "fm-browser-mcp-pin: the resolved pin cannot be made absolute: $path" >&2
+    return 2
+  fi
+  case "$abs_dir" in
+    /) printf '/%s\n' "$base" ;;
+    *) printf '%s/%s\n' "$abs_dir" "$base" ;;
+  esac
+}
+
 resolve_pin() {
   local configured inherited entry
   inherited=${CHROME_DEVTOOLS_AXI_MCP_PATH:-}
@@ -115,8 +144,8 @@ resolve_pin() {
 
   if [ -n "$inherited" ]; then
     if [ -f "$inherited" ]; then
-      printf '%s\n' "$inherited"
-      return 0
+      emit_pin "$inherited"
+      return
     fi
     echo "fm-browser-mcp-pin: inherited CHROME_DEVTOOLS_AXI_MCP_PATH does not name a file: $inherited" >&2
     return 2
@@ -129,8 +158,8 @@ resolve_pin() {
       ;;
     *)
       if [ -f "$configured" ]; then
-        printf '%s\n' "$configured"
-        return 0
+        emit_pin "$configured"
+        return
       fi
       echo "fm-browser-mcp-pin: the configured pin names a missing file: $configured" >&2
       return 2
@@ -139,10 +168,10 @@ resolve_pin() {
 
   entry=$(pin_entry_point)
   if [ -f "$entry" ]; then
-    printf '%s\n' "$entry"
-    return 0
+    emit_pin "$entry"
+    return
   fi
-  echo "fm-browser-mcp-pin: chrome-devtools-mcp $PIN_VERSION is not installed at $entry; browser work will fall back to the broken @latest build. Install it with: $SCRIPT_DIR/fm-browser-mcp-pin.sh --ensure" >&2
+  echo "fm-browser-mcp-pin: chrome-devtools-mcp $PIN_VERSION is not installed at $entry; browser work will fall back to whatever chrome-devtools-mcp the host resolves - a global install, or npx @latest - which is broken from 1.8.0 on. Install it with: $SCRIPT_DIR/fm-browser-mcp-pin.sh --ensure" >&2
   return 2
 }
 
