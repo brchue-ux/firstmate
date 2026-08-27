@@ -72,10 +72,14 @@ Both routes agreeing on black while the compositor route's screen cast still suc
 - Multiple monitors, non-unity scaling, and non-Meta connectors are untested, because this session has one virtual output at scale 1.0.
   Both routes take `screen` scope as the full virtual desktop bounds by construction, the compositor route through `RecordArea(0, 0, width, height)`, so the two routes cannot disagree about what `screen` means on a multi-monitor layout.
   What remains unverified there is the geometry itself: the connector and mode resolution that computes those bounds is unit-tested against a two-monitor reply shape, but no real multi-monitor capture has been taken.
-  Non-unity scaling is likewise unverified, and `screen` scope captures in logical pixels, so a scaled monitor would not be captured at its native resolution.
-- The portal route's rescaling of a region into the screenshot's own pixel space has never run against a real scaled display, and cannot be exercised on this machine at all: its single virtual output is at scale 1.0, where the screenshot's dimensions equal the desktop bounds and the conversion is the identity.
-  It is covered only by unit tests over the coordinate conversion, which pin the identity case, a 2.0 factor, a non-square factor, and clamping at the far edge.
-  No capture from a scaled display was taken, so whether the portal really hands back the physical framebuffer on such a display is assumed from its documented behavior rather than observed here.
+  Non-unity scaling is likewise unverified, and captures are returned in logical pixels, so a scaled monitor would not be captured at its native resolution.
+- No capture from a scaled display was taken, and none can be taken here: this session's single virtual output is at scale 1.0, where the portal's screenshot already matches the desktop bounds and every conversion below is the identity.
+  That covers both halves of the reconciliation, the region mapping into the screenshot's pixel space and the resampling of a capture back into logical pixels, neither of which has ever run with a factor other than 1.0 against a real compositor.
+  Both are covered only by unit tests over the conversions, which pin the identity case, a 2.0 factor, a non-square factor, clamping at the far edge, and the rounding of a fractional scale.
+  Whether the portal really hands back the physical framebuffer on a scaled display is assumed from its documented behavior rather than observed here.
+- Rotated outputs are not supported and were not tested.
+  The bounds this server derives do not swap axes for a rotated monitor the way the compositor does, so rotated geometry is a known gap rather than an untested-but-expected-to-work case.
+  This session's virtual output is unrotated, so no rotated capture was attempted.
 - Long-lived behavior is untested beyond back-to-back captures; the longest run here was the 80-capture latency sweep above.
 - The compositor-route `screen` figures above were measured while that route recorded the primary monitor by connector.
   It now records the full virtual desktop bounds instead, which is the same 1920x1009 rectangle on this single-output session, but the sweep has not been re-run since that change.

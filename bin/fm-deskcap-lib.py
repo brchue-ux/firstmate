@@ -50,12 +50,20 @@ bounds, not the primary monitor, so both routes answer the same arguments with
 the same content on a multi-monitor layout. RecordArea works in logical pixels,
 which under non-unity scaling is not a monitor's native resolution.
 
-Regions are given and validated in logical pixels, the space RecordArea uses.
-The portal returns the compositor's own framebuffer instead, so before cropping,
-the portal route rescales the rectangle into that image's pixel space using the
-returned screenshot's real dimensions against the desktop bounds. Without that
-step a region on a scaled display would silently crop the wrong area rather than
-the same area at another resolution.
+Logical pixels are this engine's one coordinate space, because that is what
+RecordArea takes and what a region is validated against. The portal returns the
+compositor's own framebuffer instead, which under non-unity scaling is larger, so
+the portal route reconciles both scopes back into logical pixels: a region is
+mapped into the screenshot's own pixel space before cropping and the crop is then
+resampled to the requested size, and a screen capture is resampled to the desktop
+bounds. The factor comes from the screenshot's real dimensions rather than from a
+configured scale value. Without that a scaled display would answer the same call
+with a different area or a different pixel size depending on which route won, and
+coordinates read off one route's image would not map onto the other's.
+
+Rotated outputs are NOT supported. Mutter swaps a logical monitor's axes when the
+transform is rotated and this engine does not, so the bounds it derives for a
+rotated output have their axes the wrong way round.
 
 One capture gets one end-to-end deadline, starting at the region check that
 reads the display layout. The rebuild after a close and the fallback to the
@@ -285,6 +293,18 @@ def _run_until(predicate, timeout: float) -> bool:
 # ---------------------------------------------------------------------------
 
 
+def _logical_size(pixels: int, scale: float) -> int:
+    """A mode's size in logical pixels, rounded the way Mutter's own roundf rounds.
+
+    Truncating instead would put a fractional scale such as 1.5 a pixel short of
+    the desktop Mutter reports, which then biases both `fit_region` and the
+    portal route's rescale factor.
+    """
+    if not scale:
+        return int(pixels)
+    return max(1, int(pixels / scale + 0.5))
+
+
 def display_state(timeout_ms: int = DBUS_CALL_TIMEOUT_MS) -> dict[str, Any]:
     """The virtual desktop's connector name and bounds, from Mutter's DisplayConfig.
 
@@ -321,8 +341,8 @@ def display_state(timeout_ms: int = DBUS_CALL_TIMEOUT_MS) -> dict[str, Any]:
                     "connector": spec["connector"],
                     "x": x,
                     "y": y,
-                    "width": int(width / scale) if scale else width,
-                    "height": int(height / scale) if scale else height,
+                    "width": _logical_size(width, scale),
+                    "height": _logical_size(height, scale),
                     "scale": scale,
                     "primary": bool(primary),
                 }
@@ -370,6 +390,17 @@ def normalize_region(region: Any) -> dict[str, int]:
     return {"x": x, "y": y, "width": width, "height": height}
 
 
+def _desktop_size(bounds: dict[str, Any] | None) -> tuple[int, int]:
+    """The virtual desktop's logical size, refused rather than guessed if unknown."""
+    width = int(bounds.get("width") or 0) if bounds else 0
+    height = int(bounds.get("height") or 0) if bounds else 0
+    if width <= 0 or height <= 0:
+        raise CaptureError(
+            "the desktop bounds are unknown, so a capture cannot be placed in logical pixels"
+        )
+    return width, height
+
+
 def region_in_image_pixels(
     region: dict[str, int], bounds: dict[str, Any], image_width: int, image_height: int
 ) -> dict[str, int]:
@@ -385,12 +416,7 @@ def region_in_image_pixels(
     desktop bounds, not from a configured scale value, so it stays correct
     whatever the portal chose to do.
     """
-    desktop_width = int(bounds.get("width") or 0) if bounds else 0
-    desktop_height = int(bounds.get("height") or 0) if bounds else 0
-    if desktop_width <= 0 or desktop_height <= 0:
-        raise CaptureError(
-            "the desktop bounds are unknown, so a region cannot be placed on the screenshot"
-        )
+    desktop_width, desktop_height = _desktop_size(bounds)
     if (image_width, image_height) == (desktop_width, desktop_height):
         return region
     scale_x = image_width / desktop_width
@@ -420,7 +446,13 @@ def fit_region(region: dict[str, int], bounds: dict[str, Any]) -> dict[str, int]
 # ---------------------------------------------------------------------------
 
 
-def _mutter_capture(scope: str, region: dict[str, int] | None, cursor: bool, timeout: float) -> bytes:
+def _mutter_capture(
+    scope: str,
+    region: dict[str, int] | None,
+    cursor: bool,
+    timeout: float,
+    bounds: dict[str, Any] | None = None,
+) -> bytes:
     _require_gst()
     bus = _session_bus()
     deadline = time.monotonic() + timeout
@@ -484,8 +516,9 @@ def _mutter_capture(scope: str, region: dict[str, int] | None, cursor: bool, tim
         else:
             # `screen` means the whole virtual desktop, not the primary monitor,
             # so both routes answer the same arguments with the same content.
-            bounds = display_state(_call_timeout_ms(deadline))
-            area = {"x": 0, "y": 0, "width": bounds["width"], "height": bounds["height"]}
+            layout = bounds or display_state(_call_timeout_ms(deadline))
+            width, height = _desktop_size(layout)
+            area = {"x": 0, "y": 0, "width": width, "height": height}
         try:
             stream_path = _session_call(
                 "RecordArea",
@@ -677,17 +710,23 @@ def _portal_capture(
         bus.signal_unsubscribe(sub)
 
     png = _take_portal_file(uri, notes)
+    image_width, image_height = png_dimensions(png)
+    desktop_width, desktop_height = _desktop_size(bounds)
+    rescaled = (image_width, image_height) != (desktop_width, desktop_height)
+
     if scope == "region":
         assert region is not None
-        image_width, image_height = png_dimensions(png)
         placed = region_in_image_pixels(region, bounds, image_width, image_height)
-        if placed != region:
-            notes.append(
-                f"the portal returned a {image_width}x{image_height} screenshot of a "
-                f"{bounds['width']}x{bounds['height']} desktop, so the region was rescaled "
-                f"to {placed['width']}x{placed['height']}+{placed['x']}+{placed['y']}"
-            )
-        png = crop_png(png, placed)
+        png = resize_png(crop_png(png, placed), region["width"], region["height"])
+    else:
+        png = resize_png(png, desktop_width, desktop_height)
+
+    if rescaled:
+        notes.append(
+            f"the portal returned a {image_width}x{image_height} screenshot of a "
+            f"{desktop_width}x{desktop_height} desktop, so it was resampled into the "
+            "logical pixel space the compositor route uses"
+        )
     return png, notes
 
 
@@ -759,6 +798,22 @@ def downscale_png(png: bytes, max_width: int) -> bytes:
     return _encode_png(pixbuf.scale_simple(max_width, height, GdkPixbuf.InterpType.BILINEAR), "downscaling")
 
 
+def resize_png(png: bytes, width: int, height: int) -> bytes:
+    """Resample PNG bytes to exactly `width` x `height`, in memory.
+
+    This is what puts the portal route's output in the same pixel space as the
+    compositor route's. The portal hands back the raw framebuffer, so without it
+    the same call would answer with different dimensions depending on which route
+    served it, and coordinates read off one image would not map onto the other.
+    """
+    if width <= 0 or height <= 0:
+        raise CaptureError(f"a resize needs positive dimensions, got {width}x{height}")
+    pixbuf = _decode_png(png, "rescaling")
+    if (pixbuf.get_width(), pixbuf.get_height()) == (width, height):
+        return png
+    return _encode_png(pixbuf.scale_simple(width, height, GdkPixbuf.InterpType.BILINEAR), "rescaling")
+
+
 def crop_png(png: bytes, region: dict[str, int]) -> bytes:
     """Crop PNG bytes to `region`, in memory.
 
@@ -810,13 +865,10 @@ def capture(
     started = time.monotonic()
     deadline = started + timeout
 
-    bounds: dict[str, Any] | None = None
-    if scope == "region":
-        region = normalize_region(region)
-        bounds = display_state(_call_timeout_ms(deadline))
+    region = normalize_region(region) if scope == "region" else None
+    bounds = display_state(_call_timeout_ms(deadline))
+    if region is not None:
         region = fit_region(region, bounds)
-    else:
-        region = None
 
     order = ("mutter", "portal") if route == "auto" else (route,)
     failures: list[str] = []
@@ -826,7 +878,7 @@ def capture(
         try:
             budget = _remaining(deadline)
             if chosen == "mutter":
-                png = _mutter_attempt(scope, region, cursor, budget)
+                png = _mutter_attempt(scope, region, cursor, budget, bounds)
             else:
                 png, portal_notes = _portal_capture(scope, region, cursor, budget, bounds)
                 notes.extend(portal_notes)
@@ -847,7 +899,13 @@ def capture(
     raise CaptureError("; ".join(failures))
 
 
-def _mutter_attempt(scope: str, region: dict[str, int] | None, cursor: bool, timeout: float) -> bytes:
+def _mutter_attempt(
+    scope: str,
+    region: dict[str, int] | None,
+    cursor: bool,
+    timeout: float,
+    bounds: dict[str, Any] | None = None,
+) -> bytes:
     """The primary route, retried once when the compositor closes the session.
 
     A headless RDP session's virtual monitor is rebuilt on reconnect, so a close
@@ -856,9 +914,9 @@ def _mutter_attempt(scope: str, region: dict[str, int] | None, cursor: bool, tim
     """
     deadline = time.monotonic() + timeout
     try:
-        return _mutter_capture(scope, region, cursor, timeout)
+        return _mutter_capture(scope, region, cursor, timeout, bounds)
     except SessionClosed:
-        return _mutter_capture(scope, region, cursor, _remaining(deadline))
+        return _mutter_capture(scope, region, cursor, _remaining(deadline), bounds)
 
 
 def probe() -> dict[str, Any]:

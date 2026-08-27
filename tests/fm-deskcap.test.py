@@ -156,6 +156,26 @@ class RegionInImagePixelsTest(unittest.TestCase):
                 CAP.region_in_image_pixels({"x": 0, "y": 0, "width": 1, "height": 1}, bad, 100, 100)
 
 
+class LogicalSizeTest(unittest.TestCase):
+    """Mutter divides a mode size by the scale with roundf, so truncating drifts."""
+
+    def test_unity_scale_is_the_mode_size(self):
+        self.assertEqual(CAP._logical_size(1920, 1.0), 1920)
+
+    def test_a_fractional_scale_rounds_rather_than_truncates(self):
+        self.assertEqual(CAP._logical_size(2560, 1.5), 1707)
+        self.assertEqual(CAP._logical_size(1440, 1.5), 960)
+
+    def test_an_integer_scale_divides_exactly(self):
+        self.assertEqual(CAP._logical_size(3840, 2.0), 1920)
+
+    def test_a_missing_scale_leaves_the_mode_size_alone(self):
+        self.assertEqual(CAP._logical_size(1920, 0), 1920)
+
+    def test_a_size_never_rounds_away_to_nothing(self):
+        self.assertGreaterEqual(CAP._logical_size(1, 8.0), 1)
+
+
 class PortalRequestPathTest(unittest.TestCase):
     """Rule 2: the Response subscription needs the path BEFORE the call."""
 
@@ -200,7 +220,7 @@ class ClosedSessionRebuildTest(unittest.TestCase):
     def test_rebuilds_once_after_the_compositor_closes_the_session(self):
         calls = []
 
-        def flaky(scope, region, cursor, timeout):
+        def flaky(scope, region, cursor, timeout, bounds=None):
             calls.append(scope)
             if len(calls) == 1:
                 raise CAP.SessionClosed("closed")
@@ -217,7 +237,7 @@ class ClosedSessionRebuildTest(unittest.TestCase):
     def test_a_second_close_is_reported_rather_than_retried_forever(self):
         calls = []
 
-        def always_closed(scope, region, cursor, timeout):
+        def always_closed(scope, region, cursor, timeout, bounds=None):
             calls.append(scope)
             raise CAP.SessionClosed("closed")
 
@@ -233,7 +253,7 @@ class ClosedSessionRebuildTest(unittest.TestCase):
     def test_the_rebuild_gets_what_is_left_of_the_budget_not_a_fresh_one(self):
         budgets = []
 
-        def flaky(scope, region, cursor, timeout):
+        def flaky(scope, region, cursor, timeout, bounds=None):
             budgets.append(timeout)
             if len(budgets) == 1:
                 time.sleep(0.3)
@@ -622,7 +642,7 @@ class RouteSelectionTest(unittest.TestCase):
     def test_the_fallback_continues_the_deadline_instead_of_restarting_it(self):
         budgets = []
 
-        def slow_mutter(scope, region, cursor, timeout):
+        def slow_mutter(scope, region, cursor, timeout, bounds=None):
             budgets.append(timeout)
             time.sleep(0.3)
             raise CAP.CaptureError("screen cast refused")
@@ -705,7 +725,7 @@ class RouteSelectionTest(unittest.TestCase):
     def test_region_scope_reaches_the_route_with_a_normalized_rectangle(self):
         seen = {}
 
-        def record(scope, region, cursor, timeout):
+        def record(scope, region, cursor, timeout, bounds=None):
             seen.update({"scope": scope, "region": region})
             return PNG_1X1
 
@@ -830,6 +850,135 @@ class PortalRegionScalingTest(unittest.TestCase):
         screenshot = self._marked_png(400, 200, {"x": 200, "y": 100, "width": 100, "height": 50})
         stray = CAP.crop_png(screenshot, {"x": 100, "y": 50, "width": 50, "height": 25})
         self.assertNotIn((255, 0, 0), self._colors(stray))
+
+    def test_a_region_comes_back_at_the_requested_logical_size(self):
+        bounds = {"width": 200, "height": 100}
+        region = {"x": 100, "y": 50, "width": 50, "height": 25}
+        screenshot = self._marked_png(400, 200, {"x": 200, "y": 100, "width": 100, "height": 50})
+        placed = CAP.region_in_image_pixels(region, bounds, 400, 200)
+        reconciled = CAP.resize_png(CAP.crop_png(screenshot, placed), region["width"], region["height"])
+        self.assertEqual(CAP.png_dimensions(reconciled), (50, 25))
+        self.assertEqual(self._colors(reconciled), {(255, 0, 0)})
+
+    def test_a_screen_capture_comes_back_at_the_desktop_size(self):
+        screenshot = self._marked_png(400, 200, {"x": 0, "y": 0, "width": 400, "height": 200})
+        self.assertEqual(CAP.png_dimensions(CAP.resize_png(screenshot, 200, 100)), (200, 100))
+
+    def test_an_unscaled_capture_is_returned_byte_for_byte(self):
+        screenshot = self._marked_png(200, 100, {"x": 0, "y": 0, "width": 10, "height": 10})
+        self.assertIs(CAP.resize_png(screenshot, 200, 100), screenshot)
+
+    def test_a_resize_to_nothing_is_refused(self):
+        screenshot = self._marked_png(200, 100, {"x": 0, "y": 0, "width": 10, "height": 10})
+        for bad in ((0, 100), (200, 0), (-4, 10)):
+            with self.assertRaises(CAP.CaptureError):
+                CAP.resize_png(screenshot, *bad)
+
+
+class PortalBus:
+    """A session bus that answers one Screenshot request on the predicted path."""
+
+    def __init__(self, uri):
+        self.uri = uri
+        self.subscriptions = 0
+        self.calls = []
+
+    def get_unique_name(self):
+        return ":1.42"
+
+    def signal_subscribe(self, name, iface, signal, path, _arg0, _flags, callback):
+        self.subscriptions += 1
+        if signal == "Response":
+            uri = self.uri
+
+            def fire():
+                callback(
+                    self,
+                    name,
+                    path,
+                    iface,
+                    signal,
+                    CAP.GLib.Variant("(ua{sv})", (0, {"uri": CAP.GLib.Variant("s", uri)})),
+                )
+                return False
+
+            CAP.GLib.idle_add(fire)
+        return self.subscriptions
+
+    def signal_unsubscribe(self, _sub):
+        return None
+
+    def call_sync(self, _name, _path, _iface, method, _args, _cancellable, _flags, _timeout, _extra):
+        self.calls.append(method)
+        return CAP.GLib.Variant("(o)", ("/org/freedesktop/portal/desktop/request/1_42/tok",))
+
+
+class PortalRouteReconciliationTest(unittest.TestCase):
+    """Both routes must answer one call with the same area at the same size."""
+
+    DESKTOP = {"width": 200, "height": 100}
+
+    def setUp(self):
+        if CAP._GI_IMPORT_ERROR is not None:
+            self.skipTest("GObject introspection bindings unavailable")
+        CAP._pump_main_context()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.saved_bus = CAP._session_bus
+
+    def tearDown(self):
+        CAP._session_bus = self.saved_bus
+        self.tmp.cleanup()
+        CAP._pump_main_context()
+
+    def _png(self, width, height, mark=None):
+        pixbuf = CAP.GdkPixbuf.Pixbuf.new(CAP.GdkPixbuf.Colorspace.RGB, False, 8, width, height)
+        pixbuf.fill(0x000000FF)
+        if mark:
+            pixbuf.new_subpixbuf(mark["x"], mark["y"], mark["width"], mark["height"]).fill(0xFF0000FF)
+        ok, data = pixbuf.save_to_bufferv("png", [], [])
+        self.assertTrue(ok)
+        return bytes(data)
+
+    def _serve(self, png):
+        path = Path(self.tmp.name) / "Screenshot-1.png"
+        path.write_bytes(png)
+        self.bus = PortalBus(path.as_uri())
+        CAP._session_bus = lambda: self.bus
+        return path
+
+    def test_a_scaled_screen_capture_is_resampled_to_the_desktop_size(self):
+        path = self._serve(self._png(400, 200))
+        png, notes = CAP._portal_capture("screen", None, True, 5.0, self.DESKTOP)
+        self.assertEqual(
+            CAP.png_dimensions(png), (200, 100), "the portal's framebuffer size leaked through"
+        )
+        self.assertTrue(any("resampled" in note for note in notes), notes)
+        self.assertFalse(path.exists(), "the portal's output file was left on disk")
+
+    def test_an_unscaled_screen_capture_is_returned_untouched(self):
+        original = self._png(200, 100)
+        self._serve(original)
+        png, notes = CAP._portal_capture("screen", None, True, 5.0, self.DESKTOP)
+        self.assertEqual(png, original)
+        self.assertEqual(notes, [])
+
+    def test_a_scaled_region_capture_returns_the_requested_logical_size(self):
+        self._serve(self._png(400, 200, {"x": 200, "y": 100, "width": 100, "height": 50}))
+        png, _notes = CAP._portal_capture(
+            "region", {"x": 100, "y": 50, "width": 50, "height": 25}, True, 5.0, self.DESKTOP
+        )
+        self.assertEqual(CAP.png_dimensions(png), (50, 25))
+
+    def test_the_response_subscription_exists_before_the_screenshot_call(self):
+        self._serve(self._png(200, 100))
+        CAP._portal_capture("screen", None, True, 5.0, self.DESKTOP)
+        self.assertEqual(self.bus.calls, ["Screenshot"])
+        self.assertGreaterEqual(self.bus.subscriptions, 1)
+
+    def test_a_capture_without_desktop_bounds_is_refused_rather_than_guessed(self):
+        self._serve(self._png(400, 200))
+        with self.assertRaises(CAP.CaptureError):
+            CAP._portal_capture("screen", None, True, 5.0, None)
 
 
 class McpToolArgumentTest(unittest.TestCase):

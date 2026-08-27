@@ -59,11 +59,15 @@ Both routes are implemented from the start rather than the fallback being retrof
 ## Limits
 
 - No per-window scope.
-- Coordinates are logical pixels, the space the compositor's own screen-cast API works in.
-  `screen` scope captures the whole virtual desktop on both routes, so under non-unity display scaling the result is not the monitor's native resolution.
-  A region is rescaled into the portal's screenshot before cropping, so both routes return the same area for the same rectangle even when that screenshot is the larger physical framebuffer; the reply's text says so when a rescale happened.
-  On the captain's single output at scale 1.0 no rescaling occurs and the two spaces are the same thing.
-  This is checked by unit tests over the conversion only, because no scaled display has been available to capture from; see [verification/desktop-capture.md](verification/desktop-capture.md).
+- Coordinates and returned images are in logical pixels, the space the compositor's own screen-cast API works in.
+  Both routes answer the same call with the same area at the same pixel dimensions, so a coordinate read off one route's image maps onto the other's.
+  Under non-unity display scaling that means a capture is not the monitor's native resolution: the portal hands back the larger physical framebuffer, and the server resamples it down to the logical desktop rather than returning whichever size the winning route happened to produce.
+  The reply's text says so on any call where that resampling happened.
+  On the captain's single output at scale 1.0 the two spaces are identical and nothing is resampled.
+  This is checked by unit tests over the conversions only, because no scaled display has been available to capture from; see [verification/desktop-capture.md](verification/desktop-capture.md).
+- Rotated outputs are not supported.
+  The desktop bounds this server derives do not swap axes for a rotated monitor the way the compositor does, so on a rotated display both scopes would work from the wrong geometry.
+  No rotated display has been tested; treat a rotated output as out of scope rather than as expected to work.
 - The `portal` route always composites the pointer, so `cursor: false` is ignored there and the reply says so.
 - A region must fit inside the desktop; one that does not is refused rather than clamped.
 - A blanked or idle display captures as a genuinely black image on both routes.
