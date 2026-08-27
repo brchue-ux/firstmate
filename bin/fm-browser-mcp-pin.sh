@@ -50,8 +50,8 @@
 #   2. FM_BROWSER_MCP_PIN - a firstmate-scoped override for one process tree,
 #      holding either "off" or a path, read exactly like the config file below.
 #   3. config/browser-mcp-pin in the resolved FM_HOME - that home's durable choice.
-#      "off" lifts the pin (exit 3); any other content is read as a path to a
-#      chrome-devtools-mcp entry point and must exist.
+#      "off" lifts the pin (exit 3), whatever whitespace surrounds it; any other
+#      content is read as a path to a chrome-devtools-mcp entry point and must exist.
 #   4. The fleet-managed install under the pin root, if present.
 #   5. Nothing: exit 2 naming the `--ensure` command that would install it.
 #
@@ -104,14 +104,23 @@ pin_entry_point() {
 
 # The home's configured pin: FM_BROWSER_MCP_PIN when set, otherwise the first
 # non-empty, non-comment line of config/browser-mcp-pin. Empty when neither is set.
+# Surrounding whitespace is stripped from either source before it is returned, the
+# same rule secondmate_line applies in bin/fm-harness.sh: both are one-line files a
+# human is told to edit by hand, so an editor's stray space must not change what
+# the value means.
 configured_pin() {
-  local file=$CONFIG/browser-mcp-pin line
+  local file=$CONFIG/browser-mcp-pin line env_pin
   if [ -n "${FM_BROWSER_MCP_PIN:-}" ]; then
-    printf '%s' "$FM_BROWSER_MCP_PIN"
+    env_pin=$FM_BROWSER_MCP_PIN
+    env_pin="${env_pin#"${env_pin%%[![:space:]]*}"}"
+    env_pin="${env_pin%"${env_pin##*[![:space:]]}"}"
+    printf '%s' "$env_pin"
     return 0
   fi
   [ -f "$file" ] || return 0
   while IFS= read -r line || [ -n "$line" ]; do
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
     case "$line" in
       ''|'#'*) continue ;;
     esac
@@ -229,8 +238,7 @@ ensure_pin() {
     echo "fm-browser-mcp-pin: install completed but $entry is absent" >&2
     return 2
   fi
-  printf '%s\n' "$entry"
-  return 0
+  emit_pin "$entry"
 }
 
 case "${1:-path}" in

@@ -11,7 +11,15 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 PIN="$ROOT/bin/fm-browser-mcp-pin.sh"
+# Resolved physically, because the script prints physical paths and a host whose
+# TMPDIR contains a symlinked component would otherwise make every exact-path
+# expectation below compare a logical spelling against a physical one. The mkdir
+# is not redundant: fm_test_tmproot registers its EXIT trap inside the command
+# substitution, so the root it prints is already gone by the time it is assigned,
+# and every case here recreates what it needs under it.
 TMP_ROOT=$(fm_test_tmproot fm-browser-mcp-pin)
+mkdir -p "$TMP_ROOT"
+TMP_ROOT=$(CDPATH='' cd -- "$TMP_ROOT" && pwd -P)
 
 # An isolated home plus an empty pin root. Prints "home|root".
 make_pin_case() {
@@ -100,6 +108,27 @@ test_configured_off_lifts_the_pin_silently() {
   [ -z "$out" ] || fail "a lifted pin printed a path: $out"
   [ ! -s "$err" ] || fail "a lifted pin is a deliberate choice and must stay silent: $(cat "$err")"
   pass "config/browser-mcp-pin=off lifts the pin with its own exit code and no diagnostic"
+}
+
+test_whitespace_padded_off_still_lifts_the_pin() {
+  local rec out err status
+  rec=$(make_pin_case off_padded)
+  read_pin_case "$rec"
+  err="$TMP_ROOT/off_padded.err"
+  install_fake_pin "$ROOT_DIR" "$(run_pin "$HOME_DIR" "$ROOT_DIR" --version)" >/dev/null
+  printf '  off  \n' > "$HOME_DIR/config/browser-mcp-pin"
+
+  out=$(run_pin "$HOME_DIR" "$ROOT_DIR" path 2>"$err")
+  status=$?
+  expect_code 3 "$status" "a whitespace-padded configured off should lift the pin like a clean off"
+  [ -z "$out" ] || fail "a whitespace-padded off resolved a pin anyway: $out"
+  [ ! -s "$err" ] || fail "a whitespace-padded off is still a deliberate choice and must stay silent: $(cat "$err")"
+
+  out=$(CASE_ENV_PIN='  off  ' run_pin "$HOME_DIR" "$ROOT_DIR" path 2>"$err")
+  status=$?
+  expect_code 3 "$status" "a whitespace-padded FM_BROWSER_MCP_PIN should lift the pin too"
+  [ -z "$out" ] || fail "a whitespace-padded env off resolved a pin anyway: $out"
+  pass "an off written with ordinary editor whitespace still lifts the pin"
 }
 
 test_installed_fleet_pin_resolves() {
@@ -239,20 +268,24 @@ test_ensure_failure_carries_npms_own_reason() {
 }
 
 test_ensure_success_stays_quiet_and_prints_only_the_entry_point() {
-  local rec out err status version entry CASE_PATH
+  local rec out err status version entry linked_root CASE_PATH
   rec=$(make_pin_case ensure_npm_ok)
   read_pin_case "$rec"
   err="$TMP_ROOT/ensure_npm_ok.err"
   version=$(run_pin "$HOME_DIR" "$ROOT_DIR" --version)
   entry="$ROOT_DIR/$version/node_modules/chrome-devtools-mcp/build/src/bin/chrome-devtools-mcp.js"
+  # Reached through a symlinked root, so the fresh-install branch has to honor the
+  # same absolute-and-physical contract every other success path does.
+  linked_root="$TMP_ROOT/ensure_npm_ok/root-link"
+  ln -s "$ROOT_DIR" "$linked_root"
   CASE_PATH=$(make_fake_npm "$TMP_ROOT/ensure_npm_ok/fake" \
     'echo "added 42 packages"; echo "npm notice a new version is available" >&2
      mkdir -p node_modules/chrome-devtools-mcp/build/src/bin
      printf "// installed\n" > node_modules/chrome-devtools-mcp/build/src/bin/chrome-devtools-mcp.js')
-  out=$(CASE_PATH="$CASE_PATH" run_pin "$HOME_DIR" "$ROOT_DIR" --ensure 2>"$err")
+  out=$(CASE_PATH="$CASE_PATH" run_pin "$HOME_DIR" "$linked_root" --ensure 2>"$err")
   status=$?
   expect_code 0 "$status" "--ensure should succeed when npm installs the pin"
-  [ "$out" = "$entry" ] || fail "--ensure printed more than the entry point: $out"
+  [ "$out" = "$entry" ] || fail "--ensure did not print the physical entry point"$'\n'"expected: $entry"$'\n'"actual:   $out"
   [ ! -s "$err" ] || fail "a successful --ensure leaked npm chatter: $(cat "$err")"
   pass "a successful --ensure prints only the entry point and stays quiet"
 }
@@ -268,6 +301,7 @@ test_unknown_argument_is_refused() {
 test_version_is_reported
 test_no_pin_anywhere_is_an_actionable_refusal
 test_configured_off_lifts_the_pin_silently
+test_whitespace_padded_off_still_lifts_the_pin
 test_installed_fleet_pin_resolves
 test_configured_path_wins_over_the_installed_pin
 test_relative_pins_resolve_to_absolute_paths

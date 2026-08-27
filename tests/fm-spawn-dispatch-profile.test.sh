@@ -276,11 +276,14 @@ test_unresolvable_relative_overrides_fail_loudly() {
 }
 
 test_resolved_browser_mcp_pin_rides_every_launch() {
-  local rec id out status launch pin
+  local rec id out status launch pin case_real
   id=profile-mcp-pin-z24
   rec=$(make_spawn_case profile-mcp-pin claude "$id")
   read_case_record "$rec"
-  pin="$CASE_DIR/pinned-chrome-devtools-mcp.js"
+  # The pin script prints physical paths, so build the expectation from the
+  # physical fixture root rather than the logical spelling TMPDIR happened to use.
+  case_real=$(cd "$CASE_DIR" && pwd -P)
+  pin="$case_real/pinned-chrome-devtools-mcp.js"
   printf '// pinned build\n' > "$pin"
 
   out=$(FM_BROWSER_MCP_PIN="$pin" \
@@ -329,12 +332,13 @@ test_unresolvable_browser_mcp_pin_is_reported_and_does_not_block_dispatch() {
 }
 
 test_browser_mcp_pin_is_scoped_per_home_and_skips_secondmate_launches() {
-  local rec crew_id sm_id sm out status launch pin
+  local rec crew_id sm_id sm out status launch pin case_real
   crew_id=profile-mcp-pin-crew-z27
   sm_id=profile-mcp-pin-secondmate-z27
   rec=$(make_spawn_case profile-mcp-pin-secondmate claude "$crew_id" "$sm_id")
   read_case_record "$rec"
-  pin="$CASE_DIR/pinned-chrome-devtools-mcp.js"
+  case_real=$(cd "$CASE_DIR" && pwd -P)
+  pin="$case_real/pinned-chrome-devtools-mcp.js"
   printf '// pinned build\n' > "$pin"
   sm="$CASE_DIR/secondmate-home"
   make_seeded_secondmate_home "$sm" "$sm_id"
