@@ -18,6 +18,9 @@ Live capture against the real compositor is not asserted here - it is
 docs/verification/desktop-capture.md plus `bin/fm-deskcap-mcp.py --selftest`.
 """
 import importlib.util
+import json
+import subprocess
+import sys
 import time
 import unittest
 from pathlib import Path
@@ -225,36 +228,80 @@ class MainContextPumpTest(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 1.0)
 
 
+class FakeMapInfo:
+    def __init__(self, data):
+        self.data = data
+
+
+class FakeBuffer:
+    def __init__(self, data):
+        self.data = data
+        self.unmapped = False
+
+    def map(self, _flags):
+        return True, FakeMapInfo(self.data)
+
+    def unmap(self, _info):
+        self.unmapped = True
+
+
+class FakeSample:
+    def __init__(self, data):
+        self.buffer = FakeBuffer(data)
+
+    def get_buffer(self):
+        return self.buffer
+
+
+class FakeMessage:
+    def __init__(self, message_type):
+        self.type = message_type
+
+
 class FakeSink:
-    """An appsink that never produces a sample, so the pull loop keeps waiting."""
+    """An appsink replaying a scripted series of pull results."""
+
+    def __init__(self, samples):
+        self.samples = list(samples)
+        self.pulls = 0
 
     def emit(self, _signal, _timeout_ns):
+        self.pulls += 1
+        if self.samples:
+            return self.samples.pop(0)
         time.sleep(0.02)
         return None
 
 
 class FakeGstBus:
+    def __init__(self, messages):
+        self.messages = list(messages)
+
     def pop_filtered(self, _mask):
-        return None
+        return self.messages.pop(0) if self.messages else None
 
 
 class FakePipeline:
-    def __init__(self):
+    def __init__(self, sink, bus):
+        self.sink = sink
+        self.bus = bus
         self.states = []
 
     def get_by_name(self, _name):
-        return FakeSink()
+        return self.sink
 
     def set_state(self, state):
         self.states.append(state)
 
     def get_bus(self):
-        return FakeGstBus()
+        return self.bus
 
 
 class FakeGst:
     MSECOND = 1000000
     pipelines: list = []
+    next_samples: list = []
+    next_messages: list = []
 
     class State:
         PLAYING = "playing"
@@ -269,7 +316,7 @@ class FakeGst:
 
     @classmethod
     def parse_launch(cls, _description):
-        pipeline = FakePipeline()
+        pipeline = FakePipeline(FakeSink(cls.next_samples), FakeGstBus(cls.next_messages))
         cls.pipelines.append(pipeline)
         return pipeline
 
@@ -282,6 +329,8 @@ class ClosedDuringFramePullTest(unittest.TestCase):
             self.skipTest("GObject introspection bindings unavailable")
         CAP._pump_main_context()
         FakeGst.pipelines = []
+        FakeGst.next_samples = []
+        FakeGst.next_messages = []
         self.saved_gst = CAP.Gst
         CAP.Gst = FakeGst
 
@@ -314,6 +363,29 @@ class ClosedDuringFramePullTest(unittest.TestCase):
         started = time.monotonic()
         self.assertEqual(CAP._pull_png(7, 0.3, lambda: False), b"")
         self.assertLess(time.monotonic() - started, 5.0)
+
+    def test_a_frame_that_lands_with_the_eos_is_returned_not_discarded(self):
+        # pngenc posts EOS right after its single frame, so the pull that
+        # follows the EOS message is where that frame can show up.
+        FakeGst.next_samples = [None, FakeSample(PNG_1X1)]
+        FakeGst.next_messages = [FakeMessage(FakeGst.MessageType.EOS)]
+
+        started = time.monotonic()
+        png = CAP._pull_png(7, 2.0, None)
+
+        self.assertEqual(png, PNG_1X1, "the frame pulled after EOS was thrown away")
+        self.assertLess(time.monotonic() - started, 1.5, "the pull spun on instead of returning the frame")
+        self.assertTrue(FakeGst.pipelines[0].sink.samples == [], "the scripted frame was never pulled")
+
+    def test_an_eos_with_no_frame_behind_it_still_gives_up(self):
+        FakeGst.next_samples = [None, None]
+        FakeGst.next_messages = [FakeMessage(FakeGst.MessageType.EOS)]
+        self.assertEqual(CAP._pull_png(7, 2.0, None), b"")
+
+    def test_a_frame_pulled_before_any_message_is_returned(self):
+        FakeGst.next_samples = [FakeSample(PNG_1X1)]
+        self.assertEqual(CAP._pull_png(7, 2.0, None), PNG_1X1)
+        self.assertTrue(FakeGst.pipelines[0].sink.samples == [])
 
 
 class RecordingBus:
@@ -416,28 +488,52 @@ class MutterStreamGeometryTest(unittest.TestCase):
             )
 
 
+# Loads the engine in a fresh interpreter where `gi` cannot be imported at all,
+# so the module-level GLib name is genuinely never bound, then prints what
+# probe() reports. That is the machine probe() exists to diagnose, and it cannot
+# be reproduced in-process because this interpreter has already imported gi.
+PROBE_WITHOUT_GI = """
+import importlib.util, json, sys
+
+
+class BlockGi:
+    def find_spec(self, name, path=None, target=None):
+        if name == "gi" or name.startswith("gi."):
+            raise ImportError("blocked: gir1.2-gst-plugins-base-1.0 is missing")
+        return None
+
+
+sys.meta_path.insert(0, BlockGi())
+spec = importlib.util.spec_from_file_location("fm_deskcap_lib", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+assert not hasattr(module, "GLib"), "the test did not actually unbind GLib"
+print(json.dumps(module.probe()))
+"""
+
+
 class ProbeWithoutBindingsTest(unittest.TestCase):
     """probe() has to survive the machine it exists to diagnose."""
 
     def test_a_broken_gi_import_is_reported_rather_than_raised(self):
-        saved = (CAP._GI_IMPORT_ERROR, CAP._GLIB_ERRORS)
-        CAP._GI_IMPORT_ERROR = "ValueError: Namespace Gst not available"
-        CAP._GLIB_ERRORS = ()
-        try:
-            report = CAP.probe()
-        finally:
-            CAP._GI_IMPORT_ERROR, CAP._GLIB_ERRORS = saved
+        done = subprocess.run(
+            [sys.executable, "-c", PROBE_WITHOUT_GI, str(BIN / "fm-deskcap-lib.py")],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        self.assertEqual(done.returncode, 0, f"probe() crashed without gi:\n{done.stderr}")
+        report = json.loads(done.stdout)
         for key in ("bindings", "gstreamer", "display", "mutter_route", "portal_route"):
-            self.assertIn(key, report)
-        self.assertIn("Namespace Gst not available", report["bindings"])
-        self.assertIn("Namespace Gst not available", report["mutter_route"])
-        self.assertIn("Namespace Gst not available", report["portal_route"])
+            self.assertIn(key, report, "probe() dropped a section it is meant to report")
+        for key in ("bindings", "gstreamer", "display", "mutter_route", "portal_route"):
+            self.assertIn("gir1.2-gst-plugins-base-1.0 is missing", str(report[key]))
 
 
 class RouteSelectionTest(unittest.TestCase):
     def setUp(self):
         self.saved = (CAP._mutter_attempt, CAP._portal_capture, CAP.display_state)
-        CAP.display_state = lambda: {"width": 1920, "height": 1009, "monitors": [], "primary": {}}
+        CAP.display_state = lambda *_a, **_k: {"width": 1920, "height": 1009, "monitors": [], "primary": {}}
 
     def tearDown(self):
         CAP._mutter_attempt, CAP._portal_capture, CAP.display_state = self.saved
@@ -494,13 +590,29 @@ class RouteSelectionTest(unittest.TestCase):
         self.assertLess(budgets[1], budgets[0], "the portal route was handed a fresh budget")
 
     def test_a_malformed_rectangle_is_refused_before_the_compositor_is_asked(self):
-        def refuse():
+        def refuse(*_a, **_k):
             raise AssertionError("the display layout was read before the rectangle was checked")
 
         CAP.display_state = refuse
         CAP._mutter_attempt = lambda *a: (_ for _ in ()).throw(AssertionError("no capture must be attempted"))
         with self.assertRaises(CAP.CaptureError):
             CAP.capture(scope="region", region={"x": 0, "y": 0, "width": 0, "height": 10})
+
+    def test_region_validation_is_inside_the_capture_deadline(self):
+        seen = {}
+
+        def recording_display_state(timeout_ms=CAP.DBUS_CALL_TIMEOUT_MS):
+            seen["timeout_ms"] = timeout_ms
+            return {"width": 1920, "height": 1009, "monitors": [], "primary": {}}
+
+        CAP.display_state = recording_display_state
+        CAP._mutter_attempt = lambda *a: PNG_1X1
+        CAP.capture(scope="region", region={"x": 0, "y": 0, "width": 10, "height": 10}, timeout=1.0)
+        self.assertLessEqual(
+            seen["timeout_ms"],
+            1000,
+            "reading the display layout was allowed to outlive the whole capture budget",
+        )
 
     def test_a_pinned_route_does_not_fall_back(self):
         CAP._mutter_attempt = lambda *a: (_ for _ in ()).throw(CAP.CaptureError("screen cast refused"))
@@ -568,6 +680,42 @@ class CropTest(unittest.TestCase):
     def test_rejects_bytes_that_are_not_a_png(self):
         with self.assertRaises(CAP.CaptureError):
             CAP.crop_png(b"still not a png", {"x": 0, "y": 0, "width": 1, "height": 1})
+
+
+class DownscaleTest(unittest.TestCase):
+    """max_width keeps a full-display capture small for the agents this serves."""
+
+    def setUp(self):
+        if CAP._GI_IMPORT_ERROR is not None:
+            self.skipTest("GObject introspection bindings unavailable")
+
+    def _solid_png(self, width, height):
+        pixbuf = CAP.GdkPixbuf.Pixbuf.new(CAP.GdkPixbuf.Colorspace.RGB, False, 8, width, height)
+        pixbuf.fill(0x336699FF)
+        ok, data = pixbuf.save_to_bufferv("png", [], [])
+        self.assertTrue(ok)
+        return bytes(data)
+
+    def test_shrinks_to_the_ceiling_and_keeps_the_aspect_ratio(self):
+        scaled = CAP.downscale_png(self._solid_png(1920, 1009), 480)
+        self.assertEqual(CAP.png_dimensions(scaled), (480, 252))
+
+    def test_a_capture_already_under_the_ceiling_is_returned_unchanged(self):
+        original = self._solid_png(100, 50)
+        self.assertIs(CAP.downscale_png(original, 400), original)
+
+    def test_a_very_small_ceiling_still_produces_at_least_one_row(self):
+        self.assertEqual(CAP.png_dimensions(CAP.downscale_png(self._solid_png(1920, 1009), 1)), (1, 1))
+
+    def test_undecodable_bytes_fail_as_a_capture_error_not_a_raw_glib_error(self):
+        # This is the difference between an agent reading a tool error and the
+        # MCP client getting an internal error with the capture already lost.
+        with self.assertRaises(CAP.CaptureError):
+            CAP.downscale_png(b"not a png at all, definitely not", 100)
+
+    def test_a_nonsense_ceiling_is_refused(self):
+        with self.assertRaises(CAP.CaptureError):
+            CAP.downscale_png(self._solid_png(40, 40), 0)
 
 
 class MonitorResolutionTest(unittest.TestCase):

@@ -144,7 +144,7 @@ def tool_desktop_screenshot(arguments: dict[str, Any]) -> list[dict[str, Any]]:
     png, width, height = result.png, result.width, result.height
     max_width = arguments.get("max_width")
     if max_width and width > int(max_width):
-        png = _downscale_png(png, int(max_width))
+        png = CAPTURE.downscale_png(png, int(max_width))
         width, height = CAPTURE.png_dimensions(png)
 
     summary = (
@@ -157,23 +157,6 @@ def tool_desktop_screenshot(arguments: dict[str, Any]) -> list[dict[str, Any]]:
         {"type": "text", "text": summary},
         {"type": "image", "data": base64.b64encode(png).decode("ascii"), "mimeType": "image/png"},
     ]
-
-
-def _downscale_png(png: bytes, max_width: int) -> bytes:
-    """Shrink PNG bytes to `max_width`, preserving aspect ratio, in memory."""
-    gdk, glib = CAPTURE.GdkPixbuf, CAPTURE.GLib
-    loader = gdk.PixbufLoader.new_with_type("png")
-    loader.write_bytes(glib.Bytes.new(png))
-    loader.close()
-    pixbuf = loader.get_pixbuf()
-    if pixbuf is None:
-        raise CAPTURE.CaptureError("could not decode the capture for downscaling")
-    height = max(1, round(pixbuf.get_height() * max_width / pixbuf.get_width()))
-    scaled = pixbuf.scale_simple(max_width, height, gdk.InterpType.BILINEAR)
-    ok, data = scaled.save_to_bufferv("png", [], [])
-    if not ok:
-        raise CAPTURE.CaptureError("could not re-encode the downscaled capture")
-    return bytes(data)
 
 
 TOOLS = {"desktop_screenshot": tool_desktop_screenshot}

@@ -50,10 +50,11 @@ bounds, not the primary monitor, so both routes answer the same arguments with
 the same content on a multi-monitor layout. RecordArea works in logical pixels,
 which under non-unity scaling is not a monitor's native resolution.
 
-One capture gets one end-to-end deadline. The rebuild after a close and the
-fallback to the portal both spend what is left of it rather than each starting a
-fresh budget, and every D-Bus call is capped by the remainder, so a wedged
-compositor cannot stack timeouts against a caller serving requests in sequence.
+One capture gets one end-to-end deadline, starting at the region check that
+reads the display layout. The rebuild after a close and the fallback to the
+portal both spend what is left of it rather than each starting a fresh budget,
+and every D-Bus call is capped by the remainder, so a wedged compositor cannot
+stack timeouts against a caller serving requests in sequence.
 
 Environment: only XDG_RUNTIME_DIR and DBUS_SESSION_BUS_ADDRESS are required. No
 WAYLAND_DISPLAY, no DISPLAY, no desktop session inheritance - an agent process
@@ -500,6 +501,17 @@ def _pull_png(node_id: int, timeout: float, closed=None) -> bytes:
     """
     if closed is not None and closed():
         return b""
+
+    def _encoded(sample: Any) -> bytes:
+        buf = sample.get_buffer()
+        ok, info = buf.map(Gst.MapFlags.READ)
+        if not ok:
+            raise CaptureError("could not read the encoded frame out of the pipeline")
+        try:
+            return bytes(info.data)
+        finally:
+            buf.unmap(info)
+
     pipeline = Gst.parse_launch(
         f"pipewiresrc path={node_id} num-buffers=1 ! videoconvert ! "
         "pngenc snapshot=true ! "
@@ -517,14 +529,7 @@ def _pull_png(node_id: int, timeout: float, closed=None) -> bytes:
             # used rather than the bound try_pull_sample() method.
             sample = sink.emit("try-pull-sample", 200 * Gst.MSECOND)
             if sample is not None:
-                buf = sample.get_buffer()
-                ok, info = buf.map(Gst.MapFlags.READ)
-                if not ok:
-                    raise CaptureError("could not read the encoded frame out of the pipeline")
-                try:
-                    return bytes(info.data)
-                finally:
-                    buf.unmap(info)
+                return _encoded(sample)
             msg = pipeline.get_bus().pop_filtered(Gst.MessageType.ERROR | Gst.MessageType.EOS)
             _pump_main_context()
             if closed is not None and closed():
@@ -533,9 +538,10 @@ def _pull_png(node_id: int, timeout: float, closed=None) -> bytes:
                 err, _debug = msg.parse_error()
                 raise CaptureError(f"capture pipeline failed: {err.message}")
             if msg is not None and msg.type == Gst.MessageType.EOS:
+                # pngenc posts EOS straight after the single encoded frame, so a
+                # buffer can be waiting here even though the pull above missed it.
                 sample = sink.emit("try-pull-sample", 200 * Gst.MSECOND)
-                if sample is None:
-                    return b""
+                return _encoded(sample) if sample is not None else b""
         return b""
     finally:
         pipeline.set_state(Gst.State.NULL)
@@ -641,21 +647,57 @@ def _take_portal_file(uri: str, notes: list[str]) -> bytes:
     return png
 
 
-def crop_png(png: bytes, region: dict[str, int]) -> bytes:
-    """Crop PNG bytes to `region`, in memory.
-
-    Needed only on the portal route, which has no region scope of its own.
-    """
+def _decode_png(png: bytes, purpose: str) -> Any:
+    """Decode PNG bytes to a pixbuf, reporting any failure as a CaptureError."""
     _require_gi()
     loader = GdkPixbuf.PixbufLoader.new_with_type("png")
     try:
         loader.write_bytes(GLib.Bytes.new(png))
         loader.close()
     except GLib.Error as err:
-        raise CaptureError(f"could not decode the screenshot for cropping: {err.message}") from err
+        raise CaptureError(f"could not decode the screenshot for {purpose}: {err.message}") from err
     pixbuf = loader.get_pixbuf()
     if pixbuf is None:
-        raise CaptureError("could not decode the screenshot for cropping")
+        raise CaptureError(f"could not decode the screenshot for {purpose}")
+    return pixbuf
+
+
+def _encode_png(pixbuf: Any, purpose: str) -> bytes:
+    """Re-encode a pixbuf to PNG bytes, reporting any failure as a CaptureError."""
+    if pixbuf is None:
+        raise CaptureError(f"could not resize the screenshot for {purpose}")
+    try:
+        ok, data = pixbuf.save_to_bufferv("png", [], [])
+    except GLib.Error as err:
+        raise CaptureError(f"could not re-encode the screenshot after {purpose}: {err.message}") from err
+    if not ok:
+        raise CaptureError(f"could not re-encode the screenshot after {purpose}")
+    return bytes(data)
+
+
+def downscale_png(png: bytes, max_width: int) -> bytes:
+    """Shrink PNG bytes to `max_width`, preserving aspect ratio, in memory.
+
+    A full-display capture is around 210 KB, which is a lot of base64 for the
+    agents this serves. A failure here must not lose a capture that already
+    succeeded, so every step reports as a CaptureError like the rest of the
+    engine rather than as a raw GLib.Error.
+    """
+    if max_width <= 0:
+        raise CaptureError(f"max_width must be positive, got {max_width}")
+    pixbuf = _decode_png(png, "downscaling")
+    if pixbuf.get_width() <= max_width:
+        return png
+    height = max(1, round(pixbuf.get_height() * max_width / pixbuf.get_width()))
+    return _encode_png(pixbuf.scale_simple(max_width, height, GdkPixbuf.InterpType.BILINEAR), "downscaling")
+
+
+def crop_png(png: bytes, region: dict[str, int]) -> bytes:
+    """Crop PNG bytes to `region`, in memory.
+
+    Needed only on the portal route, which has no region scope of its own.
+    """
+    pixbuf = _decode_png(png, "cropping")
     if (
         region["x"] + region["width"] > pixbuf.get_width()
         or region["y"] + region["height"] > pixbuf.get_height()
@@ -665,10 +707,7 @@ def crop_png(png: bytes, region: dict[str, int]) -> bytes:
             f"the {pixbuf.get_width()}x{pixbuf.get_height()} screenshot"
         )
     cropped = pixbuf.new_subpixbuf(region["x"], region["y"], region["width"], region["height"])
-    ok, data = cropped.save_to_bufferv("png", [], [])
-    if not ok:
-        raise CaptureError("could not re-encode the cropped screenshot")
-    return bytes(data)
+    return _encode_png(cropped, "cropping")
 
 
 # ---------------------------------------------------------------------------
@@ -700,15 +739,16 @@ def capture(
         raise CaptureError(f"scope must be one of {', '.join(SCOPES)} (window scope is not in this slice)")
     if route not in ROUTES:
         raise CaptureError(f"route must be one of {', '.join(ROUTES)}")
-    if scope == "region":
-        region = normalize_region(region)
-        region = fit_region(region, display_state())
-    else:
-        region = None
-
     notes: list[str] = []
     started = time.monotonic()
     deadline = started + timeout
+
+    if scope == "region":
+        region = normalize_region(region)
+        region = fit_region(region, display_state(_call_timeout_ms(deadline)))
+    else:
+        region = None
+
     order = ("mutter", "portal") if route == "auto" else (route,)
     failures: list[str] = []
 
@@ -759,12 +799,12 @@ def probe() -> dict[str, Any]:
     try:
         _require_gst()
         report["gstreamer"] = "ok"
-    except CaptureError as err:
-        report["gstreamer"] = str(err)
+    except (CaptureError, *_GLIB_ERRORS) as err:
+        report["gstreamer"] = _error_text(err)
     try:
         report["display"] = display_state()
-    except CaptureError as err:
-        report["display"] = str(err)
+    except (CaptureError, *_GLIB_ERRORS) as err:
+        report["display"] = _error_text(err)
     for label, bus_name, path, iface in (
         ("mutter", MUTTER_BUS, MUTTER_PATH, MUTTER_BUS),
         ("portal", PORTAL_BUS, PORTAL_PATH, PORTAL_SCREENSHOT_IFACE),
