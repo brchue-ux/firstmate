@@ -142,9 +142,12 @@ def tool_desktop_screenshot(arguments: dict[str, Any]) -> list[dict[str, Any]]:
         route=arguments.get("route") or "auto",
     )
     png, width, height = result.png, result.width, result.height
-    max_width = arguments.get("max_width")
-    if max_width and width > int(max_width):
-        png = CAPTURE.downscale_png(png, int(max_width))
+    if arguments.get("max_width") is not None:
+        try:
+            max_width = int(arguments["max_width"])
+        except (TypeError, ValueError) as err:
+            raise CAPTURE.CaptureError("max_width must be an integer number of pixels") from err
+        png = CAPTURE.downscale_png(png, max_width)
         width, height = CAPTURE.png_dimensions(png)
 
     summary = (

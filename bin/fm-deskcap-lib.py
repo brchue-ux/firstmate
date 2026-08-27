@@ -50,6 +50,13 @@ bounds, not the primary monitor, so both routes answer the same arguments with
 the same content on a multi-monitor layout. RecordArea works in logical pixels,
 which under non-unity scaling is not a monitor's native resolution.
 
+Regions are given and validated in logical pixels, the space RecordArea uses.
+The portal returns the compositor's own framebuffer instead, so before cropping,
+the portal route rescales the rectangle into that image's pixel space using the
+returned screenshot's real dimensions against the desktop bounds. Without that
+step a region on a scaled display would silently crop the wrong area rather than
+the same area at another resolution.
+
 One capture gets one end-to-end deadline, starting at the region check that
 reads the display layout. The rebuild after a close and the fallback to the
 portal both spend what is left of it rather than each starting a fresh budget,
@@ -117,10 +124,12 @@ try:
 except Exception as err:  # noqa: BLE001 - reported as a clean CaptureError later
     _GI_IMPORT_ERROR = f"{type(err).__name__}: {err}"
 
-# Every `except` clause below reaches for this rather than naming GLib.Error
-# directly: when the import above failed the name GLib does not exist, and an
-# except clause that mentions it dies with NameError on exactly the broken
-# machine `probe` is meant to diagnose.
+# Any handler that can run BEFORE `_require_gi()` has succeeded must reach for
+# this rather than naming GLib.Error: when the import above failed the name GLib
+# does not exist, and an except clause that mentions it dies with NameError on
+# exactly the broken machine `probe` is meant to diagnose. Handlers reachable
+# only after `_require_gi()` may name GLib.Error directly, which is why every
+# function that touches GdkPixbuf or Gst calls `_require_gi()` on entry.
 if _GI_IMPORT_ERROR is None:
     _GLIB_ERRORS: tuple[type[BaseException], ...] = (GLib.Error,)
 else:
@@ -133,6 +142,14 @@ class CaptureError(RuntimeError):
 
 class SessionClosed(CaptureError):
     """The compositor closed the screen-cast session before a frame arrived."""
+
+
+class MissingDependency(CaptureError):
+    """A package this machine needs for a route is not installed.
+
+    Distinct from an ordinary capture failure because the operator has to install
+    something rather than retry, which is what the CLI's exit status 2 means.
+    """
 
 
 class Capture:
@@ -170,7 +187,7 @@ def png_dimensions(png: bytes) -> tuple[int, int]:
 
 def _require_gi() -> None:
     if _GI_IMPORT_ERROR is not None:
-        raise CaptureError(
+        raise MissingDependency(
             "python3 GObject introspection bindings are unavailable "
             f"({_GI_IMPORT_ERROR}); install python3-gi, gir1.2-gst-plugins-base-1.0 "
             "and gir1.2-gdkpixbuf-2.0"
@@ -200,9 +217,9 @@ def _require_gst() -> None:
         Gst.init(None)
         _GST_READY = True
     if Gst.ElementFactory.find("pipewiresrc") is None:
-        raise CaptureError("the GStreamer element pipewiresrc is missing; install gstreamer1.0-pipewire")
+        raise MissingDependency("the GStreamer element pipewiresrc is missing; install gstreamer1.0-pipewire")
     if Gst.ElementFactory.find("pngenc") is None:
-        raise CaptureError("the GStreamer element pngenc is missing; install gstreamer1.0-plugins-good")
+        raise MissingDependency("the GStreamer element pngenc is missing; install gstreamer1.0-plugins-good")
 
 
 def _remaining(deadline: float) -> float:
@@ -351,6 +368,41 @@ def normalize_region(region: Any) -> dict[str, int]:
     if x < 0 or y < 0:
         raise CaptureError(f"region x and y must not be negative, got {x},{y}")
     return {"x": x, "y": y, "width": width, "height": height}
+
+
+def region_in_image_pixels(
+    region: dict[str, int], bounds: dict[str, Any], image_width: int, image_height: int
+) -> dict[str, int]:
+    """Place a logical-pixel rectangle onto an image that may be at another scale.
+
+    A region is given, validated and recorded by Mutter's RecordArea in logical
+    pixels. The portal instead hands back whatever the compositor's own
+    framebuffer is, which under non-unity scaling is larger than the logical
+    desktop, so cropping the logical rectangle straight out of it would silently
+    return the wrong area rather than merely the wrong resolution.
+
+    The factor is derived from the image the portal actually returned against the
+    desktop bounds, not from a configured scale value, so it stays correct
+    whatever the portal chose to do.
+    """
+    desktop_width = int(bounds.get("width") or 0) if bounds else 0
+    desktop_height = int(bounds.get("height") or 0) if bounds else 0
+    if desktop_width <= 0 or desktop_height <= 0:
+        raise CaptureError(
+            "the desktop bounds are unknown, so a region cannot be placed on the screenshot"
+        )
+    if (image_width, image_height) == (desktop_width, desktop_height):
+        return region
+    scale_x = image_width / desktop_width
+    scale_y = image_height / desktop_height
+    x = max(0, min(image_width - 1, round(region["x"] * scale_x)))
+    y = max(0, min(image_height - 1, round(region["y"] * scale_y)))
+    return {
+        "x": x,
+        "y": y,
+        "width": max(1, min(image_width - x, round(region["width"] * scale_x))),
+        "height": max(1, min(image_height - y, round(region["height"] * scale_y))),
+    }
 
 
 def fit_region(region: dict[str, int], bounds: dict[str, Any]) -> dict[str, int]:
@@ -563,7 +615,13 @@ def _portal_request_path(bus: Any, token: str) -> str:
     return f"{PORTAL_PATH}/request/{sender}/{token}"
 
 
-def _portal_capture(scope: str, region: dict[str, int] | None, cursor: bool, timeout: float) -> tuple[bytes, list[str]]:
+def _portal_capture(
+    scope: str,
+    region: dict[str, int] | None,
+    cursor: bool,
+    timeout: float,
+    bounds: dict[str, Any] | None = None,
+) -> tuple[bytes, list[str]]:
     bus = _session_bus()
     deadline = time.monotonic() + timeout
     notes: list[str] = []
@@ -621,7 +679,15 @@ def _portal_capture(scope: str, region: dict[str, int] | None, cursor: bool, tim
     png = _take_portal_file(uri, notes)
     if scope == "region":
         assert region is not None
-        png = crop_png(png, region)
+        image_width, image_height = png_dimensions(png)
+        placed = region_in_image_pixels(region, bounds, image_width, image_height)
+        if placed != region:
+            notes.append(
+                f"the portal returned a {image_width}x{image_height} screenshot of a "
+                f"{bounds['width']}x{bounds['height']} desktop, so the region was rescaled "
+                f"to {placed['width']}x{placed['height']}+{placed['x']}+{placed['y']}"
+            )
+        png = crop_png(png, placed)
     return png, notes
 
 
@@ -664,6 +730,7 @@ def _decode_png(png: bytes, purpose: str) -> Any:
 
 def _encode_png(pixbuf: Any, purpose: str) -> bytes:
     """Re-encode a pixbuf to PNG bytes, reporting any failure as a CaptureError."""
+    _require_gi()
     if pixbuf is None:
         raise CaptureError(f"could not resize the screenshot for {purpose}")
     try:
@@ -743,14 +810,17 @@ def capture(
     started = time.monotonic()
     deadline = started + timeout
 
+    bounds: dict[str, Any] | None = None
     if scope == "region":
         region = normalize_region(region)
-        region = fit_region(region, display_state(_call_timeout_ms(deadline)))
+        bounds = display_state(_call_timeout_ms(deadline))
+        region = fit_region(region, bounds)
     else:
         region = None
 
     order = ("mutter", "portal") if route == "auto" else (route,)
     failures: list[str] = []
+    causes: list[BaseException] = []
 
     for chosen in order:
         try:
@@ -758,7 +828,7 @@ def capture(
             if chosen == "mutter":
                 png = _mutter_attempt(scope, region, cursor, budget)
             else:
-                png, portal_notes = _portal_capture(scope, region, cursor, budget)
+                png, portal_notes = _portal_capture(scope, region, cursor, budget, bounds)
                 notes.extend(portal_notes)
             elapsed = (time.monotonic() - started) * 1000
             result = Capture(png, chosen, scope, elapsed, notes)
@@ -770,7 +840,10 @@ def capture(
             # route, not of the call. Treating it as one is what keeps the
             # fallback reachable when the primary route breaks.
             failures.append(f"{chosen}: {_error_text(err)}")
+            causes.append(err)
 
+    if causes and all(isinstance(err, MissingDependency) for err in causes):
+        raise MissingDependency("; ".join(failures))
     raise CaptureError("; ".join(failures))
 
 
@@ -890,6 +963,9 @@ def main(argv: list[str] | None = None) -> int:
             route=args.route,
             timeout=args.timeout,
         )
+    except MissingDependency as err:
+        print(f"capture failed: {err}", file=sys.stderr)
+        return 2
     except CaptureError as err:
         print(f"capture failed: {err}", file=sys.stderr)
         return 1

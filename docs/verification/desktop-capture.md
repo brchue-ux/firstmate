@@ -73,6 +73,9 @@ Both routes agreeing on black while the compositor route's screen cast still suc
   Both routes take `screen` scope as the full virtual desktop bounds by construction, the compositor route through `RecordArea(0, 0, width, height)`, so the two routes cannot disagree about what `screen` means on a multi-monitor layout.
   What remains unverified there is the geometry itself: the connector and mode resolution that computes those bounds is unit-tested against a two-monitor reply shape, but no real multi-monitor capture has been taken.
   Non-unity scaling is likewise unverified, and `screen` scope captures in logical pixels, so a scaled monitor would not be captured at its native resolution.
+- The portal route's rescaling of a region into the screenshot's own pixel space has never run against a real scaled display, and cannot be exercised on this machine at all: its single virtual output is at scale 1.0, where the screenshot's dimensions equal the desktop bounds and the conversion is the identity.
+  It is covered only by unit tests over the coordinate conversion, which pin the identity case, a 2.0 factor, a non-square factor, and clamping at the far edge.
+  No capture from a scaled display was taken, so whether the portal really hands back the physical framebuffer on such a display is assumed from its documented behavior rather than observed here.
 - Long-lived behavior is untested beyond back-to-back captures; the longest run here was the 80-capture latency sweep above.
 - The compositor-route `screen` figures above were measured while that route recorded the primary monitor by connector.
   It now records the full virtual desktop bounds instead, which is the same 1920x1009 rectangle on this single-output session, but the sweep has not been re-run since that change.

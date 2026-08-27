@@ -17,10 +17,14 @@ like total failures:
 Live capture against the real compositor is not asserted here - it is
 docs/verification/desktop-capture.md plus `bin/fm-deskcap-mcp.py --selftest`.
 """
+import base64
+import contextlib
 import importlib.util
+import io
 import json
 import subprocess
 import sys
+import tempfile
 import time
 import unittest
 from pathlib import Path
@@ -106,6 +110,52 @@ class RegionValidationTest(unittest.TestCase):
         self.assertEqual(CAP.fit_region(region, bounds), region)
 
 
+class RegionInImagePixelsTest(unittest.TestCase):
+    """A logical rectangle has to land on the same content in a scaled screenshot."""
+
+    BOUNDS = {"width": 1920, "height": 1080}
+
+    def test_an_unscaled_screenshot_needs_no_conversion(self):
+        region = {"x": 100, "y": 50, "width": 300, "height": 200}
+        self.assertEqual(CAP.region_in_image_pixels(region, self.BOUNDS, 1920, 1080), region)
+
+    def test_a_doubled_screenshot_doubles_the_rectangle(self):
+        self.assertEqual(
+            CAP.region_in_image_pixels(
+                {"x": 100, "y": 50, "width": 300, "height": 200}, self.BOUNDS, 3840, 2160
+            ),
+            {"x": 200, "y": 100, "width": 600, "height": 400},
+        )
+
+    def test_each_axis_uses_its_own_factor(self):
+        self.assertEqual(
+            CAP.region_in_image_pixels(
+                {"x": 10, "y": 10, "width": 100, "height": 100}, self.BOUNDS, 3840, 1080
+            ),
+            {"x": 20, "y": 10, "width": 200, "height": 100},
+        )
+
+    def test_a_rectangle_flush_with_the_edge_stays_inside_the_screenshot(self):
+        placed = CAP.region_in_image_pixels(
+            {"x": 1820, "y": 980, "width": 100, "height": 100}, self.BOUNDS, 3840, 2160
+        )
+        self.assertLessEqual(placed["x"] + placed["width"], 3840)
+        self.assertLessEqual(placed["y"] + placed["height"], 2160)
+        self.assertEqual((placed["x"], placed["y"]), (3640, 1960))
+
+    def test_a_rectangle_never_collapses_to_nothing(self):
+        placed = CAP.region_in_image_pixels(
+            {"x": 0, "y": 0, "width": 3, "height": 3}, self.BOUNDS, 96, 54
+        )
+        self.assertGreaterEqual(placed["width"], 1)
+        self.assertGreaterEqual(placed["height"], 1)
+
+    def test_unknown_desktop_bounds_are_refused_rather_than_guessed(self):
+        for bad in (None, {}, {"width": 0, "height": 1080}):
+            with self.assertRaises(CAP.CaptureError):
+                CAP.region_in_image_pixels({"x": 0, "y": 0, "width": 1, "height": 1}, bad, 100, 100)
+
+
 class PortalRequestPathTest(unittest.TestCase):
     """Rule 2: the Response subscription needs the path BEFORE the call."""
 
@@ -126,8 +176,6 @@ class PortalFileHygieneTest(unittest.TestCase):
     """The portal picks where it writes; a capture must not leave that behind."""
 
     def test_reads_then_removes_the_portal_file(self):
-        import tempfile
-
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "Screenshot-12.png"
             path.write_bytes(PNG_1X1)
@@ -579,7 +627,7 @@ class RouteSelectionTest(unittest.TestCase):
             time.sleep(0.3)
             raise CAP.CaptureError("screen cast refused")
 
-        def portal(scope, region, cursor, timeout):
+        def portal(scope, region, cursor, timeout, bounds=None):
             budgets.append(timeout)
             return PNG_1X1, []
 
@@ -619,6 +667,32 @@ class RouteSelectionTest(unittest.TestCase):
         CAP._portal_capture = lambda *a: (_ for _ in ()).throw(AssertionError("portal must not be used"))
         with self.assertRaises(CAP.CaptureError):
             CAP.capture(scope="screen", route="mutter")
+
+    def test_the_portal_route_is_given_the_desktop_bounds_for_a_region(self):
+        seen = {}
+
+        def portal(scope, region, cursor, timeout, bounds=None):
+            seen["bounds"] = bounds
+            return PNG_1X1, []
+
+        CAP._mutter_attempt = lambda *a: (_ for _ in ()).throw(CAP.CaptureError("no screen cast"))
+        CAP._portal_capture = portal
+        CAP.capture(scope="region", region={"x": 0, "y": 0, "width": 10, "height": 10})
+        self.assertIsNotNone(seen["bounds"], "the portal route cannot rescale without the desktop bounds")
+        self.assertEqual((seen["bounds"]["width"], seen["bounds"]["height"]), (1920, 1009))
+
+    def test_a_dependency_failure_on_every_route_is_reported_as_one(self):
+        CAP._mutter_attempt = lambda *a: (_ for _ in ()).throw(CAP.MissingDependency("no gi"))
+        CAP._portal_capture = lambda *a: (_ for _ in ()).throw(CAP.MissingDependency("no gi"))
+        with self.assertRaises(CAP.MissingDependency):
+            CAP.capture(scope="screen")
+
+    def test_a_dependency_failure_on_only_one_route_stays_an_ordinary_failure(self):
+        CAP._mutter_attempt = lambda *a: (_ for _ in ()).throw(CAP.MissingDependency("no gstreamer"))
+        CAP._portal_capture = lambda *a: (_ for _ in ()).throw(CAP.CaptureError("no portal"))
+        with self.assertRaises(CAP.CaptureError) as ctx:
+            CAP.capture(scope="screen")
+        self.assertNotIsInstance(ctx.exception, CAP.MissingDependency)
 
     def test_both_routes_failing_reports_both(self):
         CAP._mutter_attempt = lambda *a: (_ for _ in ()).throw(CAP.CaptureError("no screen cast"))
@@ -716,6 +790,141 @@ class DownscaleTest(unittest.TestCase):
     def test_a_nonsense_ceiling_is_refused(self):
         with self.assertRaises(CAP.CaptureError):
             CAP.downscale_png(self._solid_png(40, 40), 0)
+
+
+class PortalRegionScalingTest(unittest.TestCase):
+    """The portal hands back the framebuffer, which need not match the logical desktop."""
+
+    def setUp(self):
+        if CAP._GI_IMPORT_ERROR is not None:
+            self.skipTest("GObject introspection bindings unavailable")
+
+    def _marked_png(self, width, height, mark):
+        pixbuf = CAP.GdkPixbuf.Pixbuf.new(CAP.GdkPixbuf.Colorspace.RGB, False, 8, width, height)
+        pixbuf.fill(0x000000FF)
+        pixbuf.new_subpixbuf(mark["x"], mark["y"], mark["width"], mark["height"]).fill(0xFF0000FF)
+        ok, data = pixbuf.save_to_bufferv("png", [], [])
+        self.assertTrue(ok)
+        return bytes(data)
+
+    def _colors(self, png):
+        pixbuf = CAP._decode_png(png, "test")
+        pixels = pixbuf.get_pixels()
+        stride, channels = pixbuf.get_rowstride(), pixbuf.get_n_channels()
+        seen = set()
+        for row in range(pixbuf.get_height()):
+            for col in range(pixbuf.get_width()):
+                offset = row * stride + col * channels
+                seen.add(tuple(pixels[offset:offset + 3]))
+        return seen
+
+    def test_a_region_lands_on_the_same_content_in_a_doubled_screenshot(self):
+        bounds = {"width": 200, "height": 100}
+        screenshot = self._marked_png(400, 200, {"x": 200, "y": 100, "width": 100, "height": 50})
+        placed = CAP.region_in_image_pixels({"x": 100, "y": 50, "width": 50, "height": 25}, bounds, 400, 200)
+        cropped = CAP.crop_png(screenshot, placed)
+        self.assertEqual(CAP.png_dimensions(cropped), (100, 50))
+        self.assertEqual(self._colors(cropped), {(255, 0, 0)}, "the crop did not land on the marked area")
+
+    def test_cropping_the_unconverted_rectangle_would_miss_that_content(self):
+        screenshot = self._marked_png(400, 200, {"x": 200, "y": 100, "width": 100, "height": 50})
+        stray = CAP.crop_png(screenshot, {"x": 100, "y": 50, "width": 50, "height": 25})
+        self.assertNotIn((255, 0, 0), self._colors(stray))
+
+
+class McpToolArgumentTest(unittest.TestCase):
+    """A bad argument must reach the agent as a tool error, not an internal error."""
+
+    def setUp(self):
+        if CAP._GI_IMPORT_ERROR is not None:
+            self.skipTest("GObject introspection bindings unavailable")
+        self.mcp = _load("fm_deskcap_mcp", "fm-deskcap-mcp.py")
+        engine = self.mcp.CAPTURE
+        # A real decodable PNG, because max_width actually re-encodes the bytes.
+        pixbuf = CAP.GdkPixbuf.Pixbuf.new(CAP.GdkPixbuf.Colorspace.RGB, False, 8, 8, 4)
+        pixbuf.fill(0x336699FF)
+        ok, data = pixbuf.save_to_bufferv("png", [], [])
+        self.assertTrue(ok)
+        self.png = bytes(data)
+        engine.capture = lambda **kwargs: engine.Capture(
+            self.png, "mutter", kwargs.get("scope", "screen"), 1.0, []
+        )
+
+    def _call(self, arguments):
+        return self.mcp.McpServer().handle(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": "desktop_screenshot", "arguments": arguments},
+            }
+        )
+
+    def test_a_non_numeric_max_width_is_a_tool_error_not_an_internal_error(self):
+        reply = self._call({"scope": "screen", "max_width": "half"})
+        self.assertNotIn("error", reply, "a bad max_width must not become a JSON-RPC error")
+        self.assertTrue(reply["result"]["isError"])
+        self.assertIn("max_width", reply["result"]["content"][0]["text"])
+
+    def test_a_structured_max_width_is_a_tool_error_too(self):
+        reply = self._call({"scope": "screen", "max_width": [800]})
+        self.assertNotIn("error", reply)
+        self.assertTrue(reply["result"]["isError"])
+
+    def test_a_zero_max_width_is_refused_rather_than_silently_ignored(self):
+        reply = self._call({"scope": "screen", "max_width": 0})
+        self.assertNotIn("error", reply)
+        self.assertTrue(reply["result"]["isError"])
+
+    def test_a_usable_max_width_shrinks_the_image_it_returns(self):
+        reply = self._call({"scope": "screen", "max_width": 4})
+        self.assertFalse(reply["result"]["isError"], reply["result"]["content"][0]["text"])
+        image = reply["result"]["content"][1]
+        self.assertEqual(image["type"], "image")
+        self.assertEqual(CAP.png_dimensions(base64.b64decode(image["data"])), (4, 2))
+
+    def test_a_max_width_above_the_capture_leaves_it_alone(self):
+        reply = self._call({"scope": "screen", "max_width": 4000})
+        self.assertFalse(reply["result"]["isError"])
+        image = reply["result"]["content"][1]
+        self.assertEqual(CAP.png_dimensions(base64.b64decode(image["data"])), (8, 4))
+
+    def test_no_max_width_returns_the_image_untouched(self):
+        reply = self._call({"scope": "screen"})
+        self.assertFalse(reply["result"]["isError"])
+        self.assertEqual(reply["result"]["content"][1]["type"], "image")
+
+
+class CliExitStatusTest(unittest.TestCase):
+    """The engine's header documents these, and that header is what --help prints."""
+
+    def setUp(self):
+        self.saved = CAP.capture
+        self.tmp = tempfile.TemporaryDirectory()
+        self.out = str(Path(self.tmp.name) / "out.png")
+
+    def tearDown(self):
+        CAP.capture = self.saved
+        self.tmp.cleanup()
+
+    def _run(self, argv):
+        with contextlib.redirect_stderr(io.StringIO()):
+            return CAP.main(argv)
+
+    def test_a_written_capture_exits_zero(self):
+        CAP.capture = lambda **kwargs: CAP.Capture(PNG_1X1, "mutter", "screen", 1.0, [])
+        self.assertEqual(self._run(["screen", self.out]), 0)
+        self.assertTrue(Path(self.out).exists())
+
+    def test_a_capture_that_failed_on_every_route_exits_one(self):
+        CAP.capture = lambda **kwargs: (_ for _ in ()).throw(CAP.CaptureError("no route worked"))
+        self.assertEqual(self._run(["screen", self.out]), 1)
+        self.assertFalse(Path(self.out).exists())
+
+    def test_a_missing_runtime_dependency_exits_two(self):
+        CAP.capture = lambda **kwargs: (_ for _ in ()).throw(CAP.MissingDependency("install python3-gi"))
+        self.assertEqual(self._run(["screen", self.out]), 2)
+        self.assertFalse(Path(self.out).exists())
 
 
 class MonitorResolutionTest(unittest.TestCase):

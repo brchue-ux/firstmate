@@ -59,8 +59,11 @@ Both routes are implemented from the start rather than the fallback being retrof
 ## Limits
 
 - No per-window scope.
-- `screen` scope captures the whole virtual desktop in logical pixels on both routes, so under non-unity display scaling the result is not the monitor's native resolution.
-  On the captain's single output at scale 1.0 the two are the same thing.
+- Coordinates are logical pixels, the space the compositor's own screen-cast API works in.
+  `screen` scope captures the whole virtual desktop on both routes, so under non-unity display scaling the result is not the monitor's native resolution.
+  A region is rescaled into the portal's screenshot before cropping, so both routes return the same area for the same rectangle even when that screenshot is the larger physical framebuffer; the reply's text says so when a rescale happened.
+  On the captain's single output at scale 1.0 no rescaling occurs and the two spaces are the same thing.
+  This is checked by unit tests over the conversion only, because no scaled display has been available to capture from; see [verification/desktop-capture.md](verification/desktop-capture.md).
 - The `portal` route always composites the pointer, so `cursor: false` is ignored there and the reply says so.
 - A region must fit inside the desktop; one that does not is refused rather than clamped.
 - A blanked or idle display captures as a genuinely black image on both routes.
