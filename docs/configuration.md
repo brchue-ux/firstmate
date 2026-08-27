@@ -327,7 +327,9 @@ Skipped items, such as a destination checkout that does not yet gitignore the it
 
 `chrome-devtools-axi` starts its browser bridge against whatever `chrome-devtools-mcp@latest` resolves to unless it is pointed at a specific build.
 Release 1.8.0 made `pageId` a required argument that `chrome-devtools-axi` 0.1.27 does not send, so a bridge started fresh against that release fails every snapshot, eval, click, fill and type while navigation still works.
-Firstmate therefore resolves one known-good build and exports it onto every crewmate, scout, and secondmate launch line, so a worker's browser work does not depend on what npm resolved that morning.
+Firstmate therefore resolves one known-good build and exports it onto every crewmate and scout launch line, so a worker's browser work does not depend on what npm resolved that morning.
+A secondmate launch line carries no pin: a secondmate runs its own home and resolves its own pin at its own dispatch, so the pin stays scoped per home exactly like the other `FM_*` home overrides on that launch line.
+A secondmate home that has never installed the pin reports the same actionable diagnostic at its own dispatch, which is where its own `config/browser-mcp-pin` can answer it.
 
 `bin/fm-browser-mcp-pin.sh` owns the pinned version, the resolution order, the install, and the exit codes; read its header before writing the config file by hand.
 The short form: an inherited `CHROME_DEVTOOLS_AXI_MCP_PATH` wins, then `FM_BROWSER_MCP_PIN`, then `config/browser-mcp-pin`, then the fleet-managed install under the pin root.

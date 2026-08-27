@@ -1595,7 +1595,14 @@ fi
 # resolves and nothing when the pin is deliberately off, so anything that does reach
 # this stderr is a real diagnostic worth seeing at dispatch - a worker that silently
 # launches onto the broken build reads as a browser-tooling mystery hours later.
-if MCP_PIN=$("$SCRIPT_DIR/fm-browser-mcp-pin.sh" path); then
+# The pin is scoped per home, exactly like the FM_HOME override below: a secondmate
+# runs its own home, so forwarding this home's resolved path onto its launch line
+# would land as an inherited CHROME_DEVTOOLS_AXI_MCP_PATH, which outranks every
+# other source and would make that home's own config/browser-mcp-pin unreachable
+# for it and for every worker it dispatches. Skipping the export lets a secondmate
+# resolve its own pin at its own dispatch through this same code path; a secondmate
+# home with no pin installed reports the actionable diagnostic there instead.
+if [ "$KIND" != secondmate ] && MCP_PIN=$("$SCRIPT_DIR/fm-browser-mcp-pin.sh" path); then
   LAUNCH="CHROME_DEVTOOLS_AXI_MCP_PATH=$(shell_quote "$MCP_PIN") $LAUNCH"
 fi
 # FM_HOME_BINDING is blanked on every launch line, whatever the kind, so a

@@ -47,7 +47,18 @@ run_pin() {
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_BROWSER_MCP_ROOT="$root" FM_BROWSER_MCP_PIN="${CASE_ENV_PIN:-}" \
     CHROME_DEVTOOLS_AXI_MCP_PATH="${CASE_INHERITED_PIN:-}" \
+    PATH="${CASE_PATH:-$PATH}" \
     "$PIN" "$@"
+}
+
+# A stand-in npm for the --ensure cases, so they exercise the real install branch
+# without reaching a registry. Prints "$dir" for CASE_PATH.
+make_fake_npm() {
+  local dir=$1 body=$2 fakebin
+  fakebin=$(fm_fakebin "$dir")
+  printf '#!/usr/bin/env bash\nset -u\n%s\n' "$body" > "$fakebin/npm"
+  chmod +x "$fakebin/npm"
+  printf '%s\n' "$fakebin:$PATH"
 }
 
 test_version_is_reported() {
@@ -189,6 +200,41 @@ test_ensure_is_a_no_op_once_the_pin_is_present() {
   pass "--ensure prints the present pin without reinstalling it"
 }
 
+test_ensure_failure_carries_npms_own_reason() {
+  local rec out err status CASE_PATH
+  rec=$(make_pin_case ensure_npm_fails)
+  read_pin_case "$rec"
+  err="$TMP_ROOT/ensure_npm_fails.err"
+  CASE_PATH=$(make_fake_npm "$TMP_ROOT/ensure_npm_fails/fake" \
+    'echo "npm error code ENOTFOUND" >&2; echo "npm error request to https://registry.example failed" >&2; exit 1')
+  out=$(CASE_PATH="$CASE_PATH" run_pin "$HOME_DIR" "$ROOT_DIR" --ensure 2>"$err")
+  status=$?
+  expect_code 2 "$status" "--ensure should exit 2 when npm fails"
+  [ -z "$out" ] || fail "a failed install printed a path: $out"
+  assert_grep "ENOTFOUND" "$err" "npm's own failure reason was swallowed by the refusal"
+  assert_grep "registry.example" "$err" "npm's own failure detail was swallowed by the refusal"
+  pass "a failed --ensure install reports npm's own reason, not just that it failed"
+}
+
+test_ensure_success_stays_quiet_and_prints_only_the_entry_point() {
+  local rec out err status version entry CASE_PATH
+  rec=$(make_pin_case ensure_npm_ok)
+  read_pin_case "$rec"
+  err="$TMP_ROOT/ensure_npm_ok.err"
+  version=$(run_pin "$HOME_DIR" "$ROOT_DIR" --version)
+  entry="$ROOT_DIR/$version/node_modules/chrome-devtools-mcp/build/src/bin/chrome-devtools-mcp.js"
+  CASE_PATH=$(make_fake_npm "$TMP_ROOT/ensure_npm_ok/fake" \
+    'echo "added 42 packages"; echo "npm notice a new version is available" >&2
+     mkdir -p node_modules/chrome-devtools-mcp/build/src/bin
+     printf "// installed\n" > node_modules/chrome-devtools-mcp/build/src/bin/chrome-devtools-mcp.js')
+  out=$(CASE_PATH="$CASE_PATH" run_pin "$HOME_DIR" "$ROOT_DIR" --ensure 2>"$err")
+  status=$?
+  expect_code 0 "$status" "--ensure should succeed when npm installs the pin"
+  [ "$out" = "$entry" ] || fail "--ensure printed more than the entry point: $out"
+  [ ! -s "$err" ] || fail "a successful --ensure leaked npm chatter: $(cat "$err")"
+  pass "a successful --ensure prints only the entry point and stays quiet"
+}
+
 test_unknown_argument_is_refused() {
   local status
   run_pin "$(make_pin_case unknown | cut -d'|' -f1)" "$TMP_ROOT/unknown/root" --nonsense >/dev/null 2>&1
@@ -207,4 +253,6 @@ test_inherited_env_wins_over_configuration
 test_env_override_lifts_the_pin_without_touching_config
 test_ensure_never_installs_over_an_explicit_pin
 test_ensure_is_a_no_op_once_the_pin_is_present
+test_ensure_failure_carries_npms_own_reason
+test_ensure_success_stays_quiet_and_prints_only_the_entry_point
 test_unknown_argument_is_refused

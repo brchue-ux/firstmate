@@ -31,12 +31,19 @@
 # rediscover the failure. Lift the pin by writing "off" into config/browser-mcp-pin
 # once chrome-devtools-axi sends pageId; no code change is needed for that.
 #
+# The pin is resolved per home. bin/fm-spawn.sh forwards a resolved pin onto the
+# launch lines of the workers this home runs - crewmates and scouts - but not onto
+# a secondmate launch line, because a secondmate runs its own FM_HOME and calls this
+# script itself at its own dispatch. A secondmate home's config/browser-mcp-pin is
+# therefore genuinely that home's durable choice, for it and for the crew it
+# dispatches, rather than something the home that spawned it decided.
+#
 # Resolution order (most to least specific)
 #   1. An inherited CHROME_DEVTOOLS_AXI_MCP_PATH - an explicit in-the-moment choice
 #      by whoever launched firstmate; forwarded verbatim when it names a file.
 #   2. FM_BROWSER_MCP_PIN - a firstmate-scoped override for one process tree,
 #      holding either "off" or a path, read exactly like the config file below.
-#   3. config/browser-mcp-pin in the resolved FM_HOME - the home's durable choice.
+#   3. config/browser-mcp-pin in the resolved FM_HOME - that home's durable choice.
 #      "off" lifts the pin (exit 3); any other content is read as a path to a
 #      chrome-devtools-mcp entry point and must exist.
 #   4. The fleet-managed install under the pin root, if present.
@@ -140,7 +147,7 @@ resolve_pin() {
 }
 
 ensure_pin() {
-  local status entry root
+  local status entry root log npm_status
   resolve_pin >/dev/null 2>&1
   status=$?
   case "$status" in
@@ -171,10 +178,24 @@ ensure_pin() {
   # keeps npm from walking up into an unrelated project's manifest.
   [ -f "$root/$PIN_VERSION/package.json" ] || \
     printf '%s\n' '{"name":"firstmate-browser-mcp-pin","private":true}' > "$root/$PIN_VERSION/package.json"
-  if ! (cd "$root/$PIN_VERSION" && npm install --no-audit --no-fund --silent "chrome-devtools-mcp@$PIN_VERSION" >/dev/null 2>&1); then
-    echo "fm-browser-mcp-pin: npm install chrome-devtools-mcp@$PIN_VERSION failed in $root/$PIN_VERSION" >&2
+  # npm's own output is the only thing that separates an offline registry from a
+  # proxy rejection, an EACCES cache or an unreachable version, and --ensure is the
+  # one command the dispatch diagnostic tells a human to run - so keep it for the
+  # failure branch. Captured rather than passed through so the success path stays
+  # quiet and stdout stays the entry point alone.
+  log=$(mktemp "${TMPDIR:-/tmp}/fm-browser-mcp-pin.XXXXXX") || {
+    echo "fm-browser-mcp-pin: could not create a temp file for the npm install log" >&2
+    return 2
+  }
+  (cd "$root/$PIN_VERSION" && npm install --no-audit --no-fund "chrome-devtools-mcp@$PIN_VERSION") >"$log" 2>&1
+  npm_status=$?
+  if [ "$npm_status" -ne 0 ]; then
+    echo "fm-browser-mcp-pin: npm install chrome-devtools-mcp@$PIN_VERSION failed in $root/$PIN_VERSION (exit $npm_status); npm said:" >&2
+    cat "$log" >&2
+    rm -f "$log"
     return 2
   fi
+  rm -f "$log"
   if [ ! -f "$entry" ]; then
     echo "fm-browser-mcp-pin: install completed but $entry is absent" >&2
     return 2

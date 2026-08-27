@@ -58,6 +58,12 @@ export FM_BROWSER_SESSION_ROOT=/nonexistent/fm-test-no-browser-state
 # happens to have the fleet pin installed would otherwise decide what the launch
 # assertions see. Lifting the pin here keeps the suite's default launch lines
 # identical on every host; the pin's own suite sets its sources explicitly.
+# CHROME_DEVTOOLS_AXI_MCP_PATH is rank 1 in that resolution order and therefore
+# outranks the lift below, so state it empty here too: a developer who exported
+# it for their own browser work - or any suite running inside a crewmate worktree
+# firstmate itself pinned - would otherwise resolve a pin the assertions never
+# asked for.
+export CHROME_DEVTOOLS_AXI_MCP_PATH=
 export FM_BROWSER_MCP_PIN=off
 export FM_BROWSER_MCP_ROOT=/nonexistent/fm-test-no-browser-mcp-pin
 

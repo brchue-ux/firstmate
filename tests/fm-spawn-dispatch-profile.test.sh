@@ -328,6 +328,36 @@ test_unresolvable_browser_mcp_pin_is_reported_and_does_not_block_dispatch() {
   pass "an unresolvable browser MCP pin is reported at dispatch without blocking or pinning"
 }
 
+test_browser_mcp_pin_is_scoped_per_home_and_skips_secondmate_launches() {
+  local rec crew_id sm_id sm out status launch pin
+  crew_id=profile-mcp-pin-crew-z27
+  sm_id=profile-mcp-pin-secondmate-z27
+  rec=$(make_spawn_case profile-mcp-pin-secondmate claude "$crew_id" "$sm_id")
+  read_case_record "$rec"
+  pin="$CASE_DIR/pinned-chrome-devtools-mcp.js"
+  printf '// pinned build\n' > "$pin"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$sm_id"
+
+  out=$(FM_BROWSER_MCP_PIN="$pin" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$crew_id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "crewmate spawn with a resolved pin should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "CHROME_DEVTOOLS_AXI_MCP_PATH='$pin'" \
+    "the crewmate launch line lost the pin the dispatching home resolves"
+
+  out=$(FM_BROWSER_MCP_PIN="$pin" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$sm_id" "$sm" --secondmate)
+  status=$?
+  expect_code 0 "$status" "secondmate spawn with a resolved pin should succeed"
+  assert_contains "$out" "kind=secondmate" "the second spawn was not a secondmate launch"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_not_contains "$launch" "CHROME_DEVTOOLS_AXI_MCP_PATH" \
+    "the dispatching home's pin rode onto a secondmate launch line"
+  pass "the browser MCP pin rides crewmate launches but is left to each secondmate home"
+}
+
 test_active_dispatch_profile_requires_explicit_harness_for_ship() {
   local rec id out status
   id=profile-required-ship-z11
@@ -769,5 +799,6 @@ test_active_dispatch_profile_does_not_block_secondmate_launch
 test_resolved_browser_mcp_pin_rides_every_launch
 test_lifted_browser_mcp_pin_leaves_the_launch_line_alone
 test_unresolvable_browser_mcp_pin_is_reported_and_does_not_block_dispatch
+test_browser_mcp_pin_is_scoped_per_home_and_skips_secondmate_launches
 
 echo "# all fm-spawn-dispatch-profile tests passed"
