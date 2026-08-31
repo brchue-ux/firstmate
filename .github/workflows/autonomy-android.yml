@@ -78,6 +78,22 @@ jobs:
       # over git. So when the commit message asks for it, the runner hands the
       # APK back on a single-commit branch. The branch is a courier, not
       # history: force-pushed, and retired once the APK is collected.
+      # Retires the courier branch on any build that is not itself a drop, so
+      # a 17 MB binary never lingers on a ref once it has been collected.
+      - name: Retire the courier branch
+        if: "!contains(github.event.head_commit.message, '[apk]')"
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          remote="https://x-access-token:$GH_TOKEN@github.com/${{ github.repository }}.git"
+          if git ls-remote --exit-code --heads "$remote" apk-delivery >/dev/null 2>&1; then
+            git push -q "$remote" --delete apk-delivery
+            echo "Retired the apk-delivery courier branch."
+          else
+            echo "No courier branch to retire."
+          fi
+
       - name: Drop the APK on the delivery branch
         if: contains(github.event.head_commit.message, '[apk]')
         env:
