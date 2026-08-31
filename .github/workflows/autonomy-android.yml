@@ -43,11 +43,26 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
 
+      # --stacktrace is deliberately absent: on a Kotlin compile failure it
+      # emits ~400 lines of Gradle internals that bury the handful of `e:` lines
+      # that actually say what is wrong. Instead the build log is captured and,
+      # on failure, the compiler diagnostics are re-printed at the very end
+      # where they are the first thing anyone reads.
       - name: Unit tests
-        run: ./gradlew testDebugUnitTest --stacktrace
+        run: ./gradlew testDebugUnitTest 2>&1 | tee -a "$RUNNER_TEMP/build.log"
 
       - name: Assemble debug APK
-        run: ./gradlew assembleDebug --stacktrace
+        run: ./gradlew assembleDebug 2>&1 | tee -a "$RUNNER_TEMP/build.log"
+
+      - name: Compiler diagnostics
+        if: failure()
+        run: |
+          echo "==================== COMPILER ERRORS ===================="
+          grep -E "^e: |^w: |FAILED$|^\s+> " "$RUNNER_TEMP/build.log" \
+            | grep -vE "^w: .*(deprecat|never used|opt-in)" \
+            | head -60 \
+            || echo "(no e:/w: lines found - failure was not a Kotlin compile error)"
+          echo "========================================================="
 
       # Signed with the runner's debug keystore, so it sideloads as-is.
       # Download it from the run's Summary page (arrives zipped).
