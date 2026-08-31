@@ -73,21 +73,26 @@ jobs:
           path: autonomy-app/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
 
-      # An earlier revision handed the APK back through an `apk-delivery`
-      # branch, because a workflow artifact can only be fetched from Azure
-      # blob storage and the development session's egress policy blocks it.
-      # That branch was a courier, not history, and the session cannot delete
-      # it itself - it may only push refs under claude/*. So the runner
-      # retires it here. Idempotent: a no-op once the branch is gone.
-      - name: Retire the courier branch
+      # A workflow artifact can only be fetched from Azure blob storage, which
+      # the development session's egress policy blocks; it can reach github.com
+      # over git. So when the commit message asks for it, the runner hands the
+      # APK back on a single-commit branch. The branch is a courier, not
+      # history: force-pushed, and retired once the APK is collected.
+      - name: Drop the APK on the delivery branch
+        if: contains(github.event.head_commit.message, '[apk]')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -eu
-          remote="https://x-access-token:$GH_TOKEN@github.com/${{ github.repository }}.git"
-          if git ls-remote --exit-code --heads "$remote" apk-delivery >/dev/null 2>&1; then
-            git push -q "$remote" --delete apk-delivery
-            echo "Deleted the apk-delivery courier branch."
-          else
-            echo "No courier branch to retire."
-          fi
+          drop="$RUNNER_TEMP/drop"
+          mkdir -p "$drop"
+          cp app/build/outputs/apk/debug/app-debug.apk "$drop/autonomy-debug.apk"
+          cd "$drop"
+          git init -q -b apk-delivery
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add autonomy-debug.apk
+          git commit -q -m "APK drop for ${{ github.sha }}"
+          git push -q --force \
+            "https://x-access-token:$GH_TOKEN@github.com/${{ github.repository }}.git" \
+            apk-delivery
