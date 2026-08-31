@@ -1,6 +1,9 @@
 projects/
 state/
 data/
+# The Android app's data layer is source code, not firstmate's private records;
+# the bare `data/` rule above would otherwise swallow the whole Room layer.
+!autonomy-app/app/src/main/java/com/firstmate/autonomy/data/
 .no-mistakes/
 .lavish/
 .fm-secondmate-home
