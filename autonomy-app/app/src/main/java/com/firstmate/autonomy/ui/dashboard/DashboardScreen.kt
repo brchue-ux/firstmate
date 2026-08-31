@@ -111,7 +111,7 @@ fun DashboardContent(
         modifier = modifier,
         title = "Command Centre",
         subtitle = uiState.dataOrNull?.today?.weekdayAndDay(),
-    ) { innerPadding, _ ->
+    ) { innerPadding ->
         UiStateContent(state = uiState, modifier = Modifier.padding(innerPadding)) { state ->
             val overview = state.overview
             LazyColumn(

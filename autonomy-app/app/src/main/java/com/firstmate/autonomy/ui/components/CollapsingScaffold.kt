@@ -10,7 +10,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBarDefaults
-import androidx.compose.material3.TopAppBarScrollBehavior
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.nestedscroll.nestedScroll
@@ -27,6 +26,10 @@ import androidx.compose.ui.text.font.FontWeight
  * Window insets are zeroed because the app-level scaffold that hosts the bottom
  * bar has already consumed the system bars; taking them twice would double the
  * top padding.
+ *
+ * The scroll behaviour stays inside deliberately. Handing it to callers would
+ * put the experimental TopAppBarScrollBehavior in this function's signature and
+ * force every screen to opt in to an API none of them touch.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -37,7 +40,7 @@ fun CollapsingScaffold(
     navigationIcon: @Composable () -> Unit = {},
     actions: @Composable () -> Unit = {},
     floatingActionButton: @Composable () -> Unit = {},
-    content: @Composable (PaddingValues, TopAppBarScrollBehavior) -> Unit,
+    content: @Composable (PaddingValues) -> Unit,
 ) {
     val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
 
@@ -74,6 +77,6 @@ fun CollapsingScaffold(
             )
         },
         floatingActionButton = { floatingActionButton() },
-        content = { padding -> content(padding, scrollBehavior) },
+        content = { padding -> content(padding) },
     )
 }

@@ -159,7 +159,7 @@ fun HabitContent(
                 text = { Text("New habit") },
             )
         },
-    ) { innerPadding, _ ->
+    ) { innerPadding ->
         UiStateContent(state = uiState, modifier = Modifier.padding(innerPadding)) { current ->
             if (current.isEmpty) {
                 EmptyState(

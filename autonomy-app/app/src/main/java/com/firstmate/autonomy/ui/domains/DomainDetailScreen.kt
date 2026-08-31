@@ -141,7 +141,7 @@ fun DomainDetailContent(
                 }
             }
         },
-    ) { innerPadding, _ ->
+    ) { innerPadding ->
         UiStateContent(state = uiState, modifier = Modifier.padding(innerPadding)) { state ->
             val current = state.domain ?: return@UiStateContent
             val accent by animateColorAsState(

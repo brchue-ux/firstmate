@@ -99,7 +99,7 @@ fun DomainListContent(
                 text = { Text("New project") },
             )
         },
-    ) { innerPadding, _ ->
+    ) { innerPadding ->
         UiStateContent(state = uiState, modifier = Modifier.padding(innerPadding)) { state ->
             when {
                 state.isEmpty -> EmptyState(

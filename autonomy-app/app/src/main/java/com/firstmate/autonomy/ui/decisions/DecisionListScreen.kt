@@ -92,7 +92,7 @@ fun DecisionListContent(
                 text = { Text("Log decision") },
             )
         },
-    ) { innerPadding, _ ->
+    ) { innerPadding ->
         UiStateContent(state = uiState, modifier = Modifier.padding(innerPadding)) { current ->
             if (current.isEmpty) {
                 EmptyState(
