@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- A simple compass rose: self-direction. -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M54,28 L60,48 L80,54 L60,60 L54,80 L48,60 L28,54 L48,48 Z" />
+    <path
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="2.5"
+        android:pathData="M54,26 m-28,28 a28,28 0 1,0 56,0 a28,28 0 1,0 -56,0" />
+</vector>
