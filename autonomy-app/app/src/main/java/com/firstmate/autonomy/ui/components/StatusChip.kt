@@ -1,7 +1,9 @@
 package com.firstmate.autonomy.ui.components
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
@@ -14,23 +16,19 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
-import androidx.compose.foundation.background
-import androidx.compose.foundation.isSystemInDarkTheme
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.width
 import com.firstmate.autonomy.domain.model.DecisionCategory
 import com.firstmate.autonomy.domain.model.DomainStatus
 import com.firstmate.autonomy.ui.preview.ThemePreviews
-import com.firstmate.autonomy.ui.theme.AutonomyAccents
+import com.firstmate.autonomy.ui.theme.AutonomyShape
 import com.firstmate.autonomy.ui.theme.AutonomyTheme
 
-/** Small pill that shows a project's lifecycle stage with a colored dot. */
+/** Pill showing a project's stage, with a dot in the stage's accent. */
 @Composable
 fun DomainStatusChip(
     status: DomainStatus,
     modifier: Modifier = Modifier,
 ) {
-    val accent = status.accentColor()
+    val accent = AutonomyTheme.accents.forStatus(status)
     LabelChip(
         text = status.label,
         modifier = modifier,
@@ -59,13 +57,15 @@ fun DecisionCategoryChip(
 fun LabelChip(
     text: String,
     modifier: Modifier = Modifier,
+    containerColor: Color = MaterialTheme.colorScheme.surfaceContainerHighest,
+    contentColor: Color = MaterialTheme.colorScheme.onSurfaceVariant,
     leading: @Composable (() -> Unit)? = null,
 ) {
     Surface(
         modifier = modifier,
-        shape = MaterialTheme.shapes.small,
-        color = MaterialTheme.colorScheme.surfaceVariant,
-        contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+        shape = AutonomyShape.chip,
+        color = containerColor,
+        contentColor = contentColor,
     ) {
         Row(
             modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
@@ -78,23 +78,15 @@ fun LabelChip(
     }
 }
 
-@Composable
-fun DomainStatus.accentColor(): Color = when (this) {
-    DomainStatus.PLANNING -> AutonomyAccents.planning()
-    DomainStatus.IN_PROGRESS -> AutonomyAccents.inProgress()
-    DomainStatus.COMPLETED -> AutonomyAccents.completed()
-}
-
 @ThemePreviews
 @Composable
 private fun StatusChipPreview() {
-    AutonomyTheme(darkTheme = isSystemInDarkTheme()) {
+    AutonomyTheme {
         Row(
             modifier = Modifier.padding(16.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             DomainStatus.entries.forEach { DomainStatusChip(it) }
-            Spacer(Modifier.width(4.dp))
             DecisionCategoryChip(DecisionCategory.FAMILY_DYNAMICS)
         }
     }

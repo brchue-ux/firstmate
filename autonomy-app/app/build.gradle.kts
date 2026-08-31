@@ -3,6 +3,7 @@ plugins {
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
     alias(libs.plugins.ksp)
+    alias(libs.plugins.hilt)
 }
 
 android {
@@ -76,6 +77,14 @@ dependencies {
 
     // Navigation
     implementation(libs.androidx.navigation.compose)
+
+    // Hilt: the DI graph is verified at compile time rather than at first launch.
+    implementation(libs.hilt.android)
+    implementation(libs.androidx.hilt.navigation.compose)
+    ksp(libs.hilt.compiler)
+
+    // Settings that are genuinely key-value belong here, not in Room.
+    implementation(libs.androidx.datastore.preferences)
 
     // Room (offline-first local database)
     implementation(libs.androidx.room.runtime)

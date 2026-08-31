@@ -1,9 +1,8 @@
 package com.firstmate.autonomy.data.local
 
-import android.content.Context
 import androidx.room.Database
-import androidx.room.Room
 import androidx.room.RoomDatabase
+import androidx.room.TypeConverters
 import com.firstmate.autonomy.data.local.dao.DecisionDao
 import com.firstmate.autonomy.data.local.dao.DomainDao
 import com.firstmate.autonomy.data.local.dao.HabitDao
@@ -14,8 +13,11 @@ import com.firstmate.autonomy.data.local.entity.HabitEntity
 import com.firstmate.autonomy.data.local.entity.MilestoneEntity
 
 /**
- * The single on-device store. Nothing in this app talks to a network,
- * so this database is the whole source of truth.
+ * The single on-device store. Nothing in this app talks to a network, so this
+ * database is the whole source of truth.
+ *
+ * Construction lives in [com.firstmate.autonomy.di.DatabaseModule]; there is no
+ * singleton accessor here, because Hilt already guarantees one instance.
  */
 @Database(
     entities = [
@@ -28,6 +30,7 @@ import com.firstmate.autonomy.data.local.entity.MilestoneEntity
     version = 1,
     exportSchema = true,
 )
+@TypeConverters(Converters::class)
 abstract class AutonomyDatabase : RoomDatabase() {
 
     abstract fun domainDao(): DomainDao
@@ -37,19 +40,6 @@ abstract class AutonomyDatabase : RoomDatabase() {
     abstract fun habitDao(): HabitDao
 
     companion object {
-        private const val DATABASE_NAME = "autonomy.db"
-
-        @Volatile
-        private var instance: AutonomyDatabase? = null
-
-        fun getInstance(context: Context): AutonomyDatabase =
-            instance ?: synchronized(this) {
-                instance ?: build(context.applicationContext).also { instance = it }
-            }
-
-        private fun build(context: Context): AutonomyDatabase =
-            Room.databaseBuilder(context, AutonomyDatabase::class.java, DATABASE_NAME)
-                .setJournalMode(RoomDatabase.JournalMode.WRITE_AHEAD_LOGGING)
-                .build()
+        const val DATABASE_NAME = "autonomy.db"
     }
 }

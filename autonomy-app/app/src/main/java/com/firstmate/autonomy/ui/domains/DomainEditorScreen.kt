@@ -14,7 +14,6 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.AssistChip
-import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -28,14 +27,14 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.horizontalScroll
+import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import androidx.lifecycle.viewmodel.compose.viewModel
-import com.firstmate.autonomy.di.AutonomyViewModelFactory
 import com.firstmate.autonomy.domain.model.DomainCategories
 import com.firstmate.autonomy.domain.model.DomainStatus
 import com.firstmate.autonomy.ui.components.AutonomyMultilineField
 import com.firstmate.autonomy.ui.components.AutonomyTextField
 import com.firstmate.autonomy.ui.components.ChoiceChipRow
+import com.firstmate.autonomy.ui.components.PrimaryActionButton
 import com.firstmate.autonomy.ui.preview.ScreenPreviews
 import com.firstmate.autonomy.ui.theme.AutonomyTheme
 
@@ -44,7 +43,7 @@ import com.firstmate.autonomy.ui.theme.AutonomyTheme
 fun DomainEditorScreen(
     onNavigateBack: () -> Unit,
     modifier: Modifier = Modifier,
-    viewModel: DomainEditorViewModel = viewModel(factory = AutonomyViewModelFactory.Factory),
+    viewModel: DomainEditorViewModel = hiltViewModel(),
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
 
@@ -148,12 +147,11 @@ fun DomainEditorContent(
                 minLines = 5,
             )
 
-            Button(
+            PrimaryActionButton(
+                text = if (uiState.isEditing) "Save changes" else "Create project",
                 onClick = onSave,
                 modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text(if (uiState.isEditing) "Save changes" else "Create project")
-            }
+            )
             Text(
                 text = "Milestones are added on the project itself, once it exists.",
                 style = MaterialTheme.typography.bodyMedium,

@@ -1,17 +1,12 @@
 package com.firstmate.autonomy
 
 import android.app.Application
-import com.firstmate.autonomy.di.AppContainer
-import com.firstmate.autonomy.di.DefaultAppContainer
+import dagger.hilt.android.HiltAndroidApp
 
-/** Owns the app-wide dependency graph for the process lifetime. */
-class AutonomyApplication : Application() {
-
-    lateinit var container: AppContainer
-        private set
-
-    override fun onCreate() {
-        super.onCreate()
-        container = DefaultAppContainer(this)
-    }
-}
+/**
+ * Hilt generates the application component from this annotation; the graph is
+ * validated at compile time, so a missing binding is a build failure rather
+ * than a crash on first launch.
+ */
+@HiltAndroidApp
+class AutonomyApplication : Application()

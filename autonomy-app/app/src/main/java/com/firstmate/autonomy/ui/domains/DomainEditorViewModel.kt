@@ -7,12 +7,14 @@ import com.firstmate.autonomy.domain.model.DomainStatus
 import com.firstmate.autonomy.domain.repository.DomainRepository
 import com.firstmate.autonomy.ui.navigation.ARG_DOMAIN_ID
 import com.firstmate.autonomy.ui.navigation.NO_ID
+import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import javax.inject.Inject
 
 data class DomainEditorUiState(
     val isEditing: Boolean = false,
@@ -33,7 +35,8 @@ data class DomainEditorUiState(
 }
 
 /** Backs both create and edit; the presence of a row id decides which. */
-class DomainEditorViewModel(
+@HiltViewModel
+class DomainEditorViewModel @Inject constructor(
     savedStateHandle: SavedStateHandle,
     private val domainRepository: DomainRepository,
 ) : ViewModel() {

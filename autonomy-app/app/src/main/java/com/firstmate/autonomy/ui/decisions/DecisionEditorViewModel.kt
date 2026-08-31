@@ -8,6 +8,7 @@ import com.firstmate.autonomy.domain.model.DecisionCategory
 import com.firstmate.autonomy.domain.repository.DecisionRepository
 import com.firstmate.autonomy.ui.navigation.ARG_DECISION_ID
 import com.firstmate.autonomy.ui.navigation.NO_ID
+import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -17,6 +18,7 @@ import kotlinx.coroutines.launch
 import java.time.Clock
 import java.time.Instant
 import java.time.LocalDate
+import javax.inject.Inject
 
 data class DecisionEditorUiState(
     val isEditing: Boolean = false,
@@ -43,10 +45,11 @@ data class DecisionEditorUiState(
  * Reflection is intentionally optional: the entry is usually written at the
  * moment of deciding, and how it felt is only knowable later.
  */
-class DecisionEditorViewModel(
+@HiltViewModel
+class DecisionEditorViewModel @Inject constructor(
     savedStateHandle: SavedStateHandle,
     private val decisionRepository: DecisionRepository,
-    private val clock: Clock = Clock.systemDefaultZone(),
+    private val clock: Clock,
 ) : ViewModel() {
 
     private val decisionId: Long = savedStateHandle.get<Long>(ARG_DECISION_ID) ?: NO_ID

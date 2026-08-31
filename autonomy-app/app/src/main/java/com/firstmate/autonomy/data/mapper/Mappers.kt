@@ -6,33 +6,31 @@ import com.firstmate.autonomy.data.local.entity.HabitEntity
 import com.firstmate.autonomy.data.local.entity.MilestoneEntity
 import com.firstmate.autonomy.data.local.relation.DomainWithMilestones
 import com.firstmate.autonomy.domain.model.Decision
-import com.firstmate.autonomy.domain.model.DecisionCategory
-import com.firstmate.autonomy.domain.model.DomainStatus
 import com.firstmate.autonomy.domain.model.Habit
 import com.firstmate.autonomy.domain.model.HabitCheckIn
 import com.firstmate.autonomy.domain.model.Milestone
 import com.firstmate.autonomy.domain.model.ProjectDomain
-import java.time.Instant
-import java.time.LocalDate
 
 /**
- * Translation between storage rows and domain models.
+ * Storage rows to domain models.
  *
- * Keeping it in one file makes the two shapes easy to diff, and keeps
- * `java.time` out of the entities entirely.
+ * These stayed after TypeConverters took over the primitive marshalling,
+ * because the boundary they defend is architectural rather than mechanical:
+ * domain models carry no Room annotations, so nothing above `data/` can end up
+ * depending on the persistence framework.
  */
 
 fun DomainWithMilestones.toDomainModel(): ProjectDomain = ProjectDomain(
     id = domain.id,
     title = domain.title,
     category = domain.category,
-    status = DomainStatus.fromStorage(domain.status),
+    status = domain.status,
     notes = domain.notes,
     milestones = milestones
         .sortedWith(compareBy({ it.position }, { it.id }))
         .map { it.toDomainModel() },
-    createdAt = Instant.ofEpochMilli(domain.createdAtEpochMilli),
-    updatedAt = Instant.ofEpochMilli(domain.updatedAtEpochMilli),
+    createdAt = domain.createdAt,
+    updatedAt = domain.updatedAt,
 )
 
 fun MilestoneEntity.toDomainModel(): Milestone = Milestone(
@@ -46,23 +44,23 @@ fun MilestoneEntity.toDomainModel(): Milestone = Milestone(
 fun DecisionEntity.toDomainModel(): Decision = Decision(
     id = id,
     title = title,
-    date = LocalDate.ofEpochDay(dateEpochDay),
-    category = DecisionCategory.fromStorage(category),
+    date = date,
+    category = category,
     myPreference = myPreference,
     finalChoice = finalChoice,
     reflection = reflection,
-    createdAt = Instant.ofEpochMilli(createdAtEpochMilli),
+    createdAt = createdAt,
 )
 
 fun Decision.toEntity(): DecisionEntity = DecisionEntity(
     id = id,
     title = title,
-    dateEpochDay = date.toEpochDay(),
-    category = category.name,
+    date = date,
+    category = category,
     myPreference = myPreference,
     finalChoice = finalChoice,
     reflection = reflection,
-    createdAtEpochMilli = createdAt.toEpochMilli(),
+    createdAt = createdAt,
 )
 
 fun HabitEntity.toDomainModel(): Habit = Habit(
@@ -84,6 +82,6 @@ fun Habit.toEntity(): HabitEntity = HabitEntity(
 /** Stored rows only ever represent completed days. */
 fun HabitCheckInEntity.toDomainModel(): HabitCheckIn = HabitCheckIn(
     habitId = habitId,
-    date = LocalDate.ofEpochDay(dateEpochDay),
+    date = date,
     isCompleted = true,
 )

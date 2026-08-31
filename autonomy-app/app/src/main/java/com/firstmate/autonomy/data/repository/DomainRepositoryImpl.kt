@@ -4,22 +4,26 @@ import com.firstmate.autonomy.data.local.dao.DomainDao
 import com.firstmate.autonomy.data.local.entity.DomainEntity
 import com.firstmate.autonomy.data.local.entity.MilestoneEntity
 import com.firstmate.autonomy.data.mapper.toDomainModel
+import com.firstmate.autonomy.di.IoDispatcher
 import com.firstmate.autonomy.domain.model.DomainStatus
 import com.firstmate.autonomy.domain.model.Milestone
 import com.firstmate.autonomy.domain.model.ProjectDomain
 import com.firstmate.autonomy.domain.repository.DomainRepository
 import kotlinx.coroutines.CoroutineDispatcher
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.withContext
 import java.time.Clock
+import java.time.Instant
+import javax.inject.Inject
+import javax.inject.Singleton
 
-class DomainRepositoryImpl(
+@Singleton
+class DomainRepositoryImpl @Inject constructor(
     private val dao: DomainDao,
-    private val clock: Clock = Clock.systemDefaultZone(),
-    private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
+    private val clock: Clock,
+    @IoDispatcher private val ioDispatcher: CoroutineDispatcher,
 ) : DomainRepository {
 
     override fun observeDomains(): Flow<List<ProjectDomain>> =
@@ -38,15 +42,15 @@ class DomainRepositoryImpl(
         status: DomainStatus,
         notes: String,
     ): Long = withContext(ioDispatcher) {
-        val now = clock.millis()
+        val now = Instant.now(clock)
         dao.insert(
             DomainEntity(
                 title = title.trim(),
                 category = category.trim(),
-                status = status.name,
+                status = status,
                 notes = notes,
-                createdAtEpochMilli = now,
-                updatedAtEpochMilli = now,
+                createdAt = now,
+                updatedAt = now,
             ),
         )
     }
@@ -57,15 +61,17 @@ class DomainRepositoryImpl(
         category: String,
         status: DomainStatus,
         notes: String,
-    ) = withContext(ioDispatcher) {
-        dao.update(
-            id = id,
-            title = title.trim(),
-            category = category.trim(),
-            status = status.name,
-            notes = notes,
-            updatedAtEpochMilli = clock.millis(),
-        )
+    ) {
+        withContext(ioDispatcher) {
+            dao.update(
+                id = id,
+                title = title.trim(),
+                category = category.trim(),
+                status = status,
+                notes = notes,
+                updatedAt = Instant.now(clock),
+            )
+        }
     }
 
     override suspend fun deleteDomain(id: Long) {
@@ -83,28 +89,28 @@ class DomainRepositoryImpl(
                 ),
             )
             // Milestone activity counts as project activity for list ordering.
-            dao.touch(domainId, clock.millis())
+            dao.touch(domainId, Instant.now(clock))
         }
     }
 
     override suspend fun setMilestoneCompleted(milestoneId: Long, isCompleted: Boolean) {
         withContext(ioDispatcher) {
             dao.setMilestoneCompleted(milestoneId, isCompleted)
-            dao.domainIdForMilestone(milestoneId)?.let { dao.touch(it, clock.millis()) }
+            dao.domainIdForMilestone(milestoneId)?.let { dao.touch(it, Instant.now(clock)) }
         }
     }
 
     override suspend fun renameMilestone(milestoneId: Long, title: String) {
         withContext(ioDispatcher) {
             dao.renameMilestone(milestoneId, title.trim())
-            dao.domainIdForMilestone(milestoneId)?.let { dao.touch(it, clock.millis()) }
+            dao.domainIdForMilestone(milestoneId)?.let { dao.touch(it, Instant.now(clock)) }
         }
     }
 
     override suspend fun deleteMilestone(milestone: Milestone) {
         withContext(ioDispatcher) {
             dao.deleteMilestone(milestone.id)
-            dao.touch(milestone.domainId, clock.millis())
+            dao.touch(milestone.domainId, Instant.now(clock))
         }
     }
 }

@@ -1,10 +1,16 @@
 package com.firstmate.autonomy.ui.navigation
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -30,8 +36,8 @@ import com.firstmate.autonomy.ui.habits.HabitScreen
 /**
  * App shell: a bottom bar over a single [NavHost].
  *
- * The bar is hidden on detail and editor routes so those screens read as a
- * focused push rather than another tab.
+ * The bar slides away on detail and editor routes rather than disappearing,
+ * so a push reads as going deeper rather than as the chrome glitching.
  */
 @Composable
 fun AutonomyApp(
@@ -46,9 +52,16 @@ fun AutonomyApp(
 
     Scaffold(
         modifier = modifier.fillMaxSize(),
+        containerColor = MaterialTheme.colorScheme.background,
         bottomBar = {
-            if (isTopLevel) {
-                NavigationBar {
+            AnimatedVisibility(
+                visible = isTopLevel,
+                enter = slideInVertically(tween(240)) { it },
+                exit = slideOutVertically(tween(200)) { it },
+            ) {
+                NavigationBar(
+                    containerColor = MaterialTheme.colorScheme.surfaceContainer,
+                ) {
                     TopLevelDestination.entries.forEach { destination ->
                         val selected = currentDestination
                             ?.hierarchy
@@ -67,6 +80,13 @@ fun AutonomyApp(
                                 )
                             },
                             label = { Text(destination.label) },
+                            colors = NavigationBarItemDefaults.colors(
+                                selectedIconColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                                selectedTextColor = MaterialTheme.colorScheme.primary,
+                                indicatorColor = MaterialTheme.colorScheme.primaryContainer,
+                                unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                                unselectedTextColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                            ),
                         )
                     }
                 }
@@ -89,6 +109,11 @@ private fun AutonomyNavHost(
         navController = navController,
         startDestination = Routes.DASHBOARD,
         modifier = modifier,
+        // Tabs cross-fade; the push/pop pairs below override this per route.
+        enterTransition = { tabEnter() },
+        exitTransition = { tabExit() },
+        popEnterTransition = { tabEnter() },
+        popExitTransition = { tabExit() },
     ) {
         composable(Routes.DASHBOARD) {
             DashboardScreen(
@@ -118,6 +143,10 @@ private fun AutonomyNavHost(
         composable(
             route = Routes.DOMAIN_DETAIL,
             arguments = listOf(navArgument(ARG_DOMAIN_ID) { type = NavType.LongType }),
+            enterTransition = { pushEnter() },
+            exitTransition = { pushExit() },
+            popEnterTransition = { popEnter() },
+            popExitTransition = { popExit() },
         ) {
             DomainDetailScreen(
                 onNavigateBack = { navController.popBackStack() },
@@ -133,6 +162,10 @@ private fun AutonomyNavHost(
                     defaultValue = NO_ID
                 },
             ),
+            enterTransition = { pushEnter() },
+            exitTransition = { pushExit() },
+            popEnterTransition = { popEnter() },
+            popExitTransition = { popExit() },
         ) {
             DomainEditorScreen(onNavigateBack = { navController.popBackStack() })
         }
@@ -152,6 +185,10 @@ private fun AutonomyNavHost(
                     defaultValue = NO_ID
                 },
             ),
+            enterTransition = { pushEnter() },
+            exitTransition = { pushExit() },
+            popEnterTransition = { popEnter() },
+            popExitTransition = { popExit() },
         ) {
             DecisionEditorScreen(onNavigateBack = { navController.popBackStack() })
         }
@@ -163,8 +200,8 @@ private fun AutonomyNavHost(
 }
 
 /**
- * Tab switching: single top, state preserved per tab, and the back stack
- * always unwinds to the dashboard rather than through every tab visited.
+ * Tab switching: single top, state preserved per tab, and the back stack always
+ * unwinds to the dashboard rather than through every tab visited.
  */
 private fun NavHostController.navigateToTopLevel(destination: TopLevelDestination) {
     navigate(destination.route) {

@@ -3,78 +3,81 @@ package com.firstmate.autonomy.ui.theme
 import androidx.compose.ui.graphics.Color
 
 /**
- * A calm, low-stimulation palette: deep harbour blue as the primary,
- * muted teal as the secondary, warm sand as the tertiary accent.
+ * Obsidian palette. Every foreground/background pair below was measured against
+ * the WCAG 2.1 relative-luminance formula and clears AA (4.5:1 for text, 3:1 for
+ * UI boundaries). The measured ratio is noted beside each pair.
  *
- * Both schemes are hand-tuned rather than generated at runtime, so the app
- * still looks intentional on devices without dynamic color.
+ * One deliberate departure from a naive reading of the brief: deep indigo
+ * #4F46E5 on the #0F172A background is only 2.84:1, so it cannot carry text or
+ * icons. It is therefore bound to the *container* role - the colour of a filled
+ * surface, where light text sits on top of it at 5.62:1 - while a lightened
+ * sibling (#818CF8, 5.98:1) carries indigo text and icons. That split is exactly
+ * how Material 3 dark schemes are meant to work, so the deep indigo still reads
+ * as the primary accent wherever it is a surface.
  */
 
-// Light
-val LightPrimary = Color(0xFF31628D)
-val LightOnPrimary = Color(0xFFFFFFFF)
-val LightPrimaryContainer = Color(0xFFCFE5FF)
-val LightOnPrimaryContainer = Color(0xFF001D33)
+// --- Brand ------------------------------------------------------------------
 
-val LightSecondary = Color(0xFF3E6357)
-val LightOnSecondary = Color(0xFFFFFFFF)
-val LightSecondaryContainer = Color(0xFFC0E9D9)
-val LightOnSecondaryContainer = Color(0xFF002019)
+/** The specified deep indigo. A fill colour, never a text colour on dark. */
+val Indigo600 = Color(0xFF4F46E5)
+val Indigo500 = Color(0xFF6366F1)
+/** Lightened indigo that can legibly carry text and icons on obsidian. */
+val Indigo400 = Color(0xFF818CF8)
+val Indigo200 = Color(0xFFA5B4FC)
+val Indigo50 = Color(0xFFEEF2FF)
+val Indigo950 = Color(0xFF1E1B4B)
 
-val LightTertiary = Color(0xFF7A5900)
-val LightOnTertiary = Color(0xFFFFFFFF)
-val LightTertiaryContainer = Color(0xFFFFDF9B)
-val LightOnTertiaryContainer = Color(0xFF261A00)
+/** The specified warm amber. Legible as text on dark at 8.31:1. */
+val Amber500 = Color(0xFFF59E0B)
+val Amber400 = Color(0xFFFBBF24)
+val Amber100 = Color(0xFFFEF3C7)
+val Amber800 = Color(0xFF92400E)
+val Amber900 = Color(0xFF78350F)
 
-val LightError = Color(0xFFBA1A1A)
-val LightOnError = Color(0xFFFFFFFF)
-val LightErrorContainer = Color(0xFFFFDAD6)
-val LightOnErrorContainer = Color(0xFF410002)
+// --- Slate ramp (the obsidian ground) ---------------------------------------
 
-val LightBackground = Color(0xFFFCF8F8)
-val LightOnBackground = Color(0xFF1A1C1E)
-val LightSurface = Color(0xFFFCF8F8)
-val LightOnSurface = Color(0xFF1A1C1E)
-val LightSurfaceVariant = Color(0xFFDEE3EB)
-val LightOnSurfaceVariant = Color(0xFF42474E)
-val LightOutline = Color(0xFF72777F)
-val LightOutlineVariant = Color(0xFFC2C7CF)
+val Slate950 = Color(0xFF0F172A) // background, as specified
+val Slate900 = Color(0xFF162032)
+val Slate850 = Color(0xFF1A2334)
+val Slate800 = Color(0xFF1E293B) // surface, as specified
+val Slate750 = Color(0xFF263449)
+val Slate700 = Color(0xFF334155)
+val Slate500 = Color(0xFF64748B)
+val Slate400 = Color(0xFF94A3B8)
+val Slate200 = Color(0xFFE2E8F0)
+val Slate100 = Color(0xFFF1F5F9)
+val Slate50 = Color(0xFFF8FAFC)
 
-// Dark
-val DarkPrimary = Color(0xFF9CCBFA)
-val DarkOnPrimary = Color(0xFF003354)
-val DarkPrimaryContainer = Color(0xFF124A73)
-val DarkOnPrimaryContainer = Color(0xFFCFE5FF)
+// --- Status / feedback ------------------------------------------------------
 
-val DarkSecondary = Color(0xFFA5CDBE)
-val DarkOnSecondary = Color(0xFF0B352B)
-val DarkSecondaryContainer = Color(0xFF264C41)
-val DarkOnSecondaryContainer = Color(0xFFC0E9D9)
+val Red300 = Color(0xFFFCA5A5)
+val Red700 = Color(0xFFB91C1C)
+val Red900 = Color(0xFF7F1D1D)
+val Red50 = Color(0xFFFEF2F2)
 
-val DarkTertiary = Color(0xFFEDC148)
-val DarkOnTertiary = Color(0xFF3F2E00)
-val DarkTertiaryContainer = Color(0xFF5C4300)
-val DarkOnTertiaryContainer = Color(0xFFFFDF9B)
+val Emerald400 = Color(0xFF34D399)
+val Emerald700 = Color(0xFF047857)
 
-val DarkError = Color(0xFFFFB4AB)
-val DarkOnError = Color(0xFF690005)
-val DarkErrorContainer = Color(0xFF93000A)
-val DarkOnErrorContainer = Color(0xFFFFDAD6)
+/**
+ * Accents for project stages. Chosen from the ramps above so each clears 4.5:1
+ * on both #0F172A and #1E293B in dark, and on #FFFFFF in light.
+ */
+object StatusPalette {
+    val planningDark = Amber400 // 8.76:1 on surface
+    val inProgressDark = Indigo400 // 4.90:1 on surface
+    val completedDark = Emerald400 // 8.30:1 on surface
 
-val DarkBackground = Color(0xFF141218)
-val DarkOnBackground = Color(0xFFE3E2E6)
-val DarkSurface = Color(0xFF141218)
-val DarkOnSurface = Color(0xFFE3E2E6)
-val DarkSurfaceVariant = Color(0xFF42474E)
-val DarkOnSurfaceVariant = Color(0xFFC2C7CF)
-val DarkOutline = Color(0xFF8C9199)
-val DarkOutlineVariant = Color(0xFF42474E)
+    val planningLight = Amber800
+    val inProgressLight = Indigo600
+    val completedLight = Emerald700
+}
 
-/** Semantic accents used by status chips and progress, per theme. */
-val StatusPlanningLight = Color(0xFF7A5900)
-val StatusInProgressLight = Color(0xFF31628D)
-val StatusCompletedLight = Color(0xFF3E6357)
-
-val StatusPlanningDark = Color(0xFFEDC148)
-val StatusInProgressDark = Color(0xFF9CCBFA)
-val StatusCompletedDark = Color(0xFFA5CDBE)
+/** Confetti draws from these; they are decorative and carry no meaning. */
+val ConfettiColors = listOf(
+    Indigo400,
+    Amber400,
+    Emerald400,
+    Indigo200,
+    Amber100,
+    Color(0xFF38BDF8),
+)

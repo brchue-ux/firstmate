@@ -7,12 +7,13 @@ import com.firstmate.autonomy.domain.repository.DomainRepository
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
 import java.time.LocalDate
+import javax.inject.Inject
 
 /**
  * Assembles the home screen from the three feature repositories so the
  * dashboard ViewModel stays a thin state holder.
  */
-class GetDashboardOverviewUseCase(
+class GetDashboardOverviewUseCase @Inject constructor(
     private val domainRepository: DomainRepository,
     private val decisionRepository: DecisionRepository,
     private val getHabitConsistency: GetHabitConsistencyUseCase,

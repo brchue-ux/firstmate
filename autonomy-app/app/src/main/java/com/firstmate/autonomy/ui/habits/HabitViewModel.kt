@@ -2,21 +2,29 @@ package com.firstmate.autonomy.ui.habits
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.firstmate.autonomy.data.preferences.SettingsRepository
 import com.firstmate.autonomy.domain.model.DayStatus
 import com.firstmate.autonomy.domain.model.HabitConsistency
 import com.firstmate.autonomy.domain.repository.HabitRepository
 import com.firstmate.autonomy.domain.usecase.GetHabitConsistencyUseCase
+import com.firstmate.autonomy.ui.common.UiState
+import com.firstmate.autonomy.ui.common.asUiState
+import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import java.time.Clock
 import java.time.LocalDate
+import javax.inject.Inject
 
 /** Draft state of the "new habit" dialog. */
 data class NewHabitDraft(
@@ -27,17 +35,19 @@ data class NewHabitDraft(
     val canSave: Boolean get() = name.isNotBlank()
 }
 
-data class HabitUiState(
-    val isLoading: Boolean = true,
-    val today: LocalDate = LocalDate.now(),
+data class HabitScreenState(
+    val today: LocalDate,
     /** One entry per habit, each carrying a [MONTH_DAYS]-day series. */
     val habits: List<HabitConsistency> = emptyList(),
     val newHabit: NewHabitDraft = NewHabitDraft(),
+    val celebrationsEnabled: Boolean = true,
 ) {
-    val isEmpty: Boolean get() = !isLoading && habits.isEmpty()
+    val isEmpty: Boolean get() = habits.isEmpty()
 
     val completedToday: Int
         get() = habits.count { it.days.lastOrNull()?.isCompleted == true }
+
+    val allDoneToday: Boolean get() = habits.isNotEmpty() && completedToday == habits.size
 
     val todayProgress: Float
         get() = if (habits.isEmpty()) 0f else completedToday.toFloat() / habits.size
@@ -50,6 +60,9 @@ data class HabitUiState(
             return habits.sumOf { it.completedCount } * 100 / total
         }
 
+    /** The longest active streak across all habits, for the header. */
+    val bestStreak: Int get() = habits.maxOfOrNull { it.currentStreak } ?: 0
+
     companion object {
         const val MONTH_DAYS = 30
         const val WEEK_DAYS = 7
@@ -57,19 +70,23 @@ data class HabitUiState(
 }
 
 /** The last seven days of a month-long series - what the weekly strip draws. */
-fun HabitConsistency.thisWeek(): List<DayStatus> =
-    days.takeLast(HabitUiState.WEEK_DAYS)
+fun HabitConsistency.thisWeek(): List<DayStatus> = days.takeLast(HabitScreenState.WEEK_DAYS)
+
+/** Fired when the day's last outstanding habit gets ticked. */
+data object AllHabitsDoneEvent
 
 /**
  * Daily check-in plus weekly and monthly consistency.
  *
- * A single 30-day query backs both views: the weekly strip is just its tail,
- * so ticking a box updates every figure on screen from one emission.
+ * A single 30-day query backs both views: the weekly strip is its tail, so
+ * ticking a box updates every figure on screen from one emission.
  */
-class HabitViewModel(
+@HiltViewModel
+class HabitViewModel @Inject constructor(
     private val habitRepository: HabitRepository,
+    private val settingsRepository: SettingsRepository,
     getHabitConsistency: GetHabitConsistencyUseCase,
-    private val clock: Clock = Clock.systemDefaultZone(),
+    private val clock: Clock,
 ) : ViewModel() {
 
     /**
@@ -77,28 +94,33 @@ class HabitViewModel(
      * left open across midnight starts writing to the new day.
      */
     private val today = MutableStateFlow(LocalDate.now(clock))
-
     private val newHabit = MutableStateFlow(NewHabitDraft())
 
+    private val eventChannel = Channel<AllHabitsDoneEvent>(Channel.BUFFERED)
+    val events: Flow<AllHabitsDoneEvent> = eventChannel.receiveAsFlow()
+
     @OptIn(ExperimentalCoroutinesApi::class)
-    val uiState: StateFlow<HabitUiState> = combine(
+    val uiState: StateFlow<UiState<HabitScreenState>> = combine(
         today.flatMapLatest { day ->
-            getHabitConsistency(today = day, windowDays = HabitUiState.MONTH_DAYS)
+            getHabitConsistency(today = day, windowDays = HabitScreenState.MONTH_DAYS)
         },
         today,
         newHabit,
-    ) { consistency, day, draft ->
-        HabitUiState(
-            isLoading = false,
+        settingsRepository.celebrationsEnabled,
+    ) { consistency, day, draft, celebrations ->
+        HabitScreenState(
             today = day,
             habits = consistency,
             newHabit = draft,
+            celebrationsEnabled = celebrations,
         )
-    }.stateIn(
-        scope = viewModelScope,
-        started = SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS),
-        initialValue = HabitUiState(today = LocalDate.now(clock)),
-    )
+    }
+        .asUiState("Could not load your habits.")
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS),
+            initialValue = UiState.Loading,
+        )
 
     /** Called when the screen resumes, so a stale "today" cannot mis-file a check-in. */
     fun refreshToday() {
@@ -108,6 +130,11 @@ class HabitViewModel(
     fun setTodayCompleted(habitId: Long, isCompleted: Boolean) {
         viewModelScope.launch {
             habitRepository.setCheckIn(habitId, today.value, isCompleted)
+            // Read the state the write produced rather than predicting it, so
+            // the celebration cannot fire on a write that failed.
+            if (isCompleted && uiState.value.dataOrNull?.allDoneToday == true) {
+                eventChannel.send(AllHabitsDoneEvent)
+            }
         }
     }
 
@@ -127,6 +154,10 @@ class HabitViewModel(
         viewModelScope.launch {
             habitRepository.createHabit(name = draft.name, description = draft.description)
         }
+    }
+
+    fun setCelebrationsEnabled(enabled: Boolean) {
+        viewModelScope.launch { settingsRepository.setCelebrationsEnabled(enabled) }
     }
 
     /** Archive rather than delete: the past month of history stays intact. */

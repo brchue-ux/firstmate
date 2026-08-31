@@ -5,6 +5,7 @@ import androidx.room.Entity
 import androidx.room.ForeignKey
 import androidx.room.Index
 import androidx.room.PrimaryKey
+import java.time.LocalDate
 
 /** Storage row for a tracked daily habit or boundary. */
 @Entity(tableName = "habits")
@@ -19,8 +20,9 @@ data class HabitEntity(
 /**
  * One completed day for one habit.
  *
- * Rows exist only for days that were ticked, so a missing row reads as "not done".
- * The unique index makes `INSERT OR REPLACE` behave as an upsert per habit-day.
+ * Rows exist only for days that were ticked, so a missing row reads as "not
+ * done". The unique index makes `INSERT OR REPLACE` behave as an upsert per
+ * habit-day.
  */
 @Entity(
     tableName = "habit_check_ins",
@@ -40,5 +42,5 @@ data class HabitEntity(
 data class HabitCheckInEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0L,
     @ColumnInfo(name = "habit_id") val habitId: Long,
-    @ColumnInfo(name = "date_epoch_day") val dateEpochDay: Long,
+    @ColumnInfo(name = "date_epoch_day") val date: LocalDate,
 )

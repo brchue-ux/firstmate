@@ -7,6 +7,7 @@ import com.firstmate.autonomy.domain.repository.HabitRepository
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
 import java.time.LocalDate
+import javax.inject.Inject
 
 /**
  * Turns sparse check-in rows into a dense, gap-free day series per habit.
@@ -15,7 +16,7 @@ import java.time.LocalDate
  * draws a strip or a percentage needs one entry per day in the window, so the
  * densifying happens here rather than in each ViewModel.
  */
-class GetHabitConsistencyUseCase(
+class GetHabitConsistencyUseCase @Inject constructor(
     private val habitRepository: HabitRepository,
 ) {
     /**

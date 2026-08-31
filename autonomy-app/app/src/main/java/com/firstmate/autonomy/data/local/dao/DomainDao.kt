@@ -7,7 +7,9 @@ import androidx.room.Transaction
 import com.firstmate.autonomy.data.local.entity.DomainEntity
 import com.firstmate.autonomy.data.local.entity.MilestoneEntity
 import com.firstmate.autonomy.data.local.relation.DomainWithMilestones
+import com.firstmate.autonomy.domain.model.DomainStatus
 import kotlinx.coroutines.flow.Flow
+import java.time.Instant
 
 @Dao
 interface DomainDao {
@@ -34,7 +36,7 @@ interface DomainDao {
             category = :category,
             status = :status,
             notes = :notes,
-            updated_at = :updatedAtEpochMilli
+            updated_at = :updatedAt
         WHERE id = :id
         """,
     )
@@ -42,13 +44,13 @@ interface DomainDao {
         id: Long,
         title: String,
         category: String,
-        status: String,
+        status: DomainStatus,
         notes: String,
-        updatedAtEpochMilli: Long,
+        updatedAt: Instant,
     )
 
-    @Query("UPDATE domains SET updated_at = :updatedAtEpochMilli WHERE id = :id")
-    suspend fun touch(id: Long, updatedAtEpochMilli: Long)
+    @Query("UPDATE domains SET updated_at = :updatedAt WHERE id = :id")
+    suspend fun touch(id: Long, updatedAt: Instant)
 
     @Query("DELETE FROM domains WHERE id = :id")
     suspend fun deleteById(id: Long)

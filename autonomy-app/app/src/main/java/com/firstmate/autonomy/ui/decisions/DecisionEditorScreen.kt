@@ -11,7 +11,6 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.outlined.CalendarMonth
-import androidx.compose.material3.Button
 import androidx.compose.material3.DatePicker
 import androidx.compose.material3.DatePickerDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -32,13 +31,13 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import androidx.lifecycle.viewmodel.compose.viewModel
-import com.firstmate.autonomy.di.AutonomyViewModelFactory
 import com.firstmate.autonomy.domain.model.DecisionCategory
 import com.firstmate.autonomy.ui.components.AutonomyMultilineField
 import com.firstmate.autonomy.ui.components.AutonomyTextField
 import com.firstmate.autonomy.ui.components.ChoiceChipRow
+import com.firstmate.autonomy.ui.components.PrimaryActionButton
 import com.firstmate.autonomy.ui.preview.PreviewData
 import com.firstmate.autonomy.ui.preview.ScreenPreviews
 import com.firstmate.autonomy.ui.theme.AutonomyTheme
@@ -52,7 +51,7 @@ import java.time.ZoneOffset
 fun DecisionEditorScreen(
     onNavigateBack: () -> Unit,
     modifier: Modifier = Modifier,
-    viewModel: DecisionEditorViewModel = viewModel(factory = AutonomyViewModelFactory.Factory),
+    viewModel: DecisionEditorViewModel = hiltViewModel(),
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
 
@@ -163,9 +162,11 @@ fun DecisionEditorContent(
                 minLines = 4,
             )
 
-            Button(onClick = onSave, modifier = Modifier.fillMaxWidth()) {
-                Text(if (uiState.isEditing) "Save changes" else "Log decision")
-            }
+            PrimaryActionButton(
+                text = if (uiState.isEditing) "Save changes" else "Log decision",
+                onClick = onSave,
+                modifier = Modifier.fillMaxWidth(),
+            )
         }
     }
 

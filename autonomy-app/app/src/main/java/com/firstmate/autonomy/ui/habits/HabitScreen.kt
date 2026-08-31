@@ -1,62 +1,74 @@
 package com.firstmate.autonomy.ui.habits
 
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.outlined.Archive
+import androidx.compose.material.icons.outlined.Celebration
+import androidx.compose.material.icons.outlined.NotificationsOff
 import androidx.compose.material.icons.outlined.TaskAlt
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
-import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.CheckboxDefaults
 import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import androidx.lifecycle.viewmodel.compose.viewModel
-import com.firstmate.autonomy.di.AutonomyViewModelFactory
 import com.firstmate.autonomy.domain.model.HabitConsistency
+import com.firstmate.autonomy.ui.common.UiState
+import com.firstmate.autonomy.ui.common.UiStateContent
+import com.firstmate.autonomy.ui.components.AutonomyCard
 import com.firstmate.autonomy.ui.components.AutonomyTextField
+import com.firstmate.autonomy.ui.components.CollapsingScaffold
+import com.firstmate.autonomy.ui.components.ConfettiEffect
 import com.firstmate.autonomy.ui.components.EmptyState
-import com.firstmate.autonomy.ui.components.LabeledProgress
+import com.firstmate.autonomy.ui.components.ProgressRing
 import com.firstmate.autonomy.ui.components.WeekStrip
+import com.firstmate.autonomy.ui.components.pressPhysics
+import com.firstmate.autonomy.ui.components.rememberCelebration
 import com.firstmate.autonomy.ui.preview.PreviewData
 import com.firstmate.autonomy.ui.preview.ScreenPreviews
 import com.firstmate.autonomy.ui.theme.AutonomyTheme
 import com.firstmate.autonomy.ui.util.weekdayAndDay
+import kotlinx.coroutines.flow.collectLatest
 import java.time.LocalDate
 
-/** "Boundary & Habit Tracker": today's check-in, plus weekly and monthly consistency. */
+/** "Boundary & Agency Tracker": today's check-in plus weekly and monthly streaks. */
 @Composable
 fun HabitScreen(
     modifier: Modifier = Modifier,
-    viewModel: HabitViewModel = viewModel(factory = AutonomyViewModelFactory.Factory),
+    viewModel: HabitViewModel = hiltViewModel(),
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+    val celebrationsOn = uiState.dataOrNull?.celebrationsEnabled ?: true
+    val celebration = rememberCelebration(enabled = celebrationsOn)
+    var celebrating by remember { mutableStateOf(false) }
 
     // Coming back to the app after midnight must not tick yesterday's box.
     LifecycleResumeEffect(Unit) {
@@ -64,24 +76,43 @@ fun HabitScreen(
         onPauseOrDispose { }
     }
 
-    HabitContent(
-        uiState = uiState,
-        onToggleToday = viewModel::setTodayCompleted,
-        onArchiveHabit = viewModel::archiveHabit,
-        onShowAddHabit = viewModel::showAddHabit,
-        onDismissAddHabit = viewModel::dismissAddHabit,
-        onNewHabitNameChange = viewModel::onNewHabitNameChange,
-        onNewHabitDescriptionChange = viewModel::onNewHabitDescriptionChange,
-        onSaveNewHabit = viewModel::saveNewHabit,
-        modifier = modifier,
-    )
+    LaunchedCelebration(viewModel) {
+        celebration.tap()
+        celebrating = true
+    }
+
+    Box(modifier) {
+        HabitContent(
+            uiState = uiState,
+            onToggleToday = viewModel::setTodayCompleted,
+            onToggleCelebrations = viewModel::setCelebrationsEnabled,
+            onArchiveHabit = viewModel::archiveHabit,
+            onShowAddHabit = viewModel::showAddHabit,
+            onDismissAddHabit = viewModel::dismissAddHabit,
+            onNewHabitNameChange = viewModel::onNewHabitNameChange,
+            onNewHabitDescriptionChange = viewModel::onNewHabitDescriptionChange,
+            onSaveNewHabit = viewModel::saveNewHabit,
+        )
+        ConfettiEffect(
+            visible = celebrating,
+            enabled = uiState.dataOrNull?.celebrationsEnabled ?: true,
+            onFinished = { celebrating = false },
+        )
+    }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun LaunchedCelebration(viewModel: HabitViewModel, onEvent: () -> Unit) {
+    androidx.compose.runtime.LaunchedEffect(viewModel) {
+        viewModel.events.collectLatest { onEvent() }
+    }
+}
+
 @Composable
 fun HabitContent(
-    uiState: HabitUiState,
+    uiState: UiState<HabitScreenState>,
     onToggleToday: (Long, Boolean) -> Unit,
+    onToggleCelebrations: (Boolean) -> Unit,
     onArchiveHabit: (Long) -> Unit,
     onShowAddHabit: () -> Unit,
     onDismissAddHabit: () -> Unit,
@@ -90,60 +121,68 @@ fun HabitContent(
     onSaveNewHabit: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    Scaffold(
+    val state = uiState.dataOrNull
+    CollapsingScaffold(
         modifier = modifier,
-        contentWindowInsets = WindowInsets(0, 0, 0, 0),
-        topBar = { TopAppBar(title = { Text("Boundaries & Habits") }) },
+        title = "Boundaries",
+        actions = {
+            val on = state?.celebrationsEnabled ?: true
+            IconButton(onClick = { onToggleCelebrations(!on) }) {
+                Icon(
+                    imageVector = if (on) {
+                        Icons.Outlined.Celebration
+                    } else {
+                        Icons.Outlined.NotificationsOff
+                    },
+                    contentDescription = if (on) {
+                        "Turn off celebrations"
+                    } else {
+                        "Turn on celebrations"
+                    },
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        },
+        subtitle = state?.takeIf { !it.isEmpty }?.let {
+            "${it.completedToday} of ${it.habits.size} done today" +
+                if (it.bestStreak > 1) " · best streak ${it.bestStreak} days" else ""
+        },
         floatingActionButton = {
+            val interaction = remember { MutableInteractionSource() }
             ExtendedFloatingActionButton(
                 onClick = onShowAddHabit,
+                modifier = Modifier.pressPhysics(interaction),
+                interactionSource = interaction,
+                containerColor = MaterialTheme.colorScheme.primaryContainer,
+                contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
                 icon = { Icon(Icons.Filled.Add, contentDescription = null) },
                 text = { Text("New habit") },
             )
         },
-    ) { innerPadding ->
-        Box(Modifier.padding(innerPadding)) {
-            when {
-                uiState.isLoading -> Unit
-
-                uiState.isEmpty -> EmptyState(
+    ) { innerPadding, _ ->
+        UiStateContent(state = uiState, modifier = Modifier.padding(innerPadding)) { current ->
+            if (current.isEmpty) {
+                EmptyState(
                     icon = Icons.Outlined.TaskAlt,
                     title = "Nothing tracked yet",
-                    message = "Add the small daily things you refuse to trade away - solo time, " +
-                        "practice, one boundary held. Two or three is plenty.",
+                    message = "Add the small daily things you refuse to trade away - solo " +
+                        "time, practice, one boundary held. Two or three is plenty.",
                     actionLabel = "New habit",
                     onAction = onShowAddHabit,
                 )
-
-                else -> LazyColumn(
-                    modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(
-                        start = 16.dp,
-                        end = 16.dp,
-                        top = 8.dp,
-                        bottom = 96.dp,
-                    ),
-                    verticalArrangement = Arrangement.spacedBy(12.dp),
-                ) {
-                    item { TodaySummary(uiState) }
-                    items(uiState.habits, key = { it.habit.id }) { consistency ->
-                        HabitCard(
-                            consistency = consistency,
-                            today = uiState.today,
-                            onToggleToday = { checked ->
-                                onToggleToday(consistency.habit.id, checked)
-                            },
-                            onArchive = { onArchiveHabit(consistency.habit.id) },
-                        )
-                    }
-                }
+            } else {
+                HabitList(
+                    state = current,
+                    onToggleToday = onToggleToday,
+                    onArchiveHabit = onArchiveHabit,
+                )
             }
         }
     }
 
-    if (uiState.newHabit.isVisible) {
+    if (state?.newHabit?.isVisible == true) {
         AddHabitDialog(
-            draft = uiState.newHabit,
+            draft = state.newHabit,
             onNameChange = onNewHabitNameChange,
             onDescriptionChange = onNewHabitDescriptionChange,
             onSave = onSaveNewHabit,
@@ -152,36 +191,71 @@ fun HabitContent(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun HabitList(
+    state: HabitScreenState,
+    onToggleToday: (Long, Boolean) -> Unit,
+    onArchiveHabit: (Long) -> Unit,
+) {
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 104.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp),
+    ) {
+        item(key = "today") { TodaySummary(state, Modifier.animateItem()) }
+        items(state.habits, key = { it.habit.id }) { consistency ->
+            HabitCard(
+                consistency = consistency,
+                today = state.today,
+                onToggleToday = { checked -> onToggleToday(consistency.habit.id, checked) },
+                onArchive = { onArchiveHabit(consistency.habit.id) },
+                modifier = Modifier.animateItem(),
+            )
+        }
+    }
+}
+
 @Composable
 private fun TodaySummary(
-    uiState: HabitUiState,
+    state: HabitScreenState,
     modifier: Modifier = Modifier,
 ) {
-    Card(
-        modifier = modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.secondaryContainer,
-            contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
-        ),
+    AutonomyCard(
+        modifier = modifier,
+        containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
     ) {
-        Column(Modifier.padding(16.dp)) {
-            Text(
-                text = uiState.today.weekdayAndDay(),
-                style = MaterialTheme.typography.labelMedium,
+        Row(
+            modifier = Modifier.padding(20.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            ProgressRing(
+                progress = state.todayProgress,
+                size = 84.dp,
+                strokeWidth = 10.dp,
+                color = MaterialTheme.colorScheme.secondary,
+                contentDescriptionText = "Today, ${state.completedToday} of " +
+                    "${state.habits.size} habits done",
             )
-            Spacer(Modifier.height(4.dp))
-            Text(
-                text = "${uiState.completedToday} of ${uiState.habits.size} done today",
-                style = MaterialTheme.typography.titleMedium,
-            )
-            Spacer(Modifier.height(14.dp))
-            LabeledProgress(
-                label = "Last 30 days",
-                progress = uiState.monthlyRatePercent / 100f,
-                trailingText = "${uiState.monthlyRatePercent}%",
-                accessibilityText = "Last 30 days, ${uiState.monthlyRatePercent} percent " +
-                    "of check-ins completed",
-            )
+            Spacer(Modifier.width(18.dp))
+            Column(Modifier.weight(1f)) {
+                Text(
+                    text = state.today.weekdayAndDay(),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    text = "${state.completedToday} of ${state.habits.size} done today",
+                    style = MaterialTheme.typography.titleMedium,
+                )
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    text = "${state.monthlyRatePercent}% over the last 30 days",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
         }
     }
 }
@@ -196,15 +270,17 @@ fun HabitCard(
     modifier: Modifier = Modifier,
 ) {
     val isDoneToday = consistency.days.lastOrNull()?.isCompleted == true
-    Card(
-        modifier = modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
-        ),
-    ) {
-        Column(Modifier.padding(16.dp)) {
+    AutonomyCard(modifier = modifier) {
+        Column(Modifier.padding(20.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Checkbox(checked = isDoneToday, onCheckedChange = onToggleToday)
+                Checkbox(
+                    checked = isDoneToday,
+                    onCheckedChange = onToggleToday,
+                    colors = CheckboxDefaults.colors(
+                        checkedColor = MaterialTheme.colorScheme.secondary,
+                        checkmarkColor = MaterialTheme.colorScheme.onSecondary,
+                    ),
+                )
                 Column(Modifier.weight(1f)) {
                     Text(
                         text = consistency.habit.name,
@@ -226,9 +302,9 @@ fun HabitCard(
                     )
                 }
             }
-            Spacer(Modifier.height(12.dp))
+            Spacer(Modifier.height(14.dp))
             WeekStrip(days = consistency.thisWeek(), today = today)
-            Spacer(Modifier.height(12.dp))
+            Spacer(Modifier.height(14.dp))
             Text(
                 text = "${consistency.completedCount} of ${consistency.days.size} days " +
                     "· ${consistency.ratePercent}%" +
@@ -254,6 +330,7 @@ private fun AddHabitDialog(
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
+        shape = MaterialTheme.shapes.large,
         title = { Text("New daily habit") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -274,9 +351,7 @@ private fun AddHabitDialog(
         confirmButton = {
             TextButton(onClick = onSave, enabled = draft.canSave) { Text("Add") }
         },
-        dismissButton = {
-            TextButton(onClick = onDismiss) { Text("Cancel") }
-        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
 }
 
@@ -285,12 +360,14 @@ private fun AddHabitDialog(
 private fun HabitScreenPreview() {
     AutonomyTheme {
         HabitContent(
-            uiState = HabitUiState(
-                isLoading = false,
-                today = PreviewData.today,
-                habits = PreviewData.habitConsistency,
+            uiState = UiState.Success(
+                HabitScreenState(
+                    today = PreviewData.today,
+                    habits = PreviewData.habitConsistency,
+                ),
             ),
             onToggleToday = { _, _ -> },
+            onToggleCelebrations = {},
             onArchiveHabit = {},
             onShowAddHabit = {},
             onDismissAddHabit = {},
@@ -306,8 +383,9 @@ private fun HabitScreenPreview() {
 private fun HabitScreenEmptyPreview() {
     AutonomyTheme {
         HabitContent(
-            uiState = HabitUiState(isLoading = false, today = PreviewData.today),
+            uiState = UiState.Success(HabitScreenState(today = PreviewData.today)),
             onToggleToday = { _, _ -> },
+            onToggleCelebrations = {},
             onArchiveHabit = {},
             onShowAddHabit = {},
             onDismissAddHabit = {},

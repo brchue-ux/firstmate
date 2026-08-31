@@ -8,6 +8,7 @@ import androidx.room.Update
 import com.firstmate.autonomy.data.local.entity.HabitCheckInEntity
 import com.firstmate.autonomy.data.local.entity.HabitEntity
 import kotlinx.coroutines.flow.Flow
+import java.time.LocalDate
 
 @Dao
 interface HabitDao {
@@ -35,19 +36,16 @@ interface HabitDao {
     @Query(
         """
         SELECT * FROM habit_check_ins
-        WHERE date_epoch_day BETWEEN :fromEpochDay AND :toEpochDay
+        WHERE date_epoch_day BETWEEN :from AND :to
         """,
     )
-    fun observeCheckInsBetween(
-        fromEpochDay: Long,
-        toEpochDay: Long,
-    ): Flow<List<HabitCheckInEntity>>
+    fun observeCheckInsBetween(from: LocalDate, to: LocalDate): Flow<List<HabitCheckInEntity>>
 
     /** The unique (habit, day) index turns this into an upsert. */
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertCheckIn(checkIn: HabitCheckInEntity)
 
     /** Un-ticking removes the row, keeping the table sparse. */
-    @Query("DELETE FROM habit_check_ins WHERE habit_id = :habitId AND date_epoch_day = :epochDay")
-    suspend fun deleteCheckIn(habitId: Long, epochDay: Long)
+    @Query("DELETE FROM habit_check_ins WHERE habit_id = :habitId AND date_epoch_day = :date")
+    suspend fun deleteCheckIn(habitId: Long, date: LocalDate)
 }
