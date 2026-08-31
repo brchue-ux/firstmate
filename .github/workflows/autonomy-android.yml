@@ -4,25 +4,22 @@
 # artifact are served from dl.google.com, which its egress policy blocks.
 # GitHub's ubuntu runners ship the SDK, so the build happens here instead.
 #
-# Pushing a tag like autonomy-v0.1.0 additionally drops the built APK onto a
-# single-commit `apk-delivery` branch. That exists because a workflow artifact
-# can only be fetched from Azure blob storage, which the development session's
-# egress policy also blocks, whereas it can reach github.com over git. The
-# branch is a transient hand-off and is deleted once the APK is collected.
+# Each build also drops the APK onto a single-commit `apk-delivery` branch.
+# That exists because a workflow artifact can only be fetched from Azure blob
+# storage, which the development session's egress policy blocks, whereas it
+# can reach github.com over git. The branch is a transient hand-off, deleted
+# once the APK is collected.
 #
-# A tag push is the trigger rather than workflow_dispatch because manual
-# dispatch only works once a workflow lives on the default branch, and this
-# one is still on a feature branch. Path filters are left off for the same
-# reason - they do not combine cleanly with tag refs - so the branch pattern
-# is what keeps this off unrelated firstmate work.
+# The trigger is a plain branch push: manual dispatch only works once a
+# workflow lives on the default branch, and tag refs cannot be pushed from
+# the development session at all. The branch pattern is what keeps this off
+# unrelated firstmate work.
 name: Autonomy Android
 
 on:
   push:
     branches:
       - 'claude/autonomy-android-app-**'
-    tags:
-      - 'autonomy-v*'
 
 permissions:
   contents: read
@@ -68,7 +65,6 @@ jobs:
       # session can actually read. Orphan single-commit branch, force-pushed,
       # deleted as soon as the APK is collected - it is a courier, not history.
       - name: Drop the APK on the delivery branch
-        if: startsWith(github.ref, 'refs/tags/autonomy-v')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -81,7 +77,7 @@ jobs:
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add autonomy-debug.apk
-          git commit -q -m "APK drop for ${{ github.ref_name }} (${{ github.sha }})"
+          git commit -q -m "APK drop for ${{ github.sha }}"
           git push -q --force \
             "https://x-access-token:$GH_TOKEN@github.com/${{ github.repository }}.git" \
             apk-delivery
