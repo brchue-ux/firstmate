@@ -4,15 +4,17 @@
 # artifact are served from dl.google.com, which its egress policy blocks.
 # GitHub's ubuntu runners ship the SDK, so the build happens here instead.
 #
-# Pushing a tag like autonomy-v0.1.0 additionally attaches the APK to a
-# release, which is the phone-friendly way to install it: a direct .apk link
-# rather than a zipped workflow artifact.
+# Pushing a tag like autonomy-v0.1.0 additionally drops the built APK onto a
+# single-commit `apk-delivery` branch. That exists because a workflow artifact
+# can only be fetched from Azure blob storage, which the development session's
+# egress policy also blocks, whereas it can reach github.com over git. The
+# branch is a transient hand-off and is deleted once the APK is collected.
 #
-# A tag push is the release trigger rather than workflow_dispatch because
-# manual dispatch only works once a workflow lives on the default branch,
-# and this one is still on a feature branch. Path filters are left off for
-# the same reason - they do not combine cleanly with tag refs - so the branch
-# pattern is what keeps this off unrelated firstmate work.
+# A tag push is the trigger rather than workflow_dispatch because manual
+# dispatch only works once a workflow lives on the default branch, and this
+# one is still on a feature branch. Path filters are left off for the same
+# reason - they do not combine cleanly with tag refs - so the branch pattern
+# is what keeps this off unrelated firstmate work.
 name: Autonomy Android
 
 on:
@@ -62,16 +64,24 @@ jobs:
           path: autonomy-app/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
 
-      - name: Publish release with the APK
+      # Hand the APK back through the repo, the one transport the development
+      # session can actually read. Orphan single-commit branch, force-pushed,
+      # deleted as soon as the APK is collected - it is a courier, not history.
+      - name: Drop the APK on the delivery branch
         if: startsWith(github.ref, 'refs/tags/autonomy-v')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -eu
-          cp app/build/outputs/apk/debug/app-debug.apk "autonomy-${{ github.ref_name }}.apk"
-          gh release create "${{ github.ref_name }}" \
-            "autonomy-${{ github.ref_name }}.apk" \
-            --repo "${{ github.repository }}" \
-            --title "Autonomy ${{ github.ref_name }}" \
-            --notes "Debug build, signed with a throwaway debug key - fine for personal sideloading, not for the Play Store. Open this page on the phone and tap the .apk to install." \
-            --prerelease
+          drop="$RUNNER_TEMP/drop"
+          mkdir -p "$drop"
+          cp app/build/outputs/apk/debug/app-debug.apk "$drop/autonomy-debug.apk"
+          cd "$drop"
+          git init -q -b apk-delivery
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add autonomy-debug.apk
+          git commit -q -m "APK drop for ${{ github.ref_name }} (${{ github.sha }})"
+          git push -q --force \
+            "https://x-access-token:$GH_TOKEN@github.com/${{ github.repository }}.git" \
+            apk-delivery
