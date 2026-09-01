@@ -116,6 +116,24 @@ assert_contains "$out" '"code": -32700' "malformed JSON must map to a parse erro
 assert_contains "$out" '"id": 1' "the server must keep serving after a parse error"
 pass "malformed JSON is a parse error and does not wedge the server"
 
+out=$(mcp "$INIT" '11' '{"jsonrpc":"2.0","id":10,"method":"ping"}')
+assert_contains "$out" '"code": -32600' "a bare literal must be an invalid request"
+[ "$(field "$out" 10 'r')" = "{}" ] || fail "the server must keep serving after a bare literal"
+pass "a bare non-object is an invalid request and does not wedge the server"
+
+# Batches left the spec in 2025-06-18 but older clients still send them, so a
+# stray literal inside one must not take the process down with it.
+out=$(mcp "$INIT" '[12, {"jsonrpc":"2.0","id":13,"method":"ping"}]' '{"jsonrpc":"2.0","id":14,"method":"ping"}')
+assert_contains "$out" '"code": -32600' "a non-object batch element must be an invalid request"
+[ "$(field "$out" 13 'r')" = "{}" ] || fail "valid entries in the same batch must still be served"
+[ "$(field "$out" 14 'r')" = "{}" ] || fail "a malformed batch element must not wedge the server"
+pass "a malformed batch element is refused without wedging the server"
+
+out=$(mcp "$INIT" '[]' '{"jsonrpc":"2.0","id":15,"method":"ping"}')
+assert_contains "$out" '"code": -32600' "an empty batch must be an invalid request"
+[ "$(field "$out" 15 'r')" = "{}" ] || fail "the server must keep serving after an empty batch"
+pass "an empty batch is an invalid request rather than silence"
+
 out=$(mcp '{"jsonrpc":"2.0","method":"notifications/initialized"}' "$INIT")
 [ "$(printf '%s\n' "$out" | grep -c .)" = "1" ] || fail "a notification must not produce a response"
 pass "a notification produces no response"

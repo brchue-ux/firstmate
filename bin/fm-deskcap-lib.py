@@ -39,14 +39,16 @@ deliberate choice over a cached warm pipeline: the captain's session is a
 headless GNOME Remote Login (RDP) one whose virtual monitor is torn down when he
 disconnects, and Mutter reuses PipeWire node ids across sessions. A per-call
 session cannot serve a stale frame, cannot outlive the monitor it recorded, and
-still returns in a fraction of a second. That cost tracks how many pixels are
-being moved: a whole display costs more than a small region, and more again as
-the captain's RDP client resizes his virtual output between sessions, so it is a
-range rather than a fixed figure. Session.Closed is handled on top of that: if the
-compositor closes the session mid-capture, the capture is rebuilt once rather
-than reported as a failure. That close is only observable while the GLib default
-main context is iterated, so the frame pull pumps it by hand rather than blocking
-on GStreamer alone.
+still returns in a fraction of a second. That cost grows with the size of the
+display being captured, and the captain's RDP client resizes his virtual output
+between sessions, so it is a range rather than a fixed figure. How the two routes
+compare inside that range differs by scope and is measured per case in
+docs/verification/desktop-capture.md.
+
+Session.Closed is handled on top of that: if the compositor closes the session
+mid-capture, the capture is rebuilt once rather than reported as a failure. That
+close is only observable while the GLib default main context is iterated, so the
+frame pull pumps it by hand rather than blocking on GStreamer alone.
 
 Both scopes record through RecordArea: `screen` is the full virtual desktop
 bounds, not the primary monitor, so both routes answer the same arguments with
@@ -464,13 +466,16 @@ def _normalize_size(png: bytes, expected: tuple[int, int], notes: list[str]) -> 
 
 
 def _expected_size(
-    scope: str, region: dict[str, int] | None, bounds: dict[str, Any] | None
+    region: dict[str, int] | None, bounds: dict[str, Any] | None
 ) -> tuple[int, int] | None:
     """The logical pixel size a capture must come back at, or None if unknowable.
 
     Neither route's own sizing behaviour is trusted: Mutter sizes a screen-cast
     stream from the scale of the monitors an area overlaps, and the portal hands
     back its framebuffer, so whichever route wins is held to this instead.
+
+    A region carries its own size, so whether one was asked for is the whole
+    discriminator and the scope name adds nothing here.
     """
     if region is not None:
         return region["width"], region["height"]
@@ -972,7 +977,7 @@ def capture(
     if region is not None and bounds is not None:
         region = fit_region(region, bounds)
 
-    expected = _expected_size(scope, region, bounds)
+    expected = _expected_size(region, bounds)
     order = ("mutter", "portal") if route == "auto" else (route,)
     failures: list[str] = []
     causes: list[BaseException] = []

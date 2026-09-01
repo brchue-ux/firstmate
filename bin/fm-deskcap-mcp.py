@@ -38,6 +38,7 @@ import argparse
 import base64
 import importlib.util
 import json
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -77,9 +78,9 @@ def _tool_definitions() -> list[dict[str, Any]]:
                 "Capture a still PNG of the captain's live desktop and return it as an "
                 "image. scope='screen' captures the whole virtual display; scope='region' "
                 "captures the rectangle given by x, y, width and height. Per-window capture "
-                "is not available. A capture takes a fraction of a second: a small region is "
-                "the quickest, a whole display costs more, and both cost more the larger the "
-                "captain's display currently is, which changes between his remote sessions."
+                "is not available. A capture takes a fraction of a second, and takes longer "
+                "the larger the captain's display is, which changes between his remote "
+                "sessions."
             ),
             "inputSchema": {
                 "type": "object",
@@ -173,7 +174,12 @@ class McpServer:
     def __init__(self) -> None:
         self.protocol_version = DEFAULT_PROTOCOL_VERSION
 
-    def handle(self, message: dict[str, Any]) -> dict[str, Any] | None:
+    def handle(self, message: Any) -> dict[str, Any] | None:
+        # Total over any JSON value, not just an object, so no caller has to
+        # pre-screen what it read. A batch is a list of whatever the client
+        # sent, and one stray literal in it must not take the server down.
+        if not isinstance(message, dict):
+            return _rpc_error(None, -32600, "invalid request")
         method = message.get("method")
         message_id = message.get("id")
         is_notification = message_id is None
@@ -241,11 +247,11 @@ class McpServer:
                 continue
             if isinstance(message, list):
                 # Batches left the spec in 2025-06-18; older clients still send them.
+                if not message:
+                    _write(stdout, _rpc_error(None, -32600, "invalid request"))
+                    continue
                 for response in filter(None, (self.handle(item) for item in message)):
                     _write(stdout, response)
-                continue
-            if not isinstance(message, dict):
-                _write(stdout, _rpc_error(None, -32600, "invalid request"))
                 continue
             response = self.handle(message)
             if response is not None:
@@ -269,11 +275,28 @@ def _write(stream: Any, payload: dict[str, Any]) -> None:
     stream.flush()
 
 
+def _save_capture(directory: Path, name: str, png: bytes) -> Path:
+    """Write one capture into `directory`, refusing to follow a symlink.
+
+    These bytes are a picture of the captain's live desktop, which this tool
+    otherwise never puts on disk. A fresh private directory plus O_EXCL and
+    O_NOFOLLOW means nothing pre-created by another local user can redirect the
+    write somewhere they can read.
+    """
+    path = directory / name
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    with os.fdopen(os.open(path, flags, 0o600), "wb") as handle:
+        handle.write(png)
+    return path
+
+
 def _selftest() -> int:
     """Capture both scopes for real and report what came back."""
     print("# tools")
     for tool in _tool_definitions():
         print(f"- {tool['name']}")
+    outdir = Path(tempfile.mkdtemp(prefix="fm-deskcap-selftest-"))
+    print(f"\ncaptures are being written to {outdir}")
     failures = 0
     cases: list[tuple[str, dict[str, Any]]] = [
         ("screen", {"scope": "screen"}),
@@ -291,8 +314,7 @@ def _selftest() -> int:
                 continue
             print(content[0]["text"])
             png = base64.b64decode(content[1]["data"])
-            out = Path(tempfile.gettempdir()) / f"fm-deskcap-selftest-{label}-{route}.png"
-            out.write_bytes(png)
+            out = _save_capture(outdir, f"{label}-{route}.png", png)
             print(f"saved {out}")
     return 1 if failures else 0
 

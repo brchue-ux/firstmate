@@ -1317,6 +1317,36 @@ class NoOpResampleCostTest(unittest.TestCase):
             CAP.downscale_png(PNG_1X1, 0)
 
 
+class SelftestCaptureFileTest(unittest.TestCase):
+    """A selftest capture is a picture of the captain's live desktop."""
+
+    def setUp(self):
+        self.mcp = _load("fm_deskcap_mcp", "fm-deskcap-mcp.py")
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_a_capture_is_written_only_the_owner_can_read(self):
+        path = self.mcp._save_capture(self.dir, "shot.png", PNG_1X1)
+        self.assertEqual(path.read_bytes(), PNG_1X1)
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+
+    def test_a_pre_created_symlink_cannot_redirect_the_write(self):
+        target = self.dir / "somewhere-else.png"
+        (self.dir / "shot.png").symlink_to(target)
+        with self.assertRaises(OSError):
+            self.mcp._save_capture(self.dir, "shot.png", PNG_1X1)
+        self.assertFalse(target.exists(), "the capture was written through a symlink")
+
+    def test_an_existing_file_is_not_silently_overwritten(self):
+        (self.dir / "shot.png").write_bytes(b"someone else's bytes")
+        with self.assertRaises(OSError):
+            self.mcp._save_capture(self.dir, "shot.png", PNG_1X1)
+        self.assertEqual((self.dir / "shot.png").read_bytes(), b"someone else's bytes")
+
+
 class McpToolArgumentTest(unittest.TestCase):
     """A bad argument must reach the agent as a tool error, not an internal error."""
 
