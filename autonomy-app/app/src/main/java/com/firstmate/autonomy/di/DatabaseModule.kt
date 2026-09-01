@@ -41,7 +41,7 @@ object DatabaseModule {
             // Room expects would otherwise throw on open - the app would not
             // start at all. Falling back rebuilds an empty file instead, so a
             // wrong migration costs the old history rather than the app.
-            .fallbackToDestructiveMigration(dropAllTables = true)
+            .fallbackToDestructiveMigration()
             .build()
 
     @Provides

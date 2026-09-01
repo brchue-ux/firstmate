@@ -48,23 +48,34 @@ jobs:
       # that actually say what is wrong. Instead the build log is captured and,
       # on failure, the compiler diagnostics are re-printed at the very end
       # where they are the first thing anyone reads.
+      # pipefail is not optional here. Without it a step's exit code is tee's,
+      # so a failed Gradle build reports success, the failure-only diagnostics
+      # step is skipped, and the first sign of trouble is a later step finding
+      # no APK. That is exactly how a broken build got all the way to the
+      # verifier once already.
       - name: Unit tests
-        run: ./gradlew testDebugUnitTest 2>&1 | tee -a "$RUNNER_TEMP/build.log"
+        run: |
+          set -o pipefail
+          ./gradlew testDebugUnitTest 2>&1 | tee -a "$RUNNER_TEMP/build.log"
 
       # Gradle reports nothing about how many tests ran, so a green build says
       # only "nothing failed" - it cannot distinguish a passing suite from a
       # suite that silently lost files. It already had: an unanchored `data/`
       # ignore rule kept a whole test class out of the repository, and CI went
       # green without it. Printing the totals makes that visible.
+      # success() rather than always(): if the tests passed, results must exist,
+      # so an empty glob means the suite silently lost its files and the step
+      # fails. On a compile failure the step is simply skipped - the error is
+      # already reported above.
       - name: Test summary
-        if: always()
+        if: success()
         run: |
           python3 - <<'PY'
           import glob, xml.etree.ElementTree as ET
           files = glob.glob("app/build/test-results/**/*.xml", recursive=True)
           if not files:
-              print("No test result XML found - did the test task run?")
-              raise SystemExit(0)
+              raise SystemExit("No test result XML found, yet the test task "
+                               "reported success - the suite did not run.")
           total = failed = skipped = 0
           for f in files:
               r = ET.parse(f).getroot()
@@ -79,7 +90,9 @@ jobs:
           PY
 
       - name: Assemble debug APK
-        run: ./gradlew assembleDebug 2>&1 | tee -a "$RUNNER_TEMP/build.log"
+        run: |
+          set -o pipefail
+          ./gradlew assembleDebug 2>&1 | tee -a "$RUNNER_TEMP/build.log"
 
       - name: Compiler diagnostics
         if: failure()
