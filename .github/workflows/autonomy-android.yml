@@ -91,7 +91,17 @@ jobs:
             || echo "(no e:/w: lines found - failure was not a Kotlin compile error)"
           echo "========================================================="
 
-      # Signed with the runner's debug keystore, so it sideloads as-is.
+      # Nothing leaves CI unverified. The expected signing key is derived from
+      # the committed keystore rather than hardcoded, so the two cannot drift.
+      - name: Verify the APK
+        run: |
+          set -euo pipefail
+          fingerprint=$(keytool -list -v -keystore app/debug.keystore -storepass android \
+            | grep -m1 'SHA256:' | sed 's/.*SHA256: //' | tr -d ': ')
+          python3 tools/verify-apk.py \
+            app/build/outputs/apk/debug/app-debug.apk "$fingerprint"
+
+      # Signed with the committed debug key, so it upgrades in place.
       # Download it from the run's Summary page (arrives zipped).
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4

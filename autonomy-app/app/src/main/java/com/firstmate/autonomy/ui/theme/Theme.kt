@@ -1,6 +1,5 @@
 package com.firstmate.autonomy.ui.theme
 
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
@@ -13,9 +12,16 @@ import androidx.compose.ui.graphics.Color
 import com.firstmate.autonomy.domain.model.DomainStatus
 
 /**
- * The obsidian scheme. Dark is the designed default; the light scheme exists so
- * the app is not hostile when the system is set to light, and is held to the
- * same AA bar.
+ * The obsidian scheme.
+ *
+ * The app commits to it rather than following the system light/dark setting.
+ * The brief specifies obsidian as the product's identity, so a phone in light
+ * mode must not silently get a different-looking app - which is exactly what
+ * happened: the design was invisible to anyone whose device was set to light.
+ *
+ * The light scheme is kept and held to the same AA bar. It is what the
+ * side-by-side previews render, and it is the ready-made other half if a
+ * follow-the-system setting is ever added.
  *
  * Dynamic (wallpaper) colour is deliberately NOT used: the brief specifies an
  * exact brand palette, and dynamic colour would silently replace it with hues
@@ -135,7 +141,7 @@ val LocalAutonomyAccents = staticCompositionLocalOf { DarkAccents }
 
 @Composable
 fun AutonomyTheme(
-    darkTheme: Boolean = isSystemInDarkTheme(),
+    darkTheme: Boolean = true,
     content: @Composable () -> Unit,
 ) {
     val colorScheme = if (darkTheme) ObsidianDark else ObsidianLight
