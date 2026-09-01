@@ -1174,6 +1174,24 @@ class CaptureOutputSizeTest(unittest.TestCase):
         self._use("mutter", self._png(40, 20))
         self.assertEqual(CAP.capture(scope="screen").notes, [])
 
+    def test_a_resample_that_failed_does_not_leave_its_claim_on_the_fallback(self):
+        # The mutter frame is the right shape but undecodable, so the resample
+        # raises and the portal serves the call untouched. The reply must not
+        # tell the agent an image it never resampled was resampled.
+        header_only = self._png(80, 40)[:40] + b"\x00" * 64
+        self.assertEqual(CAP.png_dimensions(header_only), (80, 40))
+        CAP._mutter_attempt = lambda *a, **k: header_only
+        CAP._portal_capture = lambda *a, **k: (self._png(40, 20), [])
+
+        result = CAP.capture(scope="screen")
+
+        self.assertEqual(result.route, "portal")
+        self.assertEqual((result.width, result.height), (40, 20))
+        self.assertFalse(
+            any("resampled" in note for note in result.notes),
+            f"a resample that never happened was reported: {result.notes}",
+        )
+
     def test_an_image_of_the_wrong_shape_is_refused_rather_than_stretched(self):
         # A screenshot covering one monitor out of several, not the desktop at
         # another size: stretching it would return distorted content.

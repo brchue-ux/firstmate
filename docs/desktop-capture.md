@@ -76,6 +76,9 @@ Both routes are implemented from the start rather than the fallback being retrof
 - A region must fit inside the desktop; one that does not is refused rather than clamped.
 - A blanked or idle display captures as a genuinely black image on both routes.
   That is the screen's real content, not a failed capture, and neither route can wake the display.
-- The server is stateless between calls: each capture builds and tears down its own screen-cast session, which costs roughly 100 ms and in exchange can never serve a stale frame or outlive a virtual monitor that went away.
+- The server is stateless between calls: each capture builds and tears down its own screen-cast session, which costs a fraction of a second and in exchange can never serve a stale frame or outlive a virtual monitor that went away.
+- Latency is a range, not a fixed figure, because it tracks how many pixels are being moved.
+  A small region is the quickest, a whole display costs more, and both cost more on a larger display.
+  The captain's virtual output is sized by whatever his RDP client asks for, so it changes between his sessions and the figures move with it; the measured table in [verification/desktop-capture.md](verification/desktop-capture.md) records the display size it was taken on.
 
 Current measured behavior is recorded in [verification/desktop-capture.md](verification/desktop-capture.md), reproducible with `bin/fm-deskcap-mcp.py --selftest`.

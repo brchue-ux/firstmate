@@ -39,7 +39,10 @@ deliberate choice over a cached warm pipeline: the captain's session is a
 headless GNOME Remote Login (RDP) one whose virtual monitor is torn down when he
 disconnects, and Mutter reuses PipeWire node ids across sessions. A per-call
 session cannot serve a stale frame, cannot outlive the monitor it recorded, and
-still lands around 100 ms. Session.Closed is handled on top of that: if the
+still returns in a fraction of a second. That cost tracks how many pixels are
+being moved: a whole display costs more than a small region, and more again as
+the captain's RDP client resizes his virtual output between sessions, so it is a
+range rather than a fixed figure. Session.Closed is handled on top of that: if the
 compositor closes the session mid-capture, the capture is rebuilt once rather
 than reported as a failure. That close is only observable while the GLib default
 main context is iterated, so the frame pull pumps it by hand rather than blocking
@@ -76,8 +79,9 @@ Rotated outputs are NOT supported. Mutter swaps a logical monitor's axes when th
 transform is rotated and this engine does not, so the bounds it derives for a
 rotated output have their axes the wrong way round.
 
-One capture gets one end-to-end deadline, starting at the region check that
-reads the display layout. The rebuild after a close and the fallback to the
+One capture gets one end-to-end deadline. It starts when the capture is
+requested, before the display layout is read, so the layout read spends the same
+budget the routes do. The rebuild after a close and the fallback to the
 portal both spend what is left of it rather than each starting a fresh budget,
 and every D-Bus call is capped by the remainder, so a wedged compositor cannot
 stack timeouts against a caller serving requests in sequence.
@@ -451,11 +455,12 @@ def _normalize_size(png: bytes, expected: tuple[int, int], notes: list[str]) -> 
     if actual == expected:
         return png
     _uniform_rescale(actual, expected, "capture", "size that was asked for")
+    resized = resize_png(png, *expected)
     notes.append(
         f"the capture came back {actual[0]}x{actual[1]} for a {expected[0]}x{expected[1]} "
         "request, so it was resampled into the logical pixel space both routes answer in"
     )
-    return resize_png(png, *expected)
+    return resized
 
 
 def _expected_size(

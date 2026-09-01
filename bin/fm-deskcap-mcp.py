@@ -77,7 +77,9 @@ def _tool_definitions() -> list[dict[str, Any]]:
                 "Capture a still PNG of the captain's live desktop and return it as an "
                 "image. scope='screen' captures the whole virtual display; scope='region' "
                 "captures the rectangle given by x, y, width and height. Per-window capture "
-                "is not available. Typical latency is about 100 ms."
+                "is not available. A capture takes a fraction of a second: a small region is "
+                "the quickest, a whole display costs more, and both cost more the larger the "
+                "captain's display currently is, which changes between his remote sessions."
             ),
             "inputSchema": {
                 "type": "object",
