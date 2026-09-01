@@ -127,13 +127,23 @@ class RegionInImagePixelsTest(unittest.TestCase):
             {"x": 200, "y": 100, "width": 600, "height": 400},
         )
 
-    def test_each_axis_uses_its_own_factor(self):
-        self.assertEqual(
+    def test_a_screenshot_of_a_different_rectangle_is_refused_not_stretched(self):
+        # A screenshot of one monitor out of several is not the desktop at
+        # another size, and placing a region on it would be silently wrong.
+        with self.assertRaises(CAP.CaptureError) as ctx:
             CAP.region_in_image_pixels(
-                {"x": 10, "y": 10, "width": 100, "height": 100}, self.BOUNDS, 3840, 1080
-            ),
-            {"x": 20, "y": 10, "width": 200, "height": 100},
+                {"x": 10, "y": 10, "width": 100, "height": 100},
+                {"width": 3000, "height": 1200},
+                1920,
+                1080,
+            )
+        self.assertIn("uniform", str(ctx.exception))
+
+    def test_a_slightly_uneven_factor_from_rounded_bounds_is_still_accepted(self):
+        placed = CAP.region_in_image_pixels(
+            {"x": 0, "y": 0, "width": 100, "height": 100}, {"width": 1707, "height": 960}, 2560, 1440
         )
+        self.assertEqual((placed["width"], placed["height"]), (150, 150))
 
     def test_a_rectangle_flush_with_the_edge_stays_inside_the_screenshot(self):
         placed = CAP.region_in_image_pixels(
@@ -600,11 +610,13 @@ class ProbeWithoutBindingsTest(unittest.TestCase):
 
 class RouteSelectionTest(unittest.TestCase):
     def setUp(self):
-        self.saved = (CAP._mutter_attempt, CAP._portal_capture, CAP.display_state)
+        self.saved = (CAP._mutter_attempt, CAP._portal_capture, CAP.display_state, CAP.resize_png)
         CAP.display_state = lambda *_a, **_k: {"width": 1920, "height": 1009, "monitors": [], "primary": {}}
+        # Route selection, not output sizing; CaptureOutputSizeTest owns that.
+        CAP.resize_png = lambda png, _width, _height: png
 
     def tearDown(self):
-        CAP._mutter_attempt, CAP._portal_capture, CAP.display_state = self.saved
+        CAP._mutter_attempt, CAP._portal_capture, CAP.display_state, CAP.resize_png = self.saved
 
     def test_auto_prefers_the_compositor_route(self):
         CAP._mutter_attempt = lambda *a: PNG_1X1
@@ -946,12 +958,11 @@ class PortalRouteReconciliationTest(unittest.TestCase):
         CAP._session_bus = lambda: self.bus
         return path
 
-    def test_a_scaled_screen_capture_is_resampled_to_the_desktop_size(self):
+    def test_a_scaled_screen_capture_reports_that_it_needs_resampling(self):
+        # Bringing it to the desktop size is capture()'s job, not this route's;
+        # CaptureOutputSizeTest owns that. Here the route must say it happened.
         path = self._serve(self._png(400, 200))
-        png, notes = CAP._portal_capture("screen", None, True, 5.0, self.DESKTOP)
-        self.assertEqual(
-            CAP.png_dimensions(png), (200, 100), "the portal's framebuffer size leaked through"
-        )
+        _png, notes = CAP._portal_capture("screen", None, True, 5.0, self.DESKTOP)
         self.assertTrue(any("resampled" in note for note in notes), notes)
         self.assertFalse(path.exists(), "the portal's output file was left on disk")
 
@@ -962,12 +973,19 @@ class PortalRouteReconciliationTest(unittest.TestCase):
         self.assertEqual(png, original)
         self.assertEqual(notes, [])
 
-    def test_a_scaled_region_capture_returns_the_requested_logical_size(self):
+    def test_a_scaled_region_capture_crops_the_area_the_caller_asked_for(self):
         self._serve(self._png(400, 200, {"x": 200, "y": 100, "width": 100, "height": 50}))
         png, _notes = CAP._portal_capture(
             "region", {"x": 100, "y": 50, "width": 50, "height": 25}, True, 5.0, self.DESKTOP
         )
-        self.assertEqual(CAP.png_dimensions(png), (50, 25))
+        pixbuf = CAP._decode_png(png, "test")
+        pixels, stride, channels = pixbuf.get_pixels(), pixbuf.get_rowstride(), pixbuf.get_n_channels()
+        corners = {
+            tuple(pixels[row * stride + col * channels : row * stride + col * channels + 3])
+            for row in (0, pixbuf.get_height() - 1)
+            for col in (0, pixbuf.get_width() - 1)
+        }
+        self.assertEqual(corners, {(255, 0, 0)}, "the crop did not land on the marked area")
 
     def test_the_response_subscription_exists_before_the_screenshot_call(self):
         self._serve(self._png(200, 100))
@@ -975,10 +993,144 @@ class PortalRouteReconciliationTest(unittest.TestCase):
         self.assertEqual(self.bus.calls, ["Screenshot"])
         self.assertGreaterEqual(self.bus.subscriptions, 1)
 
-    def test_a_capture_without_desktop_bounds_is_refused_rather_than_guessed(self):
+    def test_a_screen_capture_without_the_layout_still_returns_with_a_note(self):
+        original = self._png(400, 200)
+        self._serve(original)
+        png, notes = CAP._portal_capture("screen", None, True, 5.0, None)
+        self.assertEqual(png, original, "the fallback must not be gated on the display layout")
+        self.assertTrue(any("display layout is unavailable" in note for note in notes), notes)
+
+    def test_a_region_without_the_layout_is_refused_rather_than_guessed(self):
         self._serve(self._png(400, 200))
         with self.assertRaises(CAP.CaptureError):
-            CAP._portal_capture("screen", None, True, 5.0, None)
+            CAP._portal_capture("region", {"x": 0, "y": 0, "width": 10, "height": 10}, True, 5.0, None)
+
+
+class CaptureOutputSizeTest(unittest.TestCase):
+    """One call answers at one size, whichever route produced the pixels."""
+
+    DESKTOP = {"width": 40, "height": 20, "monitors": [], "primary": {}}
+
+    def setUp(self):
+        if CAP._GI_IMPORT_ERROR is not None:
+            self.skipTest("GObject introspection bindings unavailable")
+        self.saved = (CAP._mutter_attempt, CAP._portal_capture, CAP.display_state)
+        CAP.display_state = lambda *_a, **_k: self.DESKTOP
+
+    def tearDown(self):
+        CAP._mutter_attempt, CAP._portal_capture, CAP.display_state = self.saved
+
+    def _png(self, width, height):
+        pixbuf = CAP.GdkPixbuf.Pixbuf.new(CAP.GdkPixbuf.Colorspace.RGB, False, 8, width, height)
+        pixbuf.fill(0x336699FF)
+        ok, data = pixbuf.save_to_bufferv("png", [], [])
+        self.assertTrue(ok)
+        return bytes(data)
+
+    def _use(self, route, png):
+        oversized = lambda *a, **k: png  # noqa: E731 - one-line route stub
+        if route == "mutter":
+            CAP._mutter_attempt = oversized
+            CAP._portal_capture = lambda *a, **k: (_ for _ in ()).throw(AssertionError("unused"))
+        else:
+            CAP._mutter_attempt = lambda *a, **k: (_ for _ in ()).throw(CAP.CaptureError("no screen cast"))
+            CAP._portal_capture = lambda *a, **k: (png, [])
+
+    def test_an_oversized_frame_is_brought_to_the_desktop_size_on_either_route(self):
+        for route in ("mutter", "portal"):
+            with self.subTest(route=route):
+                self._use(route, self._png(80, 40))
+                result = CAP.capture(scope="screen")
+                self.assertEqual(
+                    (result.width, result.height),
+                    (40, 20),
+                    f"the {route} route's own frame size leaked through",
+                )
+
+    def test_an_oversized_region_is_brought_to_the_requested_size_on_either_route(self):
+        for route in ("mutter", "portal"):
+            with self.subTest(route=route):
+                self._use(route, self._png(20, 10))
+                result = CAP.capture(scope="region", region={"x": 0, "y": 0, "width": 10, "height": 5})
+                self.assertEqual((result.width, result.height), (10, 5))
+
+    def test_a_frame_already_at_the_right_size_is_returned_byte_for_byte(self):
+        original = self._png(40, 20)
+        self._use("mutter", original)
+        self.assertIs(CAP.capture(scope="screen").png, original, "an unscaled capture was re-encoded")
+
+    def test_an_undersized_frame_is_also_brought_up_to_the_expected_size(self):
+        self._use("mutter", self._png(20, 10))
+        result = CAP.capture(scope="screen")
+        self.assertEqual((result.width, result.height), (40, 20))
+
+
+class LayoutUnavailableTest(unittest.TestCase):
+    """The fallback route must not be gated on a second Mutter interface."""
+
+    def setUp(self):
+        self.saved = (CAP._mutter_attempt, CAP._portal_capture, CAP.display_state)
+
+        def refuse(*_a, **_k):
+            raise CAP.CaptureError("cannot read the display layout: Timeout was reached")
+
+        CAP.display_state = refuse
+        CAP._mutter_attempt = lambda *a, **k: (_ for _ in ()).throw(CAP.CaptureError("no screen cast"))
+
+    def tearDown(self):
+        CAP._mutter_attempt, CAP._portal_capture, CAP.display_state = self.saved
+
+    def test_a_pinned_portal_screen_capture_still_succeeds(self):
+        CAP._portal_capture = lambda *a, **k: (PNG_1X1, [])
+        result = CAP.capture(scope="screen", route="portal")
+        self.assertEqual(result.route, "portal")
+        self.assertTrue(
+            any("display layout could not be read" in note for note in result.notes), result.notes
+        )
+
+    def test_the_route_is_told_the_layout_is_unavailable(self):
+        seen = {}
+
+        def portal(scope, region, cursor, timeout, bounds=None):
+            seen["bounds"] = bounds
+            return PNG_1X1, []
+
+        CAP._portal_capture = portal
+        CAP.capture(scope="screen", route="portal")
+        self.assertIsNone(seen["bounds"])
+
+    def test_a_region_still_fails_because_it_has_nothing_to_validate_against(self):
+        CAP._portal_capture = lambda *a, **k: (PNG_1X1, [])
+        with self.assertRaises(CAP.CaptureError) as ctx:
+            CAP.capture(scope="region", region={"x": 0, "y": 0, "width": 10, "height": 10}, route="portal")
+        self.assertIn("display layout", str(ctx.exception))
+
+
+class NoOpResampleCostTest(unittest.TestCase):
+    """An image already at the target size must not be decoded at all."""
+
+    def setUp(self):
+        self.saved = CAP._decode_png
+
+        def forbidden(*_a, **_k):
+            raise AssertionError("a no-op resample decoded the image anyway")
+
+        CAP._decode_png = forbidden
+
+    def tearDown(self):
+        CAP._decode_png = self.saved
+
+    def test_a_resize_to_the_current_size_returns_the_bytes_untouched(self):
+        self.assertIs(CAP.resize_png(PNG_1X1, 1, 1), PNG_1X1)
+
+    def test_a_max_width_above_the_capture_returns_the_bytes_untouched(self):
+        self.assertIs(CAP.downscale_png(PNG_1X1, 64), PNG_1X1)
+
+    def test_a_bad_target_size_is_still_refused_without_decoding(self):
+        with self.assertRaises(CAP.CaptureError):
+            CAP.resize_png(PNG_1X1, 0, 10)
+        with self.assertRaises(CAP.CaptureError):
+            CAP.downscale_png(PNG_1X1, 0)
 
 
 class McpToolArgumentTest(unittest.TestCase):

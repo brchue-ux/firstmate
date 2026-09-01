@@ -61,10 +61,13 @@ Both routes are implemented from the start rather than the fallback being retrof
 - No per-window scope.
 - Coordinates and returned images are in logical pixels, the space the compositor's own screen-cast API works in.
   Both routes answer the same call with the same area at the same pixel dimensions, so a coordinate read off one route's image maps onto the other's.
-  Under non-unity display scaling that means a capture is not the monitor's native resolution: the portal hands back the larger physical framebuffer, and the server resamples it down to the logical desktop rather than returning whichever size the winning route happened to produce.
-  The reply's text says so on any call where that resampling happened.
-  On the captain's single output at scale 1.0 the two spaces are identical and nothing is resampled.
+  That is enforced after the capture rather than assumed of either route: whichever route served the call, the result is resampled to the size that was asked for, since under non-unity scaling both the compositor and the portal can return a larger image.
+  The reply's text says so on any call where resampling happened.
+  On the captain's single output at scale 1.0 the sizes already match, so nothing is resampled and nothing is even decoded to check.
   This is checked by unit tests over the conversions only, because no scaled display has been available to capture from; see [verification/desktop-capture.md](verification/desktop-capture.md).
+- A region call is refused rather than answered with the wrong content when the screenshot the portal returns does not cover the same rectangle as the desktop, which is what a screenshot of one monitor out of several would look like.
+- Reading the display layout is not required for a whole-screen capture on the `portal` route.
+  If that layout cannot be read, the screenshot still comes back, with a note saying its dimensions were not reconciled to logical pixels; only a region call fails, because there is nothing to validate the rectangle against.
 - Rotated outputs are not supported.
   The desktop bounds this server derives do not swap axes for a rotated monitor the way the compositor does, so on a rotated display both scopes would work from the wrong geometry.
   No rotated display has been tested; treat a rotated output as out of scope rather than as expected to work.

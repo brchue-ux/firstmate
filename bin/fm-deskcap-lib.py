@@ -51,15 +51,26 @@ the same content on a multi-monitor layout. RecordArea works in logical pixels,
 which under non-unity scaling is not a monitor's native resolution.
 
 Logical pixels are this engine's one coordinate space, because that is what
-RecordArea takes and what a region is validated against. The portal returns the
-compositor's own framebuffer instead, which under non-unity scaling is larger, so
-the portal route reconciles both scopes back into logical pixels: a region is
-mapped into the screenshot's own pixel space before cropping and the crop is then
-resampled to the requested size, and a screen capture is resampled to the desktop
-bounds. The factor comes from the screenshot's real dimensions rather than from a
-configured scale value. Without that a scaled display would answer the same call
-with a different area or a different pixel size depending on which route won, and
-coordinates read off one route's image would not map onto the other's.
+RecordArea takes and what a region is validated against. Neither route is trusted
+to produce that size on its own: Mutter sizes a screen-cast stream from the scale
+of the monitors the recorded area overlaps, and the portal hands back its raw
+framebuffer, so under non-unity scaling either can come back larger. `capture()`
+therefore resamples whatever the winning route returned to the size the call
+asked for - the region's width and height, or the desktop bounds - at one shared
+boundary rather than per route. That is a PNG header comparison and no decode
+when the size already matches, which is every capture on an unscaled display.
+
+Area is reconciled separately from size, and only the portal needs it: its
+screenshot is cropped in its own pixel space, using a factor derived from the
+returned image's real dimensions against the desktop bounds rather than from a
+configured scale value. A factor that is not uniform on both axes means the
+screenshot covers a different rectangle rather than the same one at another size,
+and is refused instead of stretched.
+
+Reading the display layout is not a precondition for the fallback route. If
+DisplayConfig cannot be reached, a `screen` capture still returns the portal's
+screenshot with a note saying its dimensions were not reconciled; only a region,
+which has nothing to validate against, fails.
 
 Rotated outputs are NOT supported. Mutter swaps a logical monitor's axes when the
 transform is rotated and this engine does not, so the bounds it derives for a
@@ -119,6 +130,10 @@ DBUS_CALL_TIMEOUT_MS = 10000
 # spent, so a late attempt fails fast instead of not being tried at all.
 MIN_ATTEMPT_SECONDS = 0.5
 MIN_CALL_TIMEOUT_MS = 100
+# How far the two axes of a derived rescale factor may drift apart before the
+# screenshot is treated as covering a different rectangle rather than the same
+# one at another size. Rounded desktop bounds move it by well under a percent.
+SCALE_TOLERANCE = 0.01
 
 _GI_IMPORT_ERROR: str | None = None
 try:
@@ -390,6 +405,22 @@ def normalize_region(region: Any) -> dict[str, int]:
     return {"x": x, "y": y, "width": width, "height": height}
 
 
+def _expected_size(
+    scope: str, region: dict[str, int] | None, bounds: dict[str, Any] | None
+) -> tuple[int, int] | None:
+    """The logical pixel size a capture must come back at, or None if unknowable.
+
+    Neither route's own sizing behaviour is trusted: Mutter sizes a screen-cast
+    stream from the scale of the monitors an area overlaps, and the portal hands
+    back its framebuffer, so whichever route wins is held to this instead.
+    """
+    if region is not None:
+        return region["width"], region["height"]
+    if bounds is None:
+        return None
+    return _desktop_size(bounds)
+
+
 def _desktop_size(bounds: dict[str, Any] | None) -> tuple[int, int]:
     """The virtual desktop's logical size, refused rather than guessed if unknown."""
     width = int(bounds.get("width") or 0) if bounds else 0
@@ -415,12 +446,22 @@ def region_in_image_pixels(
     The factor is derived from the image the portal actually returned against the
     desktop bounds, not from a configured scale value, so it stays correct
     whatever the portal chose to do.
+
+    A genuine scale factor is the same on both axes. When it is not, the
+    screenshot is not the desktop at another size - it covers a different
+    rectangle, as a screenshot of one monitor out of several would - and placing
+    the region on it would return confidently wrong content, so it is refused.
     """
     desktop_width, desktop_height = _desktop_size(bounds)
     if (image_width, image_height) == (desktop_width, desktop_height):
         return region
     scale_x = image_width / desktop_width
     scale_y = image_height / desktop_height
+    if abs(scale_x - scale_y) > max(scale_x, scale_y) * SCALE_TOLERANCE:
+        raise CaptureError(
+            f"the {image_width}x{image_height} screenshot is not a uniform rescale of the "
+            f"{desktop_width}x{desktop_height} desktop, so a region cannot be placed on it"
+        )
     x = max(0, min(image_width - 1, round(region["x"] * scale_x)))
     y = max(0, min(image_height - 1, round(region["y"] * scale_y)))
     return {
@@ -711,21 +752,23 @@ def _portal_capture(
 
     png = _take_portal_file(uri, notes)
     image_width, image_height = png_dimensions(png)
-    desktop_width, desktop_height = _desktop_size(bounds)
-    rescaled = (image_width, image_height) != (desktop_width, desktop_height)
 
     if scope == "region":
         assert region is not None
-        placed = region_in_image_pixels(region, bounds, image_width, image_height)
-        png = resize_png(crop_png(png, placed), region["width"], region["height"])
-    else:
-        png = resize_png(png, desktop_width, desktop_height)
+        png = crop_png(png, region_in_image_pixels(region, bounds, image_width, image_height))
+    elif bounds is None:
+        # Screen scope is the one case that can still answer without the layout,
+        # and the fallback route must not be gated on a second Mutter interface.
+        notes.append(
+            f"the display layout is unavailable, so this {image_width}x{image_height} screenshot "
+            "was returned at whatever size the portal produced rather than in logical pixels"
+        )
 
-    if rescaled:
+    if bounds is not None and (image_width, image_height) != _desktop_size(bounds):
         notes.append(
             f"the portal returned a {image_width}x{image_height} screenshot of a "
-            f"{desktop_width}x{desktop_height} desktop, so it was resampled into the "
-            "logical pixel space the compositor route uses"
+            f"{bounds['width']}x{bounds['height']} desktop, so it was resampled into the "
+            "logical pixel space both routes answer in"
         )
     return png, notes
 
@@ -791,26 +834,28 @@ def downscale_png(png: bytes, max_width: int) -> bytes:
     """
     if max_width <= 0:
         raise CaptureError(f"max_width must be positive, got {max_width}")
-    pixbuf = _decode_png(png, "downscaling")
-    if pixbuf.get_width() <= max_width:
+    width, height = png_dimensions(png)
+    if width <= max_width:
         return png
-    height = max(1, round(pixbuf.get_height() * max_width / pixbuf.get_width()))
-    return _encode_png(pixbuf.scale_simple(max_width, height, GdkPixbuf.InterpType.BILINEAR), "downscaling")
+    scaled_height = max(1, round(height * max_width / width))
+    pixbuf = _decode_png(png, "downscaling")
+    return _encode_png(
+        pixbuf.scale_simple(max_width, scaled_height, GdkPixbuf.InterpType.BILINEAR), "downscaling"
+    )
 
 
 def resize_png(png: bytes, width: int, height: int) -> bytes:
     """Resample PNG bytes to exactly `width` x `height`, in memory.
 
-    This is what puts the portal route's output in the same pixel space as the
-    compositor route's. The portal hands back the raw framebuffer, so without it
-    the same call would answer with different dimensions depending on which route
-    served it, and coordinates read off one image would not map onto the other.
+    This is what holds every capture to one pixel space whatever route produced
+    it. The size check is the PNG header parse rather than a decode, so an image
+    already at the target size costs nothing and is returned byte for byte.
     """
     if width <= 0 or height <= 0:
         raise CaptureError(f"a resize needs positive dimensions, got {width}x{height}")
-    pixbuf = _decode_png(png, "rescaling")
-    if (pixbuf.get_width(), pixbuf.get_height()) == (width, height):
+    if png_dimensions(png) == (width, height):
         return png
+    pixbuf = _decode_png(png, "rescaling")
     return _encode_png(pixbuf.scale_simple(width, height, GdkPixbuf.InterpType.BILINEAR), "rescaling")
 
 
@@ -866,10 +911,21 @@ def capture(
     deadline = started + timeout
 
     region = normalize_region(region) if scope == "region" else None
-    bounds = display_state(_call_timeout_ms(deadline))
-    if region is not None:
+    bounds: dict[str, Any] | None
+    try:
+        bounds = display_state(_call_timeout_ms(deadline))
+    except (CaptureError, *_GLIB_ERRORS) as err:
+        # A region has nothing to validate against without the layout, but a
+        # screen capture does not need it, and the fallback route must stay
+        # usable when the compositor's other interfaces are not.
+        if region is not None:
+            raise
+        bounds = None
+        notes.append(f"the display layout could not be read: {_error_text(err)}")
+    if region is not None and bounds is not None:
         region = fit_region(region, bounds)
 
+    expected = _expected_size(scope, region, bounds)
     order = ("mutter", "portal") if route == "auto" else (route,)
     failures: list[str] = []
     causes: list[BaseException] = []
@@ -882,6 +938,8 @@ def capture(
             else:
                 png, portal_notes = _portal_capture(scope, region, cursor, budget, bounds)
                 notes.extend(portal_notes)
+            if expected is not None:
+                png = resize_png(png, *expected)
             elapsed = (time.monotonic() - started) * 1000
             result = Capture(png, chosen, scope, elapsed, notes)
             if failures:
