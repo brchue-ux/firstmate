@@ -1,9 +1,11 @@
 package com.firstmate.autonomy.di
 
 import com.firstmate.autonomy.data.repository.DecisionRepositoryImpl
+import com.firstmate.autonomy.data.preferences.SettingsRepositoryImpl
 import com.firstmate.autonomy.data.repository.GoalRepositoryImpl
 import com.firstmate.autonomy.domain.repository.DecisionRepository
 import com.firstmate.autonomy.domain.repository.GoalRepository
+import com.firstmate.autonomy.domain.repository.SettingsRepository
 import dagger.Binds
 import dagger.Module
 import dagger.hilt.InstallIn
@@ -29,4 +31,8 @@ abstract class RepositoryModule {
     @Binds
     @Singleton
     abstract fun bindDecisionRepository(impl: DecisionRepositoryImpl): DecisionRepository
+
+    @Binds
+    @Singleton
+    abstract fun bindSettingsRepository(impl: SettingsRepositoryImpl): SettingsRepository
 }

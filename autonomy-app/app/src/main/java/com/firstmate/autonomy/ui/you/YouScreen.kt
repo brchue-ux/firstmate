@@ -20,7 +20,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.firstmate.autonomy.data.preferences.SettingsRepository
+import com.firstmate.autonomy.domain.repository.SettingsRepository
 import com.firstmate.autonomy.domain.repository.GoalRepository
 import com.firstmate.autonomy.ui.components.AutonomyCard
 import com.firstmate.autonomy.ui.components.SectionHeader

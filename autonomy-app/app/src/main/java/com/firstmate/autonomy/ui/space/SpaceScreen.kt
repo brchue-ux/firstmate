@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -31,6 +32,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.input.pointer.pointerInput
@@ -246,6 +248,11 @@ private fun SpaceChrome(
             },
             style = MaterialTheme.typography.labelLarge,
             color = MaterialTheme.colorScheme.primary,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            // Weighted so a long goal name shortens itself instead of
+            // shouldering the Out button off the screen.
+            modifier = Modifier.weight(1f, fill = false),
         )
         if (depth != Depth.SPACE) {
             TextButton(onClick = onUp) { Text("Out") }
@@ -266,8 +273,13 @@ private fun ParticularSheet(
 ) {
     val condition = particular.condition(today)
     Surface(
+        // Capped rather than left to wrap: unbounded, the column grows past
+        // the top of the screen and the first lines are simply cut off. Half
+        // the height also keeps the planet itself visible above it, which is
+        // the point of coming in this close.
         modifier = modifier
             .fillMaxWidth()
+            .heightIn(max = 340.dp)
             .padding(12.dp),
         shape = MaterialTheme.shapes.large,
         color = MaterialTheme.colorScheme.surface,

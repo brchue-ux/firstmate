@@ -16,6 +16,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.navigation.NavDestination.Companion.hierarchy
 import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.NavHostController
@@ -79,7 +80,18 @@ fun AutonomyApp(
                                     contentDescription = null,
                                 )
                             },
-                            label = { Text(destination.label) },
+                            // Five tabs on a phone leave roughly 70dp each.
+                            // The default label style overruns that and gets
+                            // clipped, so the label is stepped down a size and
+                            // pinned to one line.
+                            label = {
+                                Text(
+                                    text = destination.label,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            },
                             colors = NavigationBarItemDefaults.colors(
                                 selectedIconColor = MaterialTheme.colorScheme.onPrimaryContainer,
                                 selectedTextColor = MaterialTheme.colorScheme.primary,

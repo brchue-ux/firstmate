@@ -7,9 +7,11 @@ import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.preferencesDataStore
+import com.firstmate.autonomy.domain.repository.SettingsRepository
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import java.io.IOException
 import javax.inject.Inject
@@ -31,20 +33,32 @@ private val Context.settingsDataStore: DataStore<Preferences> by preferencesData
  * settings file should never stop the app from opening.
  */
 @Singleton
-class SettingsRepository @Inject constructor(
+class SettingsRepositoryImpl @Inject constructor(
     @ApplicationContext private val context: Context,
-) {
+) : SettingsRepository {
     private object Keys {
         val CELEBRATIONS_ENABLED = booleanPreferencesKey("celebrations_enabled")
+        val STARTER_GOALS_SEEDED = booleanPreferencesKey("starter_goals_seeded")
     }
 
-    val celebrationsEnabled: Flow<Boolean> = context.settingsDataStore.data
+    override val celebrationsEnabled: Flow<Boolean> = context.settingsDataStore.data
         .catch { throwable ->
             if (throwable is IOException) emit(emptyPreferences()) else throw throwable
         }
         .map { it[Keys.CELEBRATIONS_ENABLED] ?: true }
 
-    suspend fun setCelebrationsEnabled(enabled: Boolean) {
+    override suspend fun setCelebrationsEnabled(enabled: Boolean) {
         context.settingsDataStore.edit { it[Keys.CELEBRATIONS_ENABLED] = enabled }
+    }
+
+    override suspend fun starterGoalsSeeded(): Boolean =
+        context.settingsDataStore.data
+            .catch { throwable ->
+                if (throwable is IOException) emit(emptyPreferences()) else throw throwable
+            }
+            .first()[Keys.STARTER_GOALS_SEEDED] ?: false
+
+    override suspend fun markStarterGoalsSeeded() {
+        context.settingsDataStore.edit { it[Keys.STARTER_GOALS_SEEDED] = true }
     }
 }

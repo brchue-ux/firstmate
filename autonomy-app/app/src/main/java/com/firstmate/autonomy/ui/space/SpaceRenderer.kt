@@ -405,7 +405,10 @@ class SpaceRenderer {
         addPaint.shader = null
 
         val condition = particular.condition(today)
-        val bounds = width to height
+        // Captions are held to the upper half: the readout sheet occupies the
+        // bottom of the screen at this depth, and a moon name drawn behind it
+        // is worse than one nudged inward.
+        val bounds = width to (height * 0.52f)
         drawMoonRing(canvas, particular, cx, cy, radius, today, behind = true, time = time, wide = false)
         drawMoons(canvas, particular, cx, cy, radius, sunX, sunY, today,
             wide = false, behind = true, time = time, labelBounds = bounds)
