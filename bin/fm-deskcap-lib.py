@@ -130,10 +130,12 @@ DBUS_CALL_TIMEOUT_MS = 10000
 # spent, so a late attempt fails fast instead of not being tried at all.
 MIN_ATTEMPT_SECONDS = 0.5
 MIN_CALL_TIMEOUT_MS = 100
-# How far the two axes of a derived rescale factor may drift apart before the
-# screenshot is treated as covering a different rectangle rather than the same
-# one at another size. Rounded desktop bounds move it by well under a percent.
-SCALE_TOLERANCE = 0.01
+# How far an image may sit from what one rescale factor predicts for it before
+# it is treated as covering a different rectangle rather than the same one at
+# another size. A compositor rounds each axis of a stream independently and the
+# bounds were rounded too, which is worth about a pixel; a screenshot of one
+# monitor out of several is out by hundreds.
+ROUNDING_SLACK_PX = 1.5
 
 _GI_IMPORT_ERROR: str | None = None
 try:
@@ -413,10 +415,23 @@ def _uniform_rescale(
     monitor out of several would be, and resampling one onto the other would
     return geometrically distorted content of the wrong area. Refusing is what
     keeps that loud rather than silent.
+
+    The axes never match exactly, because a compositor sizes a stream by rounding
+    each axis independently - Mutter's area stream is roundf(area * scale), and
+    the desktop bounds this is measured against were themselves rounded. That is
+    worth a fraction of a pixel per axis and must not read as a mismatch,
+    especially on a short axis where a half-pixel is a large fraction. So the
+    question asked is not whether the two derived factors are close, which is
+    tighter on a long axis than a short one, but whether ANY single factor could
+    have produced both axes within `ROUNDING_SLACK_PX`. That is the intersection
+    of one interval per axis, and it stays absolute in pixels while scaling with
+    each axis's own length.
     """
     scale_x = actual[0] / target[0]
     scale_y = actual[1] / target[1]
-    if abs(scale_x - scale_y) > max(scale_x, scale_y) * SCALE_TOLERANCE:
+    lowest = max((actual[0] - ROUNDING_SLACK_PX) / target[0], (actual[1] - ROUNDING_SLACK_PX) / target[1])
+    highest = min((actual[0] + ROUNDING_SLACK_PX) / target[0], (actual[1] + ROUNDING_SLACK_PX) / target[1])
+    if lowest > highest:
         raise CaptureError(
             f"the {actual[0]}x{actual[1]} {actual_name} is not a uniform rescale of the "
             f"{target[0]}x{target[1]} {target_name}, so it cannot be reconciled"

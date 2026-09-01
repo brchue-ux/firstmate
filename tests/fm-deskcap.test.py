@@ -1190,6 +1190,46 @@ class CaptureOutputSizeTest(unittest.TestCase):
             )
         self.assertIn("uniform", str(ctx.exception))
 
+    def test_a_thin_region_rounded_by_a_fractional_scale_is_still_accepted(self):
+        # A 1920x1080 panel at scale 1.25 is 1536x864 logical, and Mutter sizes
+        # an area stream as roundf(area * scale): a 400x30 region comes back
+        # 500x38 because roundf(37.5) is 38. That half pixel is 1.3% of a 30px
+        # axis, which a purely relative tolerance reads as a wrong rectangle.
+        CAP.display_state = lambda *_a, **_k: {
+            "width": 1536, "height": 864, "monitors": [], "primary": {}
+        }
+        for actual, requested in (
+            ((500, 38), (400, 30)),
+            ((450, 38), (300, 25)),
+            ((125, 38), (100, 30)),
+        ):
+            with self.subTest(actual=actual, requested=requested):
+                self._use("mutter", self._png(*actual))
+                result = CAP.capture(
+                    scope="region",
+                    region={"x": 0, "y": 0, "width": requested[0], "height": requested[1]},
+                    route="mutter",
+                )
+                self.assertEqual((result.width, result.height), requested)
+
+    def test_a_whole_desktop_at_a_fractional_scale_is_still_accepted(self):
+        CAP.display_state = lambda *_a, **_k: {
+            "width": 1536, "height": 864, "monitors": [], "primary": {}
+        }
+        self._use("mutter", self._png(1920, 1080))
+        result = CAP.capture(scope="screen", route="mutter")
+        self.assertEqual((result.width, result.height), (1536, 864))
+
+    def test_one_monitor_of_a_wider_desktop_is_still_refused(self):
+        # The case the guard exists for: hundreds of pixels out, not one.
+        CAP.display_state = lambda *_a, **_k: {
+            "width": 3000, "height": 1200, "monitors": [], "primary": {}
+        }
+        self._use("portal", self._png(1920, 1080))
+        with self.assertRaises(CAP.CaptureError) as ctx:
+            CAP.capture(scope="screen", route="portal")
+        self.assertIn("uniform", str(ctx.exception))
+
 
 class LayoutUnavailableTest(unittest.TestCase):
     """The fallback route must not be gated on a second Mutter interface."""

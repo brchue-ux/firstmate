@@ -3,8 +3,10 @@
 Active evidence for the guarantees in [../desktop-capture.md](../desktop-capture.md).
 Reproduce the live part with `bin/fm-deskcap-mcp.py --selftest`; the hermetic part is `tests/fm-deskcap.test.sh`.
 
-Machine and date: `homeserver`, Ubuntu 26.04 LTS, GNOME Shell / Mutter 50.1, on 2026-08-27.
-The session under test is a headless GNOME Remote Login (RDP) Wayland session with one synthetic 1920x1009 monitor on connector `Meta-0` and no physical monitor connected.
+Machine and date: `homeserver`, Ubuntu 26.04 LTS, GNOME Shell / Mutter 50.1, on 2026-08-27, with the latency section re-measured on 2026-09-01.
+The session under test is a headless GNOME Remote Login (RDP) Wayland session with one synthetic monitor on connector `Meta-0` and no physical monitor connected.
+That monitor's size is whatever the captain's RDP client asks for, so it differs between the two dates: 1920x1009 on 2026-08-27 and 3440x1369 on 2026-09-01.
+It is unrotated and at scale 1.0 on both.
 
 ## Both routes reach the session
 
@@ -40,14 +42,21 @@ Two captures of that region, one per route, were also read visually and show the
 
 ## Latency
 
+Re-measured on 2026-09-01 against the current code, after the route reconciliation and the shared-boundary size normalization were added.
+These figures describe that code, not the original implementation.
+The captain's virtual output follows his RDP client's size and was 3440x1369 at this measurement rather than the 1920x1009 recorded above, so the whole-display rows cover about 2.4 times as many pixels as the earlier sweep did and are not comparable with it.
+
 Twenty captures per case, end to end through `capture()`, on an otherwise busy machine:
 
 ```
-screen mutter n=20 min=62ms median=70ms p95=92ms max=95ms
-region mutter n=20 min=35ms median=45ms p95=53ms max=57ms
-screen portal n=20 min=47ms median=60ms p95=71ms max=72ms
-region portal n=20 min=64ms median=69ms p95=96ms max=99ms
+screen mutter n=20 min=130ms median=144ms p95=160ms max=166ms
+region mutter n=20 min=46ms median=52ms p95=64ms max=78ms
+screen portal n=20 min=145ms median=154ms p95=160ms max=167ms
+region portal n=20 min=191ms median=201ms p95=208ms max=239ms
 ```
+
+Every one of those 80 captures came back at the size the call asked for, 3440x1369 for `screen` and 380x940 for `region`, on both routes.
+None carried a resampling note, which is the observable form of the size normalization being a no-op on an unscaled output.
 
 ## The portal route leaves nothing in the captain's home
 
@@ -82,7 +91,5 @@ Both routes agreeing on black while the compositor route's screen cast still suc
   The bounds this server derives do not swap axes for a rotated monitor the way the compositor does, so rotated geometry is a known gap rather than an untested-but-expected-to-work case.
   This session's virtual output is unrotated, so no rotated capture was attempted.
 - Long-lived behavior is untested beyond back-to-back captures; the longest run here was the 80-capture latency sweep above.
-- The compositor-route `screen` figures above were measured while that route recorded the primary monitor by connector.
-  It now records the full virtual desktop bounds instead, which is the same 1920x1009 rectangle on this single-output session, but the sweep has not been re-run since that change.
-- The latency figures above also predate the size reconciliation added afterwards.
-  On this session that step is a PNG header comparison that matches and returns the bytes untouched, with no decode, so the figures are expected to still hold, but the sweep has not been re-run to confirm it.
+- The pixel-content sampling and the `~/Pictures` hygiene check above are from the 2026-08-27 session at 1920x1009 and were not repeated during the 2026-09-01 latency re-measurement.
+  That later sweep did confirm the file hygiene incidentally: its 40 portal captures added nothing to `~/Pictures`, whose newest entry is still the 2026-08-27 file listed above.
