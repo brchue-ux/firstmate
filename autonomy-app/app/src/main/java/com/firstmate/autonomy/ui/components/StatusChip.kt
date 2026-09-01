@@ -17,15 +17,15 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import com.firstmate.autonomy.domain.model.DecisionCategory
-import com.firstmate.autonomy.domain.model.DomainStatus
+import com.firstmate.autonomy.domain.model.GoalStatus
 import com.firstmate.autonomy.ui.preview.ThemePreviews
 import com.firstmate.autonomy.ui.theme.AutonomyShape
 import com.firstmate.autonomy.ui.theme.AutonomyTheme
 
-/** Pill showing a project's stage, with a dot in the stage's accent. */
+/** Pill showing where a goal stands, with a dot in that stage's accent. */
 @Composable
-fun DomainStatusChip(
-    status: DomainStatus,
+fun GoalStatusChip(
+    status: GoalStatus,
     modifier: Modifier = Modifier,
 ) {
     val accent = AutonomyTheme.accents.forStatus(status)
@@ -86,7 +86,7 @@ private fun StatusChipPreview() {
             modifier = Modifier.padding(16.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            DomainStatus.entries.forEach { DomainStatusChip(it) }
+            GoalStatus.entries.forEach { GoalStatusChip(it) }
             DecisionCategoryChip(DecisionCategory.FAMILY_DYNAMICS)
         }
     }

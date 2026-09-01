@@ -2,7 +2,8 @@ package com.firstmate.autonomy.data
 
 import com.firstmate.autonomy.data.local.Converters
 import com.firstmate.autonomy.domain.model.DecisionCategory
-import com.firstmate.autonomy.domain.model.DomainStatus
+import com.firstmate.autonomy.domain.model.GoalStatus
+import com.firstmate.autonomy.domain.model.SurfaceKind
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
@@ -43,13 +44,15 @@ class ConvertersTest {
 
     @Test
     fun `enums are stored by name`() {
-        assertEquals("IN_PROGRESS", converters.domainStatusToName(DomainStatus.IN_PROGRESS))
+        assertEquals("ACTIVE", converters.goalStatusToName(GoalStatus.ACTIVE))
+        assertEquals("ICE", converters.surfaceKindToName(SurfaceKind.ICE))
         assertEquals("FAMILY_DYNAMICS", converters.decisionCategoryToName(DecisionCategory.FAMILY_DYNAMICS))
     }
 
     @Test
     fun `an unknown stored enum degrades instead of throwing inside a cursor`() {
-        assertEquals(DomainStatus.PLANNING, converters.nameToDomainStatus("ABANDONED"))
+        assertEquals(GoalStatus.ACTIVE, converters.nameToGoalStatus("ABANDONED"))
+        assertEquals(SurfaceKind.ROCK, converters.nameToSurfaceKind("LAVA"))
         assertEquals(DecisionCategory.PERSONAL, converters.nameToDecisionCategory("SOMETHING_NEW"))
     }
 
@@ -60,6 +63,7 @@ class ConvertersTest {
         assertNull(converters.instantToEpochMilli(null))
         assertNull(converters.epochMilliToInstant(null))
         assertNull(converters.domainStatusToName(null))
-        assertNull(converters.nameToDomainStatus(null))
+        assertNull(converters.nameToGoalStatus(null))
+        assertNull(converters.nameToSurfaceKind(null))
     }
 }

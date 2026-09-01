@@ -22,12 +22,14 @@ import sys
 import zipfile
 
 EXPECTED_STRINGS = [
-    "Command Centre",   # v2 dashboard title
-    "Today's agency",   # v2 dashboard section
+    "Your space is empty",  # v3 space view empty state
+    "Today's agency",       # v3 Today header
+    "Name a moment",        # v3 moment capture
 ]
 FORBIDDEN_STRINGS = [
     "Today's check-in",     # v1 dashboard section
     "Boundaries & Habits",  # v1 habits title
+    "Command Centre",       # v2 dashboard title, replaced by the space view
 ]
 
 

@@ -25,13 +25,13 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
-import com.firstmate.autonomy.ui.dashboard.DashboardScreen
 import com.firstmate.autonomy.ui.decisions.DecisionEditorScreen
 import com.firstmate.autonomy.ui.decisions.DecisionListScreen
-import com.firstmate.autonomy.ui.domains.DomainDetailScreen
-import com.firstmate.autonomy.ui.domains.DomainEditorScreen
-import com.firstmate.autonomy.ui.domains.DomainListScreen
-import com.firstmate.autonomy.ui.habits.HabitScreen
+import com.firstmate.autonomy.ui.goals.GoalEditorRoute
+import com.firstmate.autonomy.ui.goals.GoalListRoute
+import com.firstmate.autonomy.ui.space.SpaceRoute
+import com.firstmate.autonomy.ui.today.TodayRoute
+import com.firstmate.autonomy.ui.you.YouRoute
 
 /**
  * App shell: a bottom bar over a single [NavHost].
@@ -107,7 +107,7 @@ private fun AutonomyNavHost(
 ) {
     NavHost(
         navController = navController,
-        startDestination = Routes.DASHBOARD,
+        startDestination = Routes.SPACE,
         modifier = modifier,
         // Tabs cross-fade; the push/pop pairs below override this per route.
         enterTransition = { tabEnter() },
@@ -115,49 +115,25 @@ private fun AutonomyNavHost(
         popEnterTransition = { tabEnter() },
         popExitTransition = { tabExit() },
     ) {
-        composable(Routes.DASHBOARD) {
-            DashboardScreen(
-                onNewProject = { navController.navigate(Routes.domainEditor()) },
-                onLogDecision = { navController.navigate(Routes.decisionEditor()) },
-                onDailyCheckIn = {
-                    navController.navigateToTopLevel(TopLevelDestination.HABITS)
-                },
-                onDomainClick = { navController.navigate(Routes.domainDetail(it)) },
-                onSeeAllDomains = {
-                    navController.navigateToTopLevel(TopLevelDestination.DOMAINS)
-                },
-                onSeeAllDecisions = {
-                    navController.navigateToTopLevel(TopLevelDestination.DECISIONS)
-                },
-                onDecisionClick = { navController.navigate(Routes.decisionEditor(it)) },
-            )
+        composable(Routes.SPACE) {
+            SpaceRoute(onOpenGoal = { navController.navigate(Routes.goalEditor(it)) })
         }
 
-        composable(Routes.DOMAIN_LIST) {
-            DomainListScreen(
-                onDomainClick = { navController.navigate(Routes.domainDetail(it)) },
-                onCreateDomain = { navController.navigate(Routes.domainEditor()) },
+        composable(Routes.TODAY) {
+            TodayRoute(onOpenGoal = { navController.navigate(Routes.goalEditor(it)) })
+        }
+
+        composable(Routes.GOAL_LIST) {
+            GoalListRoute(
+                onOpenGoal = { navController.navigate(Routes.goalEditor(it)) },
+                onNewGoal = { navController.navigate(Routes.goalEditor()) },
             )
         }
 
         composable(
-            route = Routes.DOMAIN_DETAIL,
-            arguments = listOf(navArgument(ARG_DOMAIN_ID) { type = NavType.LongType }),
-            enterTransition = { pushEnter() },
-            exitTransition = { pushExit() },
-            popEnterTransition = { popEnter() },
-            popExitTransition = { popExit() },
-        ) {
-            DomainDetailScreen(
-                onNavigateBack = { navController.popBackStack() },
-                onEditDomain = { navController.navigate(Routes.domainEditor(it)) },
-            )
-        }
-
-        composable(
-            route = Routes.DOMAIN_EDITOR,
+            route = Routes.GOAL_EDITOR,
             arguments = listOf(
-                navArgument(ARG_DOMAIN_ID) {
+                navArgument(ARG_GOAL_ID) {
                     type = NavType.LongType
                     defaultValue = NO_ID
                 },
@@ -167,7 +143,7 @@ private fun AutonomyNavHost(
             popEnterTransition = { popEnter() },
             popExitTransition = { popExit() },
         ) {
-            DomainEditorScreen(onNavigateBack = { navController.popBackStack() })
+            GoalEditorRoute(onDone = { navController.popBackStack() })
         }
 
         composable(Routes.DECISION_LIST) {
@@ -193,9 +169,7 @@ private fun AutonomyNavHost(
             DecisionEditorScreen(onNavigateBack = { navController.popBackStack() })
         }
 
-        composable(Routes.HABITS) {
-            HabitScreen()
-        }
+        composable(Routes.YOU) { YouRoute() }
     }
 }
 

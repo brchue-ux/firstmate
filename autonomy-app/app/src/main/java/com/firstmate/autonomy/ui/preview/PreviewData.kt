@@ -1,177 +1,215 @@
 package com.firstmate.autonomy.ui.preview
 
-import com.firstmate.autonomy.domain.model.DashboardOverview
-import com.firstmate.autonomy.domain.model.DayStatus
+import com.firstmate.autonomy.domain.model.Condition
 import com.firstmate.autonomy.domain.model.Decision
 import com.firstmate.autonomy.domain.model.DecisionCategory
-import com.firstmate.autonomy.domain.model.DomainStatus
-import com.firstmate.autonomy.domain.model.Habit
-import com.firstmate.autonomy.domain.model.HabitConsistency
-import com.firstmate.autonomy.domain.model.HabitWithTodayStatus
-import com.firstmate.autonomy.domain.model.Milestone
-import com.firstmate.autonomy.domain.model.ProjectDomain
+import com.firstmate.autonomy.domain.model.Goal
+import com.firstmate.autonomy.domain.model.GoalStatus
+import com.firstmate.autonomy.domain.model.Moment
+import com.firstmate.autonomy.domain.model.Particular
+import com.firstmate.autonomy.domain.model.SurfaceKind
+import com.firstmate.autonomy.domain.model.TodayItem
+import com.firstmate.autonomy.domain.model.TodayOverview
 import java.time.Instant
 import java.time.LocalDate
 
 /**
- * Fixed sample data for Compose previews and manual UI checks.
+ * Sample content for previews and for the space view's first run.
  *
- * Deliberately hand-written rather than random: previews should be identical on
- * every render so a visual diff means a real change. Nothing here is ever
- * inserted into the database - the app ships with an empty store.
+ * Every preview in the app draws from here so no screen invents its own
+ * placeholder text, and so a change to the shape of a model breaks in one file
+ * rather than twenty.
  */
 object PreviewData {
 
-    /** A stable "today" so date-relative previews never drift. */
+    /** Pinned, so previews and dated assertions never drift with the wall clock. */
     val today: LocalDate = LocalDate.of(2026, 3, 12)
 
-    private val createdAt: Instant = Instant.ofEpochMilli(1_772_000_000_000L)
+    private val created: Instant = Instant.parse("2025-06-01T09:00:00Z")
 
-    val workshopDomain = ProjectDomain(
+    /** Ticks the given day offsets back from [today]. */
+    private fun days(vararg offsets: Int): Set<LocalDate> =
+        offsets.mapTo(mutableSetOf()) { today.minusDays(it.toLong()) }
+
+    private fun moment(id: Long, particularId: Long, label: String, ageDays: Long) =
+        Moment(id, particularId, label, today.minusDays(ageDays), "")
+
+    val scales = Particular(
+        id = 1L, goalId = 1L, title = "Scales", kind = SurfaceKind.DESERT,
+        notes = "Two octaves, hands together, 60bpm.", position = 0,
+        checkInDays = days(0, 1, 2, 3, 5, 6, 8, 9, 11, 13, 15, 18, 21, 25),
+        moments = listOf(
+            moment(1L, 1L, "Hands together", 300),
+            moment(2L, 1L, "60bpm steady", 120),
+            moment(3L, 1L, "80bpm both hands", 22),
+        ),
+    )
+
+    val passages = Particular(
+        id = 2L, goalId = 1L, title = "Passages", kind = SurfaceKind.ROCK,
+        notes = "Bars 41-58 of the Chopin.", position = 1,
+        checkInDays = days(1, 4, 9, 12, 17, 23, 28),
+        moments = listOf(moment(4L, 2L, "Whole page, no stops", 9)),
+    )
+
+    val pressure = Particular(
+        id = 3L, goalId = 1L, title = "Pressure", kind = SurfaceKind.BASALT,
+        notes = "Playing through nerves. Record it.", position = 2,
+        checkInDays = days(14, 29, 41),
+        moments = listOf(moment(5L, 3L, "Played it for Sam", 64)),
+    )
+
+    val chords = Particular(
+        id = 4L, goalId = 1L, title = "Chords", kind = SurfaceKind.ICE,
+        notes = "Rootless voicings, ii-V-I.", position = 3,
+    )
+
+    val piano = Goal(
         id = 1L,
-        title = "Bench power supply rebuild",
-        category = "Workshop",
-        status = DomainStatus.IN_PROGRESS,
-        notes = "Linear supply, 0-30V / 0-5A.\n" +
-            "Toroidal transformer salvaged from the old amp.\n" +
-            "Needs a new fan shroud printed before the lid goes back on.",
-        milestones = listOf(
-            Milestone(1L, 1L, "Strip and catalogue existing parts", isCompleted = true, position = 0),
-            Milestone(2L, 1L, "Order replacement filter caps", isCompleted = true, position = 1),
-            Milestone(3L, 1L, "Print the fan shroud", isCompleted = true, position = 2),
-            Milestone(4L, 1L, "Rewire the front panel", isCompleted = false, position = 3),
-            Milestone(5L, 1L, "Load-test at 3A for an hour", isCompleted = false, position = 4),
-        ),
-        createdAt = createdAt,
-        updatedAt = createdAt,
+        title = "Piano practice",
+        category = "Craft",
+        status = GoalStatus.ACTIVE,
+        notes = "Put the grade exams down and just play.",
+        position = 0,
+        createdAt = created,
+        particulars = listOf(scales, passages, pressure, chords),
     )
 
-    val homelabDomain = ProjectDomain(
+    val gym = Goal(
         id = 2L,
-        title = "Home server: off-site backups",
-        category = "Technical Setup",
-        status = DomainStatus.PLANNING,
-        notes = "Decide between a second NAS at my brother's place or object storage.\n" +
-            "Encryption happens locally either way.",
-        milestones = listOf(
-            Milestone(6L, 2L, "Write down the restore test I actually want", isCompleted = true, position = 0),
-            Milestone(7L, 2L, "Price both options for three years", isCompleted = false, position = 1),
-            Milestone(8L, 2L, "Pick one and stop researching", isCompleted = false, position = 2),
+        title = "Getting strong",
+        category = "Body",
+        status = GoalStatus.ACTIVE,
+        notes = "Three sessions. Recovery is the limit, not effort.",
+        position = 1,
+        createdAt = created,
+        particulars = listOf(
+            Particular(
+                id = 5L, goalId = 2L, title = "Squat", kind = SurfaceKind.EMBER,
+                notes = "5x5. 92kg working set.", position = 0,
+                checkInDays = days(0, 2, 4, 7, 9, 11, 14),
+                moments = listOf(moment(6L, 5L, "92kg for reps", 26)),
+            ),
+            Particular(
+                id = 6L, goalId = 2L, title = "Deadlift", kind = SurfaceKind.ROCK,
+                notes = "Once a week is enough.", position = 1,
+                checkInDays = days(3, 10, 17, 24),
+                moments = listOf(moment(7L, 6L, "140kg", 180)),
+            ),
         ),
-        createdAt = createdAt,
-        updatedAt = createdAt,
     )
 
-    val guitarDomain = ProjectDomain(
+    val basement = Goal(
         id = 3L,
-        title = "Fingerstyle practice - 20 minutes daily",
-        category = "Skill Practice",
-        status = DomainStatus.COMPLETED,
-        notes = "Twelve-week block finished. Travis picking is now automatic.",
-        milestones = listOf(
-            Milestone(9L, 3L, "Weeks 1-4: thumb independence", isCompleted = true, position = 0),
-            Milestone(10L, 3L, "Weeks 5-8: two full arrangements", isCompleted = true, position = 1),
-            Milestone(11L, 3L, "Weeks 9-12: play one from memory", isCompleted = true, position = 2),
-        ),
-        createdAt = createdAt,
-        updatedAt = createdAt,
-    )
-
-    /** A project with no milestones yet, for the 0% / empty-milestones state. */
-    val emptyDomain = ProjectDomain(
-        id = 4L,
-        title = "Reorganise the garage shelving",
+        title = "Basement renovation",
         category = "Home",
-        status = DomainStatus.PLANNING,
-        notes = "",
-        milestones = emptyList(),
-        createdAt = createdAt,
-        updatedAt = createdAt,
+        status = GoalStatus.ACTIVE,
+        notes = "Doing the wiring myself rather than hiring out.",
+        position = 2,
+        createdAt = created,
+        particulars = listOf(
+            Particular(
+                id = 7L, goalId = 3L, title = "Wiring", kind = SurfaceKind.EMBER,
+                notes = "Two circuits left to pull.", position = 0,
+                checkInDays = days(1, 6, 13),
+                moments = listOf(moment(8L, 7L, "First circuit live", 22)),
+            ),
+            Particular(
+                id = 8L, goalId = 3L, title = "Insulation", kind = SurfaceKind.BASALT,
+                notes = "Not started.", position = 1,
+            ),
+        ),
     )
 
-    val domains = listOf(workshopDomain, homelabDomain, emptyDomain, guitarDomain)
+    /** A goal that has gone cold, so empty and frozen states have something to draw. */
+    val spanish = Goal(
+        id = 4L,
+        title = "Spanish",
+        category = "Craft",
+        status = GoalStatus.PAUSED,
+        notes = "Untouched since April.",
+        position = 3,
+        createdAt = created,
+        particulars = listOf(
+            Particular(
+                id = 9L, goalId = 4L, title = "Vocab", kind = SurfaceKind.BASALT,
+                notes = "Anki deck untouched.", position = 0,
+                moments = listOf(moment(9L, 9L, "500 words held", 300)),
+            ),
+        ),
+    )
+
+    val emptyGoal = Goal(
+        id = 5L,
+        title = "Photography",
+        category = "Craft",
+        status = GoalStatus.ACTIVE,
+        notes = "",
+        position = 4,
+        createdAt = created,
+    )
+
+    val goals = listOf(piano, gym, basement, spanish, emptyGoal)
 
     val decisions = listOf(
         Decision(
             id = 1L,
-            title = "Kept Sunday morning for the workshop",
-            date = today,
-            category = DecisionCategory.FAMILY_DYNAMICS,
-            myPreference = "Three uninterrupted hours in the workshop, phone in the kitchen.",
-            finalChoice = "Three uninterrupted hours in the workshop, phone in the kitchen.",
-            reflection = "Said it once, plainly, and did not re-explain it. " +
-                "Nobody was upset. I noticed I expected an argument that never came.",
-            createdAt = createdAt,
+            title = "Put the grade exams down",
+            date = today.minusDays(42),
+            category = DecisionCategory.PERSONAL,
+            myPreference = "Stop working to a syllabus and just play",
+            finalChoice = "Stop working to a syllabus and just play",
+            reflection = "Practice stopped feeling like homework within a fortnight.",
+            createdAt = created,
+            goalId = 1L,
         ),
         Decision(
             id = 2L,
-            title = "Chose the cheaper oscilloscope",
-            date = today.minusDays(3),
+            title = "Drop the fourth gym session",
+            date = today.minusDays(21),
             category = DecisionCategory.PERSONAL,
-            myPreference = "The 4-channel unit, because I will grow into it.",
-            finalChoice = "The 2-channel unit.",
-            reflection = "Talked myself down from the one I wanted. It is fine for now, " +
-                "but I want to notice next time whether that was thrift or flinching.",
-            createdAt = createdAt,
+            myPreference = "Three sessions, properly recovered",
+            finalChoice = "Three sessions, properly recovered",
+            reflection = "",
+            createdAt = created,
+            goalId = 2L,
         ),
         Decision(
             id = 3L,
-            title = "Declined the weekend on-call swap",
-            date = today.minusDays(9),
-            category = DecisionCategory.WORK,
-            myPreference = "No - I already covered two swaps this month.",
-            finalChoice = "No.",
-            reflection = "",
-            createdAt = createdAt,
-        ),
-        Decision(
-            id = 4L,
-            title = "Bought the kitchen table I liked",
-            date = today.minusDays(21),
+            title = "Do the basement wiring myself",
+            date = today.minusDays(30),
             category = DecisionCategory.HOME,
-            myPreference = "The plain oak one.",
-            finalChoice = "The plain oak one.",
-            reflection = "Still glad about it a month later.",
-            createdAt = createdAt,
+            myPreference = "Hire an electrician for the whole run",
+            finalChoice = "Pull the circuits myself, pay for the inspection",
+            reflection = "Slower than hiring out, and I now know where every cable is.",
+            createdAt = created,
+            goalId = 3L,
         ),
     )
 
-    val habits = listOf(
-        Habit(id = 1L, name = "Two hours of solo time", description = "No screens, no company", position = 0),
-        Habit(id = 2L, name = "Skill practice", description = "20 minutes, anything hands-on", position = 1),
-        Habit(id = 3L, name = "Held one boundary", description = "Said the thing I meant to say", position = 2),
+    val todayItems: List<TodayItem> = goals
+        .filter { it.status == GoalStatus.ACTIVE }
+        .flatMap { goal ->
+            goal.particulars.map { particular ->
+                TodayItem(
+                    goalId = goal.id,
+                    goalTitle = goal.title,
+                    particular = particular,
+                    isDoneToday = particular.isCheckedOn(today),
+                    condition = particular.condition(today),
+                )
+            }
+        }
+
+    val todayOverview = TodayOverview(
+        items = todayItems,
+        recentDecisions = decisions,
+        goalCount = goals.size,
+        momentCount = goals.sumOf { it.momentCount },
     )
 
-    /** Seven-day windows with deliberately different shapes: strong, patchy, new. */
-    val habitConsistency: List<HabitConsistency> = listOf(
-        habits[0].consistency(listOf(true, true, true, false, true, true, true)),
-        habits[1].consistency(listOf(true, false, false, true, true, false, true)),
-        habits[2].consistency(listOf(false, false, false, false, false, false, false)),
-    )
+    val emptyOverview = TodayOverview()
 
-    val habitsToday = habitConsistency.map {
-        HabitWithTodayStatus(habit = it.habit, isCompletedToday = it.days.last().isCompleted)
-    }
-
-    val dashboard = DashboardOverview(
-        activeDomains = listOf(workshopDomain, homelabDomain, emptyDomain),
-        completedDomainCount = 1,
-        recentDecisions = decisions.take(3),
-        todayHabits = habitsToday,
-        weeklyHabitRate = habitConsistency.sumOf { it.completedCount }.toFloat() /
-            habitConsistency.sumOf { it.days.size },
-    )
-
-    /** Everything empty - the first-run state every screen must handle. */
-    val emptyDashboard = DashboardOverview()
-
-    private fun Habit.consistency(pattern: List<Boolean>) = HabitConsistency(
-        habit = this,
-        days = pattern.mapIndexed { index, completed ->
-            DayStatus(
-                date = today.minusDays((pattern.size - 1 - index).toLong()),
-                isCompleted = completed,
-            )
-        },
-    )
+    val warmCondition: Condition = scales.condition(today)
+    val frozenCondition: Condition = chords.condition(today)
 }

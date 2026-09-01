@@ -11,8 +11,9 @@ import java.time.LocalDate
 /** Storage row for one journalled decision. */
 @Entity(
     tableName = "decisions",
-    // The list and the dashboard both sort on this column.
-    indices = [Index("date_epoch_day")],
+    // The list and Today both sort on the date; the goal index backs the
+    // "decisions about this goal" lookup the goal readout makes.
+    indices = [Index("date_epoch_day"), Index("goal_id")],
 )
 data class DecisionEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0L,
@@ -24,4 +25,13 @@ data class DecisionEntity(
     @ColumnInfo(name = "final_choice") val finalChoice: String,
     val reflection: String,
     @ColumnInfo(name = "created_at") val createdAt: Instant,
+    /**
+     * The goal this decision was about, if any.
+     *
+     * Deliberately not a foreign key: SQLite cannot add one to an existing
+     * table without rebuilding it, and a decision outliving the goal it was
+     * about is a real case anyway - you decided to stop doing something. The
+     * repository clears the reference when a goal is deleted.
+     */
+    @ColumnInfo(name = "goal_id") val goalId: Long? = null,
 )

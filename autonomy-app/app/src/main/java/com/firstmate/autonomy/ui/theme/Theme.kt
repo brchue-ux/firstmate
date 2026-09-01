@@ -9,7 +9,7 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.ReadOnlyComposable
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
-import com.firstmate.autonomy.domain.model.DomainStatus
+import com.firstmate.autonomy.domain.model.GoalStatus
 
 /**
  * The obsidian scheme.
@@ -118,10 +118,10 @@ data class AutonomyAccentColors(
     val inProgress: Color,
     val completed: Color,
 ) {
-    fun forStatus(status: DomainStatus): Color = when (status) {
-        DomainStatus.PLANNING -> planning
-        DomainStatus.IN_PROGRESS -> inProgress
-        DomainStatus.COMPLETED -> completed
+    fun forStatus(status: GoalStatus): Color = when (status) {
+        GoalStatus.PAUSED -> planning
+        GoalStatus.ACTIVE -> inProgress
+        GoalStatus.DONE -> completed
     }
 }
 

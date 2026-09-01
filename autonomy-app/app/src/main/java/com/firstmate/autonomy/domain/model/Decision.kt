@@ -19,6 +19,12 @@ data class Decision(
     /** "Outcome & How It Felt" - filled in later, so it is optional at entry time. */
     val reflection: String = "",
     val createdAt: Instant = Instant.EPOCH,
+    /**
+     * The goal this decision was about, if you linked one. Optional because
+     * plenty of decisions are not about a goal at all, and forcing a link
+     * would turn the log into a filing exercise.
+     */
+    val goalId: Long? = null,
 ) {
     /** True when the user's own preference is what happened. */
     val followedOwnPreference: Boolean

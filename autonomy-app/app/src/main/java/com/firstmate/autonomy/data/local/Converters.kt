@@ -2,7 +2,8 @@ package com.firstmate.autonomy.data.local
 
 import androidx.room.TypeConverter
 import com.firstmate.autonomy.domain.model.DecisionCategory
-import com.firstmate.autonomy.domain.model.DomainStatus
+import com.firstmate.autonomy.domain.model.GoalStatus
+import com.firstmate.autonomy.domain.model.SurfaceKind
 import java.time.Instant
 import java.time.LocalDate
 
@@ -10,9 +11,8 @@ import java.time.LocalDate
  * Lets entities declare real types - [LocalDate], [Instant], enums - while the
  * columns stay the primitives SQLite sorts and range-filters natively.
  *
- * The stored representation is deliberately unchanged from the hand-rolled
- * mapping this replaced: dates are epoch days, timestamps epoch millis, enums
- * their `name`. So the schema is byte-identical and needs no migration.
+ * Dates are stored as epoch days, timestamps as epoch millis, and enums as their
+ * `name`, which is what the version 2 migration writes.
  *
  * Enum reads go through the tolerant `fromStorage` lookups rather than
  * `valueOf`, so a value written by a newer build - or a corrupted row - degrades
@@ -33,10 +33,22 @@ class Converters {
     fun epochMilliToInstant(value: Long?): Instant? = value?.let(Instant::ofEpochMilli)
 
     @TypeConverter
-    fun domainStatusToName(value: DomainStatus?): String? = value?.name
+    fun goalStatusToName(value: GoalStatus?): String? = value?.name
 
     @TypeConverter
-    fun nameToDomainStatus(value: String?): DomainStatus? = value?.let(DomainStatus::fromStorage)
+    fun nameToGoalStatus(value: String?): GoalStatus? = value?.let { stored ->
+        GoalStatus.entries.firstOrNull { it.name.equals(stored, ignoreCase = true) }
+            ?: GoalStatus.ACTIVE
+    }
+
+    @TypeConverter
+    fun surfaceKindToName(value: SurfaceKind?): String? = value?.name
+
+    @TypeConverter
+    fun nameToSurfaceKind(value: String?): SurfaceKind? = value?.let { stored ->
+        SurfaceKind.entries.firstOrNull { it.name.equals(stored, ignoreCase = true) }
+            ?: SurfaceKind.ROCK
+    }
 
     @TypeConverter
     fun decisionCategoryToName(value: DecisionCategory?): String? = value?.name

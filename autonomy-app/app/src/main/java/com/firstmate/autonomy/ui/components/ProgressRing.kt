@@ -128,7 +128,7 @@ private fun ProgressRingPreview() {
             verticalAlignment = Alignment.CenterVertically,
         ) {
             ProgressRing(progress = 0f, label = "Not started")
-            ProgressRing(progress = 0.6f, label = "Milestones")
+            ProgressRing(progress = 0.6f, label = "Ticked")
             ProgressRing(
                 progress = 1f,
                 label = "Done",

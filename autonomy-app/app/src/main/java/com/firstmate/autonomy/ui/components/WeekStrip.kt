@@ -23,6 +23,7 @@ import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.unit.dp
 import com.firstmate.autonomy.domain.model.DayStatus
+import com.firstmate.autonomy.domain.model.week
 import com.firstmate.autonomy.ui.preview.PreviewData
 import com.firstmate.autonomy.ui.preview.ThemePreviews
 import com.firstmate.autonomy.ui.theme.AutonomyTheme
@@ -106,9 +107,8 @@ private fun WeekStripPreview() {
             Modifier.padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(20.dp),
         ) {
-            PreviewData.habitConsistency.forEach {
-                WeekStrip(days = it.days, today = PreviewData.today)
-            }
+            listOf(PreviewData.scales, PreviewData.passages, PreviewData.chords)
+                .forEach { WeekStrip(days = it.week(PreviewData.today), today = PreviewData.today) }
         }
     }
 }

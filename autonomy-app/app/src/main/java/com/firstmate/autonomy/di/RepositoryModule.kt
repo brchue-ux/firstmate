@@ -1,11 +1,9 @@
 package com.firstmate.autonomy.di
 
 import com.firstmate.autonomy.data.repository.DecisionRepositoryImpl
-import com.firstmate.autonomy.data.repository.DomainRepositoryImpl
-import com.firstmate.autonomy.data.repository.HabitRepositoryImpl
+import com.firstmate.autonomy.data.repository.GoalRepositoryImpl
 import com.firstmate.autonomy.domain.repository.DecisionRepository
-import com.firstmate.autonomy.domain.repository.DomainRepository
-import com.firstmate.autonomy.domain.repository.HabitRepository
+import com.firstmate.autonomy.domain.repository.GoalRepository
 import dagger.Binds
 import dagger.Module
 import dagger.hilt.InstallIn
@@ -26,13 +24,9 @@ abstract class RepositoryModule {
 
     @Binds
     @Singleton
-    abstract fun bindDomainRepository(impl: DomainRepositoryImpl): DomainRepository
+    abstract fun bindGoalRepository(impl: GoalRepositoryImpl): GoalRepository
 
     @Binds
     @Singleton
     abstract fun bindDecisionRepository(impl: DecisionRepositoryImpl): DecisionRepository
-
-    @Binds
-    @Singleton
-    abstract fun bindHabitRepository(impl: HabitRepositoryImpl): HabitRepository
 }

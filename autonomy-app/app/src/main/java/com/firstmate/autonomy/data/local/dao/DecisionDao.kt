@@ -28,4 +28,17 @@ interface DecisionDao {
 
     @Query("DELETE FROM decisions WHERE id = :id")
     suspend fun deleteById(id: Long)
+
+    @Query(
+        "SELECT * FROM decisions WHERE goal_id = :goalId " +
+            "ORDER BY date_epoch_day DESC, id DESC",
+    )
+    fun observeForGoal(goalId: Long): Flow<List<DecisionEntity>>
+
+    /**
+     * Deleting a goal leaves the decisions you made about it, unlinked. The
+     * decision still happened; only the thing it pointed at is gone.
+     */
+    @Query("UPDATE decisions SET goal_id = NULL WHERE goal_id = :goalId")
+    suspend fun clearGoalReferences(goalId: Long)
 }
