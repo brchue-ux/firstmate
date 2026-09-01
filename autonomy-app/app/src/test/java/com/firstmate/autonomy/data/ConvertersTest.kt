@@ -62,7 +62,7 @@ class ConvertersTest {
         assertNull(converters.epochDayToLocalDate(null))
         assertNull(converters.instantToEpochMilli(null))
         assertNull(converters.epochMilliToInstant(null))
-        assertNull(converters.domainStatusToName(null))
+        assertNull(converters.goalStatusToName(null))
         assertNull(converters.nameToGoalStatus(null))
         assertNull(converters.nameToSurfaceKind(null))
     }
