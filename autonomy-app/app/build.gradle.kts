@@ -10,6 +10,24 @@ android {
     namespace = "com.firstmate.autonomy"
     compileSdk = 35
 
+    // A committed debug key, not a generated one. Every CI runner is a fresh
+    // machine, so the Android plugin was minting a NEW random debug keystore per
+    // build - which meant each APK was signed by a different certificate and
+    // Android refused to install one over another ("package conflict"), silently
+    // stranding the device on whatever build it already had.
+    //
+    // This keystore is not a secret: the password is the Android convention, it
+    // signs debug builds only, and it can never publish to Play. Its whole job is
+    // to be identical on every machine so builds upgrade in place.
+    signingConfigs {
+        getByName("debug") {
+            storeFile = file("debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
+    }
+
     defaultConfig {
         applicationId = "com.firstmate.autonomy"
         minSdk = 26
@@ -21,6 +39,10 @@ android {
     }
 
     buildTypes {
+        debug {
+            signingConfig = signingConfigs.getByName("debug")
+        }
+
         release {
             isMinifyEnabled = true
             isShrinkResources = true
