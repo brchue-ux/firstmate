@@ -58,14 +58,14 @@ framebuffer, so under non-unity scaling either can come back larger. `capture()`
 therefore resamples whatever the winning route returned to the size the call
 asked for - the region's width and height, or the desktop bounds - at one shared
 boundary rather than per route. That is a PNG header comparison and no decode
-when the size already matches, which is every capture on an unscaled display.
+when the size already matches, which is every capture on an unscaled display,
+and any capture it does resample carries a note saying so.
 
-Area is reconciled separately from size, and only the portal needs it: its
-screenshot is cropped in its own pixel space, using a factor derived from the
-returned image's real dimensions against the desktop bounds rather than from a
-configured scale value. A factor that is not uniform on both axes means the
-screenshot covers a different rectangle rather than the same one at another size,
-and is refused instead of stretched.
+Any rescale, of a size at that boundary or of a region into the portal's own
+pixel space, must be uniform on both axes. A factor that is not means the two
+rectangles are different rather than one at another size, as a screenshot of one
+monitor out of several would be, so it is refused rather than stretched into
+distorted content of the wrong area.
 
 Reading the display layout is not a precondition for the fallback route. If
 DisplayConfig cannot be reached, a `screen` capture still returns the portal's
@@ -348,16 +348,14 @@ def display_state(timeout_ms: int = DBUS_CALL_TIMEOUT_MS) -> dict[str, Any]:
     right = bottom = 0
     for logical in state[2]:
         x, y, scale, _transform, primary, connectors = logical[0], logical[1], logical[2], logical[3], logical[4], logical[5]
-        width = height = 0
         for spec in monitors_for(state[1], [c[0] for c in connectors]):
-            width, height = spec["width"], spec["height"]
             monitors.append(
                 {
                     "connector": spec["connector"],
                     "x": x,
                     "y": y,
-                    "width": _logical_size(width, scale),
-                    "height": _logical_size(height, scale),
+                    "width": _logical_size(spec["width"], scale),
+                    "height": _logical_size(spec["height"], scale),
                     "scale": scale,
                     "primary": bool(primary),
                 }
@@ -403,6 +401,46 @@ def normalize_region(region: Any) -> dict[str, int]:
     if x < 0 or y < 0:
         raise CaptureError(f"region x and y must not be negative, got {x},{y}")
     return {"x": x, "y": y, "width": width, "height": height}
+
+
+def _uniform_rescale(
+    actual: tuple[int, int], target: tuple[int, int], actual_name: str, target_name: str
+) -> tuple[float, float]:
+    """The factor between two rectangles, refused when the axes disagree.
+
+    A genuine rescale is the same on both axes. When it is not, the two are
+    different rectangles rather than one at another size, as a screenshot of one
+    monitor out of several would be, and resampling one onto the other would
+    return geometrically distorted content of the wrong area. Refusing is what
+    keeps that loud rather than silent.
+    """
+    scale_x = actual[0] / target[0]
+    scale_y = actual[1] / target[1]
+    if abs(scale_x - scale_y) > max(scale_x, scale_y) * SCALE_TOLERANCE:
+        raise CaptureError(
+            f"the {actual[0]}x{actual[1]} {actual_name} is not a uniform rescale of the "
+            f"{target[0]}x{target[1]} {target_name}, so it cannot be reconciled"
+        )
+    return scale_x, scale_y
+
+
+def _normalize_size(png: bytes, expected: tuple[int, int], notes: list[str]) -> bytes:
+    """Bring a capture to the size the call asked for, whichever route made it.
+
+    Neither route is trusted to have produced it: Mutter sizes an area stream by
+    the scale of the monitors it overlaps, and the portal hands back its own
+    framebuffer. A resample is reported here, where it happens, so a caller is
+    never handed a silently rescaled image.
+    """
+    actual = png_dimensions(png)
+    if actual == expected:
+        return png
+    _uniform_rescale(actual, expected, "capture", "size that was asked for")
+    notes.append(
+        f"the capture came back {actual[0]}x{actual[1]} for a {expected[0]}x{expected[1]} "
+        "request, so it was resampled into the logical pixel space both routes answer in"
+    )
+    return resize_png(png, *expected)
 
 
 def _expected_size(
@@ -455,13 +493,9 @@ def region_in_image_pixels(
     desktop_width, desktop_height = _desktop_size(bounds)
     if (image_width, image_height) == (desktop_width, desktop_height):
         return region
-    scale_x = image_width / desktop_width
-    scale_y = image_height / desktop_height
-    if abs(scale_x - scale_y) > max(scale_x, scale_y) * SCALE_TOLERANCE:
-        raise CaptureError(
-            f"the {image_width}x{image_height} screenshot is not a uniform rescale of the "
-            f"{desktop_width}x{desktop_height} desktop, so a region cannot be placed on it"
-        )
+    scale_x, scale_y = _uniform_rescale(
+        (image_width, image_height), (desktop_width, desktop_height), "screenshot", "desktop"
+    )
     x = max(0, min(image_width - 1, round(region["x"] * scale_x)))
     y = max(0, min(image_height - 1, round(region["y"] * scale_y)))
     return {
@@ -763,13 +797,6 @@ def _portal_capture(
             f"the display layout is unavailable, so this {image_width}x{image_height} screenshot "
             "was returned at whatever size the portal produced rather than in logical pixels"
         )
-
-    if bounds is not None and (image_width, image_height) != _desktop_size(bounds):
-        notes.append(
-            f"the portal returned a {image_width}x{image_height} screenshot of a "
-            f"{bounds['width']}x{bounds['height']} desktop, so it was resampled into the "
-            "logical pixel space both routes answer in"
-        )
     return png, notes
 
 
@@ -939,7 +966,7 @@ def capture(
                 png, portal_notes = _portal_capture(scope, region, cursor, budget, bounds)
                 notes.extend(portal_notes)
             if expected is not None:
-                png = resize_png(png, *expected)
+                png = _normalize_size(png, expected, notes)
             elapsed = (time.monotonic() - started) * 1000
             result = Capture(png, chosen, scope, elapsed, notes)
             if failures:

@@ -62,10 +62,11 @@ Both routes are implemented from the start rather than the fallback being retrof
 - Coordinates and returned images are in logical pixels, the space the compositor's own screen-cast API works in.
   Both routes answer the same call with the same area at the same pixel dimensions, so a coordinate read off one route's image maps onto the other's.
   That is enforced after the capture rather than assumed of either route: whichever route served the call, the result is resampled to the size that was asked for, since under non-unity scaling both the compositor and the portal can return a larger image.
-  The reply's text says so on any call where resampling happened.
+  The reply's text says so on any call where resampling happened, whichever route produced the image.
   On the captain's single output at scale 1.0 the sizes already match, so nothing is resampled and nothing is even decoded to check.
   This is checked by unit tests over the conversions only, because no scaled display has been available to capture from; see [verification/desktop-capture.md](verification/desktop-capture.md).
-- A region call is refused rather than answered with the wrong content when the screenshot the portal returns does not cover the same rectangle as the desktop, which is what a screenshot of one monitor out of several would look like.
+- Any call is refused rather than answered with the wrong content when the image a route produced is not the requested rectangle at a uniform factor, which is what a screenshot covering only one monitor out of several would look like.
+  That applies to both scopes and both routes, so a mismatch is reported as unreconcilable instead of being stretched into distorted content.
 - Reading the display layout is not required for a whole-screen capture on the `portal` route.
   If that layout cannot be read, the screenshot still comes back, with a note saying its dimensions were not reconciled to logical pixels; only a region call fails, because there is nothing to validate the rectangle against.
 - Rotated outputs are not supported.

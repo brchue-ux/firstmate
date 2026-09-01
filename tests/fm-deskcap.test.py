@@ -467,38 +467,59 @@ class ClosedDuringFramePullTest(unittest.TestCase):
 
 
 class RecordingBus:
-    """A session bus that records D-Bus calls and can fire the stream signal."""
+    """A session bus that behaves the way Mutter does about ordering.
+
+    PipeWireStreamAdded is emitted while Start() is being handled, so a
+    subscription made afterwards never sees it. This fake reproduces that: it
+    only delivers to a subscription that already existed on the stream path when
+    Start was called, which is what rule 1 exists to prevent.
+    """
 
     def __init__(self, node_id=None):
         self.calls = []
+        self.events = []
         self.node_id = node_id
+        self.stream_watchers = {}
         self._next_sub = 1
 
     def call_sync(self, _name, _path, _iface, method, args, _cancellable, _flags, timeout_ms, _extra):
         self.calls.append(
             {"method": method, "args": None if args is None else args.unpack(), "timeout_ms": timeout_ms}
         )
+        self.events.append(("call", method))
         if method == "CreateSession":
             return CAP.GLib.Variant("(o)", ("/org/gnome/Mutter/ScreenCast/Session/u1",))
         if method in ("RecordArea", "RecordMonitor"):
             return CAP.GLib.Variant("(o)", ("/org/gnome/Mutter/ScreenCast/Session/u1/Stream/u1",))
+        if method == "Start" and self.node_id is not None:
+            for path, registered in self.stream_watchers.items():
+                self._announce(path, registered)
         return CAP.GLib.Variant("()", ())
 
     def signal_subscribe(self, name, iface, signal, path, _arg0, _flags, callback):
         sub = self._next_sub
         self._next_sub += 1
-        if signal == "PipeWireStreamAdded" and self.node_id is not None:
-            node_id = self.node_id
-
-            def fire():
-                callback(self, name, path, iface, signal, CAP.GLib.Variant("(ua{sv})", (node_id, {})))
-                return False
-
-            CAP.GLib.idle_add(fire)
+        self.events.append(("subscribe", signal))
+        if signal == "PipeWireStreamAdded":
+            self.stream_watchers[path] = (sub, name, iface, callback)
         return sub
 
-    def signal_unsubscribe(self, _sub):
-        return None
+    def signal_unsubscribe(self, sub):
+        for path, registered in list(self.stream_watchers.items()):
+            if registered[0] == sub:
+                del self.stream_watchers[path]
+
+    def _announce(self, path, registered):
+        _sub, name, iface, callback = registered
+        node_id = self.node_id
+
+        def fire():
+            callback(
+                self, name, path, iface, "PipeWireStreamAdded", CAP.GLib.Variant("(ua{sv})", (node_id, {}))
+            )
+            return False
+
+        CAP.GLib.idle_add(fire)
 
     def methods(self):
         return [call["method"] for call in self.calls]
@@ -550,6 +571,26 @@ class MutterStreamGeometryTest(unittest.TestCase):
         region = {"x": 10, "y": 20, "width": 30, "height": 40}
         self.assertEqual(CAP._mutter_capture("region", region, True, 5.0), PNG_1X1)
         self.assertEqual(tuple(self.bus.args_for("RecordArea")[0][:4]), (10, 20, 30, 40))
+
+    def test_the_stream_subscription_exists_before_start_is_called(self):
+        # Rule 1. The fake announces the node only to a subscription that
+        # already existed when Start was handled, as Mutter does, so
+        # subscribing afterwards leaves the capture with no stream.
+        CAP._mutter_capture("screen", None, True, 5.0)
+        order = self.bus.events
+        self.assertIn(("subscribe", "PipeWireStreamAdded"), order)
+        self.assertIn(("call", "Start"), order)
+        self.assertLess(
+            order.index(("subscribe", "PipeWireStreamAdded")),
+            order.index(("call", "Start")),
+            "PipeWireStreamAdded must be subscribed before Start is called",
+        )
+
+    def test_a_stream_subscribed_only_after_start_is_never_announced(self):
+        self.bus.stream_watchers = _DroppedSubscriptions()
+        with self.assertRaises(CAP.CaptureError) as ctx:
+            CAP._mutter_capture("screen", None, True, 1.0)
+        self.assertIn("never announced", str(ctx.exception))
 
     def test_the_session_is_started_and_stopped_around_the_capture(self):
         CAP._mutter_capture("screen", None, True, 5.0)
@@ -610,13 +651,13 @@ class ProbeWithoutBindingsTest(unittest.TestCase):
 
 class RouteSelectionTest(unittest.TestCase):
     def setUp(self):
-        self.saved = (CAP._mutter_attempt, CAP._portal_capture, CAP.display_state, CAP.resize_png)
+        self.saved = (CAP._mutter_attempt, CAP._portal_capture, CAP.display_state, CAP._normalize_size)
         CAP.display_state = lambda *_a, **_k: {"width": 1920, "height": 1009, "monitors": [], "primary": {}}
         # Route selection, not output sizing; CaptureOutputSizeTest owns that.
-        CAP.resize_png = lambda png, _width, _height: png
+        CAP._normalize_size = lambda png, _expected, _notes: png
 
     def tearDown(self):
-        CAP._mutter_attempt, CAP._portal_capture, CAP.display_state, CAP.resize_png = self.saved
+        CAP._mutter_attempt, CAP._portal_capture, CAP.display_state, CAP._normalize_size = self.saved
 
     def test_auto_prefers_the_compositor_route(self):
         CAP._mutter_attempt = lambda *a: PNG_1X1
@@ -887,42 +928,77 @@ class PortalRegionScalingTest(unittest.TestCase):
                 CAP.resize_png(screenshot, *bad)
 
 
+class _DroppedSubscriptions(dict):
+    """A registry that forgets every subscription, as if each came too late."""
+
+    def __setitem__(self, key, value):
+        return None
+
+
 class PortalBus:
-    """A session bus that answers one Screenshot request on the predicted path."""
+    """A session bus that behaves the way the real portal does about ordering.
+
+    The portal destroys the Request object as soon as it answers, so a Response
+    subscription made after the Screenshot call can never see it. This fake
+    reproduces that: it only delivers to a subscription that already existed on
+    the predicted request path when the call was made. Subscribing afterwards
+    leaves the capture waiting, which is what rule 2 exists to prevent.
+    """
+
+    UNIQUE_NAME = ":1.42"
 
     def __init__(self, uri):
         self.uri = uri
-        self.subscriptions = 0
-        self.calls = []
+        self.events = []
+        self.responders = {}
+        self._next_sub = 1
 
     def get_unique_name(self):
-        return ":1.42"
+        return self.UNIQUE_NAME
 
     def signal_subscribe(self, name, iface, signal, path, _arg0, _flags, callback):
-        self.subscriptions += 1
+        sub = self._next_sub
+        self._next_sub += 1
+        self.events.append(("subscribe", signal, path))
         if signal == "Response":
-            uri = self.uri
+            self.responders[path] = (sub, name, iface, callback)
+        return sub
 
-            def fire():
-                callback(
-                    self,
-                    name,
-                    path,
-                    iface,
-                    signal,
-                    CAP.GLib.Variant("(ua{sv})", (0, {"uri": CAP.GLib.Variant("s", uri)})),
-                )
-                return False
+    def signal_unsubscribe(self, sub):
+        for path, registered in list(self.responders.items()):
+            if registered[0] == sub:
+                del self.responders[path]
 
-            CAP.GLib.idle_add(fire)
-        return self.subscriptions
+    def call_sync(self, _name, _path, _iface, method, args, _cancellable, _flags, _timeout, _extra):
+        self.events.append(("call", method, None))
+        if method == "Screenshot":
+            token = (args.unpack()[1] or {}).get("handle_token", "")
+            path = f"/org/freedesktop/portal/desktop/request/{self.UNIQUE_NAME.lstrip(':').replace('.', '_')}/{token}"
+            registered = self.responders.get(path)
+            if registered is not None:
+                self._answer(path, registered)
+            return CAP.GLib.Variant("(o)", (path,))
+        return CAP.GLib.Variant("()", ())
 
-    def signal_unsubscribe(self, _sub):
-        return None
+    def _answer(self, path, registered):
+        _sub, name, iface, callback = registered
+        uri = self.uri
 
-    def call_sync(self, _name, _path, _iface, method, _args, _cancellable, _flags, _timeout, _extra):
-        self.calls.append(method)
-        return CAP.GLib.Variant("(o)", ("/org/freedesktop/portal/desktop/request/1_42/tok",))
+        def fire():
+            callback(
+                self,
+                name,
+                path,
+                iface,
+                "Response",
+                CAP.GLib.Variant("(ua{sv})", (0, {"uri": CAP.GLib.Variant("s", uri)})),
+            )
+            return False
+
+        CAP.GLib.idle_add(fire)
+
+    def order(self):
+        return [(kind, what) for kind, what, _path in self.events]
 
 
 class PortalRouteReconciliationTest(unittest.TestCase):
@@ -958,12 +1034,14 @@ class PortalRouteReconciliationTest(unittest.TestCase):
         CAP._session_bus = lambda: self.bus
         return path
 
-    def test_a_scaled_screen_capture_reports_that_it_needs_resampling(self):
-        # Bringing it to the desktop size is capture()'s job, not this route's;
-        # CaptureOutputSizeTest owns that. Here the route must say it happened.
-        path = self._serve(self._png(400, 200))
-        _png, notes = CAP._portal_capture("screen", None, True, 5.0, self.DESKTOP)
-        self.assertTrue(any("resampled" in note for note in notes), notes)
+    def test_a_screen_capture_returns_the_framebuffer_and_removes_the_file(self):
+        # Sizing and its note are capture()'s job now, not this route's;
+        # CaptureOutputSizeTest owns both. This route returns what it was given.
+        original = self._png(400, 200)
+        path = self._serve(original)
+        png, notes = CAP._portal_capture("screen", None, True, 5.0, self.DESKTOP)
+        self.assertEqual(png, original)
+        self.assertEqual(notes, [], "the route claimed a resample it did not perform")
         self.assertFalse(path.exists(), "the portal's output file was left on disk")
 
     def test_an_unscaled_screen_capture_is_returned_untouched(self):
@@ -988,10 +1066,28 @@ class PortalRouteReconciliationTest(unittest.TestCase):
         self.assertEqual(corners, {(255, 0, 0)}, "the crop did not land on the marked area")
 
     def test_the_response_subscription_exists_before_the_screenshot_call(self):
+        # Rule 2. The fake only answers a subscription that already existed when
+        # the call was made, exactly as the portal does by destroying the
+        # Request object, so subscribing afterwards leaves this waiting.
         self._serve(self._png(200, 100))
         CAP._portal_capture("screen", None, True, 5.0, self.DESKTOP)
-        self.assertEqual(self.bus.calls, ["Screenshot"])
-        self.assertGreaterEqual(self.bus.subscriptions, 1)
+        order = self.bus.order()
+        self.assertIn(("subscribe", "Response"), order)
+        self.assertIn(("call", "Screenshot"), order)
+        self.assertLess(
+            order.index(("subscribe", "Response")),
+            order.index(("call", "Screenshot")),
+            "the Response subscription must exist before Screenshot is called",
+        )
+
+    def test_a_response_subscribed_only_after_the_call_never_arrives(self):
+        # Proves the fake above really withholds the answer, so the ordering
+        # assertion is load-bearing rather than incidentally satisfied.
+        self._serve(self._png(200, 100))
+        self.bus.responders = _DroppedSubscriptions()
+        with self.assertRaises(CAP.CaptureError) as ctx:
+            CAP._portal_capture("screen", None, True, 1.0, self.DESKTOP)
+        self.assertIn("never answered", str(ctx.exception))
 
     def test_a_screen_capture_without_the_layout_still_returns_with_a_note(self):
         original = self._png(400, 200)
@@ -1063,6 +1159,36 @@ class CaptureOutputSizeTest(unittest.TestCase):
         self._use("mutter", self._png(20, 10))
         result = CAP.capture(scope="screen")
         self.assertEqual((result.width, result.height), (40, 20))
+
+    def test_a_resample_is_reported_whichever_route_produced_the_image(self):
+        for route in ("mutter", "portal"):
+            with self.subTest(route=route):
+                self._use(route, self._png(80, 40))
+                result = CAP.capture(scope="screen")
+                self.assertTrue(
+                    any("resampled" in note for note in result.notes),
+                    f"a {route}-route resample was not reported: {result.notes}",
+                )
+
+    def test_a_capture_that_needed_no_resample_says_nothing_about_one(self):
+        self._use("mutter", self._png(40, 20))
+        self.assertEqual(CAP.capture(scope="screen").notes, [])
+
+    def test_an_image_of_the_wrong_shape_is_refused_rather_than_stretched(self):
+        # A screenshot covering one monitor out of several, not the desktop at
+        # another size: stretching it would return distorted content.
+        self._use("mutter", self._png(32, 20))
+        with self.assertRaises(CAP.CaptureError) as ctx:
+            CAP.capture(scope="screen", route="mutter")
+        self.assertIn("uniform", str(ctx.exception))
+
+    def test_a_wrongly_shaped_region_result_is_refused_too(self):
+        self._use("mutter", self._png(20, 5))
+        with self.assertRaises(CAP.CaptureError) as ctx:
+            CAP.capture(
+                scope="region", region={"x": 0, "y": 0, "width": 10, "height": 5}, route="mutter"
+            )
+        self.assertIn("uniform", str(ctx.exception))
 
 
 class LayoutUnavailableTest(unittest.TestCase):
