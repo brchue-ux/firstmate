@@ -51,6 +51,33 @@ jobs:
       - name: Unit tests
         run: ./gradlew testDebugUnitTest 2>&1 | tee -a "$RUNNER_TEMP/build.log"
 
+      # Gradle reports nothing about how many tests ran, so a green build says
+      # only "nothing failed" - it cannot distinguish a passing suite from a
+      # suite that silently lost files. It already had: an unanchored `data/`
+      # ignore rule kept a whole test class out of the repository, and CI went
+      # green without it. Printing the totals makes that visible.
+      - name: Test summary
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import glob, xml.etree.ElementTree as ET
+          files = glob.glob("app/build/test-results/**/*.xml", recursive=True)
+          if not files:
+              print("No test result XML found - did the test task run?")
+              raise SystemExit(0)
+          total = failed = skipped = 0
+          for f in files:
+              r = ET.parse(f).getroot()
+              total += int(r.get("tests", 0))
+              failed += int(r.get("failures", 0)) + int(r.get("errors", 0))
+              skipped += int(r.get("skipped", 0))
+          print(f"{total} tests across {len(files)} classes: "
+                f"{total - failed - skipped} passed, {failed} failed, {skipped} skipped")
+          for f in sorted(files):
+              r = ET.parse(f).getroot()
+              print(f"  {r.get('tests'):>3}  {r.get('name')}")
+          PY
+
       - name: Assemble debug APK
         run: ./gradlew assembleDebug 2>&1 | tee -a "$RUNNER_TEMP/build.log"
 
