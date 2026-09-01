@@ -404,7 +404,7 @@ reap_sweep_pass() {
 family_for_basename() {
   case "$1" in
     fm-arm-pretool-check.test.sh|fm-ask-user-authority.test.sh|fm-brief.test.sh|\
-    fm-browser-session-lib.test.sh|\
+    fm-browser-mcp-pin.test.sh|fm-browser-session-lib.test.sh|\
     fm-calm-pi-extension.test.sh|fm-cd-pretool-check.test.sh|\
     fm-composer-ghost.test.sh|fm-composer-lib.test.sh|\
     fm-crew-state.test.sh|fm-decision-hold-lifecycle.test.sh|\
@@ -975,6 +975,14 @@ families_for_changed_path() {
     bin/fm-peek.sh|bin/fm-composer*)
       printf '%s\n' backend-dispatch
       printf '%s\n' pure-contract-unit
+      ;;
+    bin/fm-browser-mcp-pin.sh)
+      # Its own suite is pure-contract-unit, but bin/fm-spawn.sh depends on this
+      # script's exit codes when it builds a launch line, and that dependency is
+      # pinned in the backend-dispatch family. The bin/* basename scan below only
+      # reaches suites that name the script, so select both explicitly.
+      printf '%s\n' pure-contract-unit
+      printf '%s\n' backend-dispatch
       ;;
     bin/fm-bearings-snapshot.sh|bin/fm-fleet-snapshot.sh|bin/fm-fleet-view.sh)
       printf '%s\n' snapshot-bearings

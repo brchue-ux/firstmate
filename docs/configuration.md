@@ -323,6 +323,22 @@ The locked bootstrap inheritance pass uses the same per-home changed-set and rer
 That live discovery starts from `state/*.meta` records with `kind=secondmate`; `data/secondmates.md` only backfills `home=` for older or incomplete meta records.
 Skipped items, such as a destination checkout that does not yet gitignore the item, are visible warnings but not hard failures.
 
+## Browser MCP pin (config/browser-mcp-pin)
+
+`chrome-devtools-axi` starts its browser bridge against whatever `chrome-devtools-mcp@latest` resolves to unless it is pointed at a specific build.
+Release 1.8.0 made `pageId` a required argument that `chrome-devtools-axi` 0.1.27 does not send, so a bridge started fresh against that release fails every snapshot, eval, click, fill and type while navigation still works.
+Firstmate therefore resolves one known-good build and exports it onto every crewmate and scout launch line, so a worker's browser work does not depend on what npm resolved that morning.
+A secondmate launch line carries no pin: a secondmate runs its own home and resolves its own pin at its own dispatch, so the pin stays scoped per home exactly like the other `FM_*` home overrides on that launch line.
+A secondmate home that has never installed the pin reports the same actionable diagnostic at its own dispatch, which is where its own `config/browser-mcp-pin` can answer it.
+
+`bin/fm-browser-mcp-pin.sh` owns the pinned version, the resolution order, the install, and the exit codes; read its header before writing the config file by hand.
+The short form: an inherited `CHROME_DEVTOOLS_AXI_MCP_PATH` wins, then `FM_BROWSER_MCP_PIN`, then `config/browser-mcp-pin`, then the fleet-managed install under the pin root.
+`config/browser-mcp-pin` holds one line: either `off`, which lifts the pin once `chrome-devtools-axi` sends `pageId` itself, or a path to a `chrome-devtools-mcp` entry point to use instead.
+Install the pinned build once per host with `bin/fm-browser-mcp-pin.sh --ensure`; until it is installed, dispatch prints the reason and the worker falls back to the broken default.
+
+The pin decides only which build a bridge starts against.
+It does not change where the browser is willing to write: `chrome-devtools-mcp` writes only beneath its own temp root, and `chrome-devtools-axi screenshot` prints its destination and exits 0 even when nothing was written, which is why generated briefs require a `/tmp` destination and a post-capture existence check.
+
 ## X mode (.env)
 
 X mode lets a firstmate instance answer public `@myfirstmate` mentions and act on normal reversible mention requests through firstmate's normal lifecycle.
@@ -410,6 +426,8 @@ FM_DATA_OVERRIDE=        # alternate data dir, mainly for tests
 FM_PROJECTS_OVERRIDE=    # alternate projects dir, mainly for tests
 FM_CONFIG_OVERRIDE=      # alternate config dir, mainly for tests
 FM_PROC_ROOT_OVERRIDE=   # alternate /proc root for the Linux process-identity read in fm-wake-lib.sh, mainly for tests
+FM_BROWSER_MCP_PIN=      # per-process chrome-devtools-mcp pin: "off" to lift it, or a path to an entry point; outranks config/browser-mcp-pin
+FM_BROWSER_MCP_ROOT=     # alternate install root for the pinned chrome-devtools-mcp build, mainly for tests; default ${XDG_CACHE_HOME:-$HOME/.cache}/firstmate/browser-mcp
 FM_BACKEND=             # optional runtime backend override for new spawns; tmux/herdr/zellij/orca/cmux support ship/scout spawns, codex-app is not accepted
 HERDR_SESSION=default  # herdr-only: named session for normal backend ops; not enough for destructive cleanup (docs/herdr-backend.md)
 FM_BACKEND_HERDR_COMPOSER_LINES=20  # herdr-only: tail lines scanned by composer-state guard/fallback paths; idle-baseline submit confirmation uses agent-state

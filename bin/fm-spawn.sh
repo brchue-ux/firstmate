@@ -1586,6 +1586,25 @@ LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
 if [ "$HARNESS" = claude ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
   LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_CONFIG_DIR") $LAUNCH"
 fi
+# Pin the crewmate's browser tooling to a chrome-devtools-mcp build that works.
+# chrome-devtools-axi otherwise resolves `chrome-devtools-mcp@latest`, and 1.8.0
+# made pageId a required argument the CLI never sends, so every fresh bridge fails
+# every snapshot, eval and click. bin/fm-browser-mcp-pin.sh owns the pinned version,
+# the resolution order, and the install; it never mutates anything on this read-only
+# lookup. Its stderr is left connected on purpose: it prints nothing when a pin
+# resolves and nothing when the pin is deliberately off, so anything that does reach
+# this stderr is a real diagnostic worth seeing at dispatch - a worker that silently
+# launches onto the broken build reads as a browser-tooling mystery hours later.
+# The pin is scoped per home, exactly like the FM_HOME override below: a secondmate
+# runs its own home, so forwarding this home's resolved path onto its launch line
+# would land as an inherited CHROME_DEVTOOLS_AXI_MCP_PATH, which outranks every
+# other source and would make that home's own config/browser-mcp-pin unreachable
+# for it and for every worker it dispatches. Skipping the export lets a secondmate
+# resolve its own pin at its own dispatch through this same code path; a secondmate
+# home with no pin installed reports the actionable diagnostic there instead.
+if [ "$KIND" != secondmate ] && MCP_PIN=$("$SCRIPT_DIR/fm-browser-mcp-pin.sh" path); then
+  LAUNCH="CHROME_DEVTOOLS_AXI_MCP_PATH=$(shell_quote "$MCP_PIN") $LAUNCH"
+fi
 # FM_HOME_BINDING is blanked on every launch line, whatever the kind, so a
 # binding issued for some other home can never ride an inherited environment
 # into an agent session and bless an FM_HOME that session never chose

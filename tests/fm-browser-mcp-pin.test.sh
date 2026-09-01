@@ -1,0 +1,403 @@
+#!/usr/bin/env bash
+# Behavior tests for fm-browser-mcp-pin.sh, the owner of the chrome-devtools-mcp
+# build crewmate browser work is pinned to.
+#
+# Every case drives the real script through its command-line interface with an
+# isolated home and pin root, so the assertions pin the resolution order and the
+# exit-code contract bin/fm-spawn.sh depends on, not the script's source.
+set -u
+
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
+PIN="$ROOT/bin/fm-browser-mcp-pin.sh"
+# Resolved physically, because the script prints physical paths and a host whose
+# TMPDIR contains a symlinked component would otherwise make every exact-path
+# expectation below compare a logical spelling against a physical one. The mkdir
+# is not redundant: fm_test_tmproot registers its EXIT trap inside the command
+# substitution, so the root it prints is already gone by the time it is assigned,
+# and every case here recreates what it needs under it.
+TMP_ROOT=$(fm_test_tmproot fm-browser-mcp-pin)
+mkdir -p "$TMP_ROOT"
+TMP_ROOT=$(CDPATH='' cd -- "$TMP_ROOT" && pwd -P)
+
+# An isolated home plus an empty pin root. Prints "home|root".
+make_pin_case() {
+  local name=$1 case_dir
+  case_dir="$TMP_ROOT/$name"
+  mkdir -p "$case_dir/home/config" "$case_dir/home/state" "$case_dir/home/data" "$case_dir/root"
+  printf '%s\n' "$case_dir/home|$case_dir/root"
+}
+
+read_pin_case() {
+  IFS='|' read -r HOME_DIR ROOT_DIR <<EOF
+$1
+EOF
+}
+
+# Lay down a file shaped like an installed chrome-devtools-mcp entry point under
+# the pin root, so resolution can find one without a real npm install.
+install_fake_pin() {
+  local root=$1 version=$2 entry
+  entry="$root/$version/node_modules/chrome-devtools-mcp/build/src/bin/chrome-devtools-mcp.js"
+  mkdir -p "$(dirname "$entry")"
+  printf '// fake chrome-devtools-mcp %s\n' "$version" > "$entry"
+  printf '%s\n' "$entry"
+}
+
+# The suite lifts the pin globally (tests/lib.sh), so every case here states its
+# own sources rather than inheriting that default.
+run_pin() {
+  local home=$1 root=$2
+  shift 2
+  FM_ROOT_OVERRIDE='' FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_BROWSER_MCP_ROOT="$root" FM_BROWSER_MCP_PIN="${CASE_ENV_PIN:-}" \
+    CHROME_DEVTOOLS_AXI_MCP_PATH="${CASE_INHERITED_PIN:-}" \
+    PATH="${CASE_PATH:-$PATH}" \
+    "$PIN" "$@"
+}
+
+# A stand-in npm for the --ensure cases, so they exercise the real install branch
+# without reaching a registry. Prints "$dir" for CASE_PATH.
+make_fake_npm() {
+  local dir=$1 body=$2 fakebin
+  fakebin=$(fm_fakebin "$dir")
+  printf '#!/usr/bin/env bash\nset -u\n%s\n' "$body" > "$fakebin/npm"
+  chmod +x "$fakebin/npm"
+  printf '%s\n' "$fakebin:$PATH"
+}
+
+test_version_is_reported() {
+  local rec out
+  rec=$(make_pin_case version)
+  read_pin_case "$rec"
+  out=$(run_pin "$HOME_DIR" "$ROOT_DIR" --version)
+  expect_code 0 "$?" "--version should succeed"
+  [ -n "$out" ] || fail "--version printed nothing"
+  case "$out" in
+    [0-9]*.[0-9]*.[0-9]*) ;;
+    *) fail "--version did not print a version: $out" ;;
+  esac
+  pass "the pinned chrome-devtools-mcp version is reported through --version"
+}
+
+test_no_pin_anywhere_is_an_actionable_refusal() {
+  local rec out err status
+  rec=$(make_pin_case absent)
+  read_pin_case "$rec"
+  err="$TMP_ROOT/absent.err"
+  out=$(run_pin "$HOME_DIR" "$ROOT_DIR" path 2>"$err")
+  status=$?
+  expect_code 2 "$status" "an unresolvable pin should exit 2"
+  [ -z "$out" ] || fail "an unresolvable pin printed a path: $out"
+  assert_grep "--ensure" "$err" "the refusal did not name the command that installs the pin"
+  pass "no pin anywhere refuses with an actionable reason and no path"
+}
+
+test_configured_off_lifts_the_pin_silently() {
+  local rec out err status
+  rec=$(make_pin_case off)
+  read_pin_case "$rec"
+  err="$TMP_ROOT/off.err"
+  printf 'off\n' > "$HOME_DIR/config/browser-mcp-pin"
+  out=$(run_pin "$HOME_DIR" "$ROOT_DIR" path 2>"$err")
+  status=$?
+  expect_code 3 "$status" "a lifted pin should exit 3"
+  [ -z "$out" ] || fail "a lifted pin printed a path: $out"
+  [ ! -s "$err" ] || fail "a lifted pin is a deliberate choice and must stay silent: $(cat "$err")"
+  pass "config/browser-mcp-pin=off lifts the pin with its own exit code and no diagnostic"
+}
+
+test_whitespace_padded_off_still_lifts_the_pin() {
+  local rec out err status
+  rec=$(make_pin_case off_padded)
+  read_pin_case "$rec"
+  err="$TMP_ROOT/off_padded.err"
+  install_fake_pin "$ROOT_DIR" "$(run_pin "$HOME_DIR" "$ROOT_DIR" --version)" >/dev/null
+  printf '  off  \n' > "$HOME_DIR/config/browser-mcp-pin"
+
+  out=$(run_pin "$HOME_DIR" "$ROOT_DIR" path 2>"$err")
+  status=$?
+  expect_code 3 "$status" "a whitespace-padded configured off should lift the pin like a clean off"
+  [ -z "$out" ] || fail "a whitespace-padded off resolved a pin anyway: $out"
+  [ ! -s "$err" ] || fail "a whitespace-padded off is still a deliberate choice and must stay silent: $(cat "$err")"
+
+  out=$(CASE_ENV_PIN='  off  ' run_pin "$HOME_DIR" "$ROOT_DIR" path 2>"$err")
+  status=$?
+  expect_code 3 "$status" "a whitespace-padded FM_BROWSER_MCP_PIN should lift the pin too"
+  [ -z "$out" ] || fail "a whitespace-padded env off resolved a pin anyway: $out"
+  pass "an off written with ordinary editor whitespace still lifts the pin"
+}
+
+test_installed_fleet_pin_resolves() {
+  local rec out entry
+  rec=$(make_pin_case installed)
+  read_pin_case "$rec"
+  entry=$(install_fake_pin "$ROOT_DIR" "$(run_pin "$HOME_DIR" "$ROOT_DIR" --version)")
+  out=$(run_pin "$HOME_DIR" "$ROOT_DIR" path)
+  expect_code 0 "$?" "an installed pin should resolve"
+  [ "$out" = "$entry" ] || fail "resolved pin was not the installed entry point"$'\n'"expected: $entry"$'\n'"actual:   $out"
+  pass "an installed fleet pin resolves to its entry point"
+}
+
+test_configured_path_wins_over_the_installed_pin() {
+  local rec out configured
+  rec=$(make_pin_case configured)
+  read_pin_case "$rec"
+  install_fake_pin "$ROOT_DIR" "$(run_pin "$HOME_DIR" "$ROOT_DIR" --version)" >/dev/null
+  configured="$TMP_ROOT/configured/other-mcp.js"
+  mkdir -p "$(dirname "$configured")"
+  printf '// other build\n' > "$configured"
+  printf '# a comment line the reader skips\n\n%s\n' "$configured" > "$HOME_DIR/config/browser-mcp-pin"
+  out=$(run_pin "$HOME_DIR" "$ROOT_DIR" path)
+  expect_code 0 "$?" "a configured pin path should resolve"
+  [ "$out" = "$configured" ] || fail "the configured path did not win over the installed pin: $out"
+  pass "a configured pin path wins over the installed one, past comments and blank lines"
+}
+
+test_relative_pins_resolve_to_absolute_paths() {
+  local rec out configured_abs inherited_abs
+  rec=$(make_pin_case relative)
+  read_pin_case "$rec"
+  mkdir -p "$HOME_DIR/vendor"
+  printf '// configured build\n' > "$HOME_DIR/vendor/configured-mcp.js"
+  printf '// inherited build\n' > "$HOME_DIR/vendor/inherited-mcp.js"
+  configured_abs=$(cd "$HOME_DIR" && pwd -P)/vendor/configured-mcp.js
+  inherited_abs=$(cd "$HOME_DIR" && pwd -P)/vendor/inherited-mcp.js
+  printf '%s\n' ./vendor/configured-mcp.js > "$HOME_DIR/config/browser-mcp-pin"
+
+  out=$(cd "$HOME_DIR" && run_pin "$HOME_DIR" "$ROOT_DIR" path)
+  expect_code 0 "$?" "a relative configured pin naming a real file should resolve"
+  [ "$out" = "$configured_abs" ] || fail "a relative configured pin was not absolutized"$'\n'"expected: $configured_abs"$'\n'"actual:   $out"
+
+  out=$(cd "$HOME_DIR" && CASE_INHERITED_PIN=./vendor/inherited-mcp.js \
+    run_pin "$HOME_DIR" "$ROOT_DIR" path)
+  expect_code 0 "$?" "a relative inherited pin naming a real file should resolve"
+  [ "$out" = "$inherited_abs" ] || fail "a relative inherited pin was not absolutized"$'\n'"expected: $inherited_abs"$'\n'"actual:   $out"
+  pass "a relative pin resolves to an absolute path that survives a different cwd"
+}
+
+test_configured_missing_path_refuses_rather_than_falling_back() {
+  local rec out err status
+  rec=$(make_pin_case configured_missing)
+  read_pin_case "$rec"
+  err="$TMP_ROOT/configured_missing.err"
+  install_fake_pin "$ROOT_DIR" "$(run_pin "$HOME_DIR" "$ROOT_DIR" --version)" >/dev/null
+  printf '%s\n' "$TMP_ROOT/configured_missing/nothing-here.js" > "$HOME_DIR/config/browser-mcp-pin"
+  out=$(run_pin "$HOME_DIR" "$ROOT_DIR" path 2>"$err")
+  status=$?
+  expect_code 2 "$status" "a configured pin naming a missing file should exit 2"
+  [ -z "$out" ] || fail "a missing configured pin still printed a path: $out"
+  assert_grep "nothing-here.js" "$err" "the refusal did not name the missing configured path"
+  pass "a configured pin naming nothing refuses instead of silently using the installed one"
+}
+
+test_inherited_env_wins_over_configuration() {
+  local rec out inherited configured
+  rec=$(make_pin_case inherited)
+  read_pin_case "$rec"
+  inherited="$TMP_ROOT/inherited/inherited-mcp.js"
+  configured="$TMP_ROOT/inherited/configured-mcp.js"
+  mkdir -p "$TMP_ROOT/inherited"
+  printf '// inherited\n' > "$inherited"
+  printf '// configured\n' > "$configured"
+  printf '%s\n' "$configured" > "$HOME_DIR/config/browser-mcp-pin"
+  out=$(CASE_INHERITED_PIN="$inherited" run_pin "$HOME_DIR" "$ROOT_DIR" path)
+  expect_code 0 "$?" "an inherited pin should resolve"
+  [ "$out" = "$inherited" ] || fail "the inherited pin did not win over configuration: $out"
+  pass "an inherited CHROME_DEVTOOLS_AXI_MCP_PATH wins over the configured pin"
+}
+
+test_env_override_lifts_the_pin_without_touching_config() {
+  local rec out status
+  rec=$(make_pin_case env_off)
+  read_pin_case "$rec"
+  install_fake_pin "$ROOT_DIR" "$(run_pin "$HOME_DIR" "$ROOT_DIR" --version)" >/dev/null
+  out=$(CASE_ENV_PIN=off run_pin "$HOME_DIR" "$ROOT_DIR" path 2>/dev/null)
+  status=$?
+  expect_code 3 "$status" "FM_BROWSER_MCP_PIN=off should lift the pin"
+  [ -z "$out" ] || fail "a lifted pin printed a path: $out"
+  [ ! -f "$HOME_DIR/config/browser-mcp-pin" ] || fail "the env override wrote configuration"
+  pass "FM_BROWSER_MCP_PIN=off lifts the pin for one process tree without writing config"
+}
+
+test_ensure_never_installs_over_an_explicit_pin() {
+  local rec out err status
+  rec=$(make_pin_case ensure_explicit)
+  read_pin_case "$rec"
+  err="$TMP_ROOT/ensure_explicit.err"
+  printf '%s\n' "$TMP_ROOT/ensure_explicit/nothing-here.js" > "$HOME_DIR/config/browser-mcp-pin"
+  out=$(run_pin "$HOME_DIR" "$ROOT_DIR" --ensure 2>"$err")
+  status=$?
+  expect_code 2 "$status" "--ensure should refuse when an explicit pin names nothing"
+  [ -z "$out" ] || fail "--ensure printed a path it did not install: $out"
+  assert_grep "nothing-here.js" "$err" "the refusal did not name the explicit pin"
+  [ -z "$(ls -A "$ROOT_DIR")" ] || fail "--ensure installed into the fleet root despite an explicit pin"
+  pass "--ensure reports an explicit pin that names nothing instead of installing around it"
+}
+
+test_ensure_is_a_no_op_once_the_pin_is_present() {
+  local rec out entry before
+  rec=$(make_pin_case ensure_present)
+  read_pin_case "$rec"
+  entry=$(install_fake_pin "$ROOT_DIR" "$(run_pin "$HOME_DIR" "$ROOT_DIR" --version)")
+  before=$(cat "$entry")
+  out=$(run_pin "$HOME_DIR" "$ROOT_DIR" --ensure)
+  expect_code 0 "$?" "--ensure should succeed when the pin is already installed"
+  [ "$out" = "$entry" ] || fail "--ensure did not print the installed entry point: $out"
+  [ "$(cat "$entry")" = "$before" ] || fail "--ensure reinstalled over a present pin"
+  pass "--ensure prints the present pin without reinstalling it"
+}
+
+test_ensure_failure_carries_npms_own_reason() {
+  local rec out err status CASE_PATH
+  rec=$(make_pin_case ensure_npm_fails)
+  read_pin_case "$rec"
+  err="$TMP_ROOT/ensure_npm_fails.err"
+  CASE_PATH=$(make_fake_npm "$TMP_ROOT/ensure_npm_fails/fake" \
+    'echo "npm error code ENOTFOUND" >&2; echo "npm error request to https://registry.example failed" >&2; exit 1')
+  out=$(CASE_PATH="$CASE_PATH" run_pin "$HOME_DIR" "$ROOT_DIR" --ensure 2>"$err")
+  status=$?
+  expect_code 2 "$status" "--ensure should exit 2 when npm fails"
+  [ -z "$out" ] || fail "a failed install printed a path: $out"
+  assert_grep "ENOTFOUND" "$err" "npm's own failure reason was swallowed by the refusal"
+  assert_grep "registry.example" "$err" "npm's own failure detail was swallowed by the refusal"
+  pass "a failed --ensure install reports npm's own reason, not just that it failed"
+}
+
+test_ensure_success_stays_quiet_and_prints_only_the_entry_point() {
+  local rec out err status version entry linked_root CASE_PATH
+  rec=$(make_pin_case ensure_npm_ok)
+  read_pin_case "$rec"
+  err="$TMP_ROOT/ensure_npm_ok.err"
+  version=$(run_pin "$HOME_DIR" "$ROOT_DIR" --version)
+  entry="$ROOT_DIR/$version/node_modules/chrome-devtools-mcp/build/src/bin/chrome-devtools-mcp.js"
+  # Reached through a symlinked root, so the fresh-install branch has to honor the
+  # same absolute-and-physical contract every other success path does.
+  linked_root="$TMP_ROOT/ensure_npm_ok/root-link"
+  ln -s "$ROOT_DIR" "$linked_root"
+  CASE_PATH=$(make_fake_npm "$TMP_ROOT/ensure_npm_ok/fake" \
+    'echo "added 42 packages"; echo "npm notice a new version is available" >&2
+     mkdir -p node_modules/chrome-devtools-mcp/build/src/bin
+     printf "// installed\n" > node_modules/chrome-devtools-mcp/build/src/bin/chrome-devtools-mcp.js')
+  out=$(CASE_PATH="$CASE_PATH" run_pin "$HOME_DIR" "$linked_root" --ensure 2>"$err")
+  status=$?
+  expect_code 0 "$status" "--ensure should succeed when npm installs the pin"
+  [ "$out" = "$entry" ] || fail "--ensure did not print the physical entry point"$'\n'"expected: $entry"$'\n'"actual:   $out"
+  [ ! -s "$err" ] || fail "a successful --ensure leaked npm chatter: $(cat "$err")"
+  pass "a successful --ensure prints only the entry point and stays quiet"
+}
+
+test_concurrent_ensure_publishes_exactly_one_tree() {
+  local rec version entry out_a out_b status_a status_b marker installs published leftovers CASE_PATH
+  rec=$(make_pin_case ensure_concurrent)
+  read_pin_case "$rec"
+  version=$(run_pin "$HOME_DIR" "$ROOT_DIR" --version)
+  entry="$ROOT_DIR/$version/node_modules/chrome-devtools-mcp/build/src/bin/chrome-devtools-mcp.js"
+  marker="$TMP_ROOT/ensure_concurrent/installs"
+  mkdir -p "$TMP_ROOT/ensure_concurrent"
+  # A stand-in npm that records its own invocation and then blocks until the other
+  # one has recorded too, so both callers are provably staging at the same moment
+  # rather than merely likely to be. Without that barrier a stalled second caller
+  # would short-circuit on the first one's published tree and the case would still
+  # pass while proving nothing about the publish race. Each staged tree is stamped
+  # with the pid that built it, so the published one can be shown to come from
+  # exactly one of them.
+  CASE_PATH=$(make_fake_npm "$TMP_ROOT/ensure_concurrent/fake" \
+    "printf 'install\\n' >> '$marker'
+     waited=0
+     while [ \"\$(wc -l < '$marker')\" -lt 2 ] && [ \"\$waited\" -lt 100 ]; do
+       sleep 0.1
+       waited=\$((waited + 1))
+     done
+     mkdir -p node_modules/chrome-devtools-mcp/build/src/bin
+     printf '// installed\\n' > node_modules/chrome-devtools-mcp/build/src/bin/chrome-devtools-mcp.js
+     printf '%s\\n' \"\$PPID\" > node_modules/chrome-devtools-mcp/builder")
+
+  CASE_PATH="$CASE_PATH" run_pin "$HOME_DIR" "$ROOT_DIR" --ensure > "$TMP_ROOT/ensure_concurrent/a.out" 2>"$TMP_ROOT/ensure_concurrent/a.err" &
+  local pid_a=$!
+  CASE_PATH="$CASE_PATH" run_pin "$HOME_DIR" "$ROOT_DIR" --ensure > "$TMP_ROOT/ensure_concurrent/b.out" 2>"$TMP_ROOT/ensure_concurrent/b.err" &
+  local pid_b=$!
+  wait "$pid_a"; status_a=$?
+  wait "$pid_b"; status_b=$?
+
+  expect_code 0 "$status_a" "the first concurrent --ensure should succeed"
+  expect_code 0 "$status_b" "the second concurrent --ensure should succeed on the published tree"
+  out_a=$(cat "$TMP_ROOT/ensure_concurrent/a.out")
+  out_b=$(cat "$TMP_ROOT/ensure_concurrent/b.out")
+  [ "$out_a" = "$entry" ] || fail "the first concurrent --ensure did not print the entry point: $out_a"
+  [ "$out_b" = "$entry" ] || fail "the second concurrent --ensure did not print the entry point: $out_b"
+  # Two real installs raced: both stubs ran to completion past the barrier.
+  installs=$(wc -l < "$marker")
+  [ "$installs" -eq 2 ] || fail "expected two concurrent installs to race, but npm ran $installs time(s)"
+  # Exactly one tree published: one builder stamp, and nothing nested under the
+  # live prefix by a rename that lost.
+  published=$(find "$ROOT_DIR/$version" -name builder | wc -l)
+  [ "$published" -eq 1 ] || fail "the live prefix holds $published published trees, not one"
+  leftovers=$(find "$ROOT_DIR" -maxdepth 1 -name ".$version.staging.*" | wc -l)
+  [ "$leftovers" -eq 0 ] || fail "concurrent --ensure runs left $leftovers staging directories behind"
+  pass "two racing --ensure installs publish exactly one tree and both report the resolved pin"
+}
+
+test_failed_install_never_publishes_a_partial_tree() {
+  local rec version live out err status CASE_PATH leftovers
+  rec=$(make_pin_case ensure_partial)
+  read_pin_case "$rec"
+  version=$(run_pin "$HOME_DIR" "$ROOT_DIR" --version)
+  live="$ROOT_DIR/$version"
+  err="$TMP_ROOT/ensure_partial.err"
+  # npm extracting the package's own entry point and then failing before its
+  # dependencies land is exactly what a killed or offline install leaves behind.
+  # Nothing downstream may ever see that tree, because [ -f entry ] is the only
+  # proof the launch line has that the pin is usable.
+  CASE_PATH=$(make_fake_npm "$TMP_ROOT/ensure_partial/fake" \
+    'mkdir -p node_modules/chrome-devtools-mcp/build/src/bin
+     printf "// half-extracted\n" > node_modules/chrome-devtools-mcp/build/src/bin/chrome-devtools-mcp.js
+     echo "npm error code ENOTFOUND" >&2
+     exit 1')
+
+  out=$(CASE_PATH="$CASE_PATH" run_pin "$HOME_DIR" "$ROOT_DIR" --ensure 2>"$err")
+  status=$?
+  expect_code 2 "$status" "a failed install should refuse"
+  [ -z "$out" ] || fail "a failed install printed a path: $out"
+  assert_grep "ENOTFOUND" "$err" "npm's own failure reason was swallowed by the refusal"
+  [ ! -e "$live" ] || fail "a failed install published a partial tree at $live"
+  leftovers=$(find "$ROOT_DIR" -maxdepth 1 -name ".$version.staging.*" | wc -l)
+  [ "$leftovers" -eq 0 ] || fail "a failed install left $leftovers staging directories behind"
+
+  # The refusal must still be reachable afterwards rather than short-circuiting on
+  # a half-built prefix that was never published.
+  out=$(run_pin "$HOME_DIR" "$ROOT_DIR" path 2>/dev/null)
+  status=$?
+  expect_code 2 "$status" "a failed install must leave the pin unresolved, not resolved to nothing"
+  [ -z "$out" ] || fail "a failed install still resolved a pin: $out"
+  pass "a failed install leaves the live prefix absent instead of publishing a partial tree"
+}
+
+test_unknown_argument_is_refused() {
+  local status
+  run_pin "$(make_pin_case unknown | cut -d'|' -f1)" "$TMP_ROOT/unknown/root" --nonsense >/dev/null 2>&1
+  status=$?
+  expect_code 64 "$status" "an unknown argument should be a usage error"
+  pass "an unknown argument is refused as a usage error"
+}
+
+test_version_is_reported
+test_no_pin_anywhere_is_an_actionable_refusal
+test_configured_off_lifts_the_pin_silently
+test_whitespace_padded_off_still_lifts_the_pin
+test_installed_fleet_pin_resolves
+test_configured_path_wins_over_the_installed_pin
+test_relative_pins_resolve_to_absolute_paths
+test_configured_missing_path_refuses_rather_than_falling_back
+test_inherited_env_wins_over_configuration
+test_env_override_lifts_the_pin_without_touching_config
+test_ensure_never_installs_over_an_explicit_pin
+test_ensure_is_a_no_op_once_the_pin_is_present
+test_ensure_failure_carries_npms_own_reason
+test_ensure_success_stays_quiet_and_prints_only_the_entry_point
+test_concurrent_ensure_publishes_exactly_one_tree
+test_failed_install_never_publishes_a_partial_tree
+test_unknown_argument_is_refused

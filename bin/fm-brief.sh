@@ -194,11 +194,17 @@ BROWSER_SESSION=$(fm_browser_session_name "$ID" "$FM_HOME") || {
   echo "error: no browser session name can be derived for task id: $ID" >&2
   exit 1
 }
+# The screenshot destination below targets Linux, where the browser's temp root is /tmp.
 BROWSER_RULE="3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
    Prefix EVERY chrome-devtools-axi call with \`CHROME_DEVTOOLS_AXI_SESSION=$BROWSER_SESSION\` so the browser it
    starts belongs to this task; an unpinned call leaves behind a browser nobody can attribute or stop.
    If you used the tool at all, run \`CHROME_DEVTOOLS_AXI_SESSION=$BROWSER_SESSION chrome-devtools-axi stop\`
-   before you append \`done:\` or \`failed:\` - it outlives your worktree otherwise."
+   before you append \`done:\` or \`failed:\` - it outlives your worktree otherwise.
+   Capture screenshots to a path under /tmp (your scratchpad is there), never into your worktree or home directory.
+   The browser only writes beneath its own temp root, but \`chrome-devtools-axi screenshot\` prints the
+   destination and exits 0 either way, so a screenshot written anywhere else is discarded while the tool
+   reports success. After every capture, confirm the file exists and is non-empty before you rely on it or
+   describe what it shows, then copy it wherever it belongs."
 
 if [ "$KIND" = secondmate ]; then
 SECONDMATE_PROJECTS=""

@@ -14,6 +14,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-tmp-sweep.sh`        | Reclaim stale orphaned `fm-<slug>.XXXXXX` scratch directories from the shared temp root, age-gated and never while in use |
 | `fm-tmp-usage.sh`        | Measure how full the shared temp root is with one `df`, and grade it warn/high/critical before it starts failing commands silently |
 | `fm-browser-sweep.sh`    | Report `chrome-devtools-axi` browser bridges idle past the window, with the session-scoped stop command; it never stops one itself |
+| `fm-browser-mcp-pin.sh`  | Resolve, and with `--ensure` install, the `chrome-devtools-mcp` build crewmate browser work is pinned to (docs/configuration.md) |
 | `fm-fleet-sync.sh`       | Refresh project clones against each project's registered base remote with safe fast-forwards, self-heals, `STUCK:` reports, branch pruning, and bounded recovery from an orphaned `.git/packed-refs.lock` |
 | `fm-fleet-snapshot.sh`   | Print the read-only structured fleet snapshot JSON (schema `fm-fleet-snapshot.v1`)   |
 | `fm-fleet-view.sh`       | Render the fleet snapshot as a human Markdown view                                   |
