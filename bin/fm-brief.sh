@@ -194,6 +194,7 @@ BROWSER_SESSION=$(fm_browser_session_name "$ID" "$FM_HOME") || {
   echo "error: no browser session name can be derived for task id: $ID" >&2
   exit 1
 }
+# The screenshot destination below targets Linux, where the browser's temp root is /tmp.
 BROWSER_RULE="3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
    Prefix EVERY chrome-devtools-axi call with \`CHROME_DEVTOOLS_AXI_SESSION=$BROWSER_SESSION\` so the browser it
    starts belongs to this task; an unpinned call leaves behind a browser nobody can attribute or stop.

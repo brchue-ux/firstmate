@@ -291,17 +291,27 @@ test_ensure_success_stays_quiet_and_prints_only_the_entry_point() {
 }
 
 test_concurrent_ensure_publishes_exactly_one_tree() {
-  local rec version entry out_a out_b status_a status_b published leftovers CASE_PATH
+  local rec version entry out_a out_b status_a status_b marker installs published leftovers CASE_PATH
   rec=$(make_pin_case ensure_concurrent)
   read_pin_case "$rec"
   version=$(run_pin "$HOME_DIR" "$ROOT_DIR" --version)
   entry="$ROOT_DIR/$version/node_modules/chrome-devtools-mcp/build/src/bin/chrome-devtools-mcp.js"
+  marker="$TMP_ROOT/ensure_concurrent/installs"
   mkdir -p "$TMP_ROOT/ensure_concurrent"
-  # A stand-in npm slow enough that both callers are guaranteed to be staging at
-  # once, stamping each staged tree with the pid that built it so the published
-  # tree can be shown to come from exactly one of them.
+  # A stand-in npm that records its own invocation and then blocks until the other
+  # one has recorded too, so both callers are provably staging at the same moment
+  # rather than merely likely to be. Without that barrier a stalled second caller
+  # would short-circuit on the first one's published tree and the case would still
+  # pass while proving nothing about the publish race. Each staged tree is stamped
+  # with the pid that built it, so the published one can be shown to come from
+  # exactly one of them.
   CASE_PATH=$(make_fake_npm "$TMP_ROOT/ensure_concurrent/fake" \
-    "sleep 1
+    "printf 'install\\n' >> '$marker'
+     waited=0
+     while [ \"\$(wc -l < '$marker')\" -lt 2 ] && [ \"\$waited\" -lt 100 ]; do
+       sleep 0.1
+       waited=\$((waited + 1))
+     done
      mkdir -p node_modules/chrome-devtools-mcp/build/src/bin
      printf '// installed\\n' > node_modules/chrome-devtools-mcp/build/src/bin/chrome-devtools-mcp.js
      printf '%s\\n' \"\$PPID\" > node_modules/chrome-devtools-mcp/builder")
@@ -319,13 +329,16 @@ test_concurrent_ensure_publishes_exactly_one_tree() {
   out_b=$(cat "$TMP_ROOT/ensure_concurrent/b.out")
   [ "$out_a" = "$entry" ] || fail "the first concurrent --ensure did not print the entry point: $out_a"
   [ "$out_b" = "$entry" ] || fail "the second concurrent --ensure did not print the entry point: $out_b"
+  # Two real installs raced: both stubs ran to completion past the barrier.
+  installs=$(wc -l < "$marker")
+  [ "$installs" -eq 2 ] || fail "expected two concurrent installs to race, but npm ran $installs time(s)"
   # Exactly one tree published: one builder stamp, and nothing nested under the
   # live prefix by a rename that lost.
   published=$(find "$ROOT_DIR/$version" -name builder | wc -l)
   [ "$published" -eq 1 ] || fail "the live prefix holds $published published trees, not one"
   leftovers=$(find "$ROOT_DIR" -maxdepth 1 -name ".$version.staging.*" | wc -l)
   [ "$leftovers" -eq 0 ] || fail "concurrent --ensure runs left $leftovers staging directories behind"
-  pass "concurrent --ensure runs publish exactly one tree and both report the resolved pin"
+  pass "two racing --ensure installs publish exactly one tree and both report the resolved pin"
 }
 
 test_failed_install_never_publishes_a_partial_tree() {
