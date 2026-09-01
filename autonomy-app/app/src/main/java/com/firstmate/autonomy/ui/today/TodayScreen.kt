@@ -104,7 +104,7 @@ fun TodayScreen(
 private fun TodayHeader(overview: TodayOverview) {
     AutonomyCard {
         Row(
-            modifier = Modifier.fillMaxWidth().padding(4.dp),
+            modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(18.dp),
         ) {

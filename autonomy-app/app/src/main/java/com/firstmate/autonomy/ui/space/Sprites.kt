@@ -151,7 +151,7 @@ object Sprites {
             val index = ((abs(radius) / r) * 13.4f).toInt().coerceIn(0, 13)
             val blobSize = 5.5f + rng.next() * 9f + (1f - f) * 9f
             add.shader = null
-            add.color = withAlpha(ramp[index], (0.075f + rng.next() * 0.115f) * (1f - f * 0.40f))
+            add.color = withAlpha(ramp[index], (0.10f + rng.next() * 0.14f) * (1f - f * 0.40f))
             canvas.drawCircle(px, py, blobSize / 2f, add)
         }
 

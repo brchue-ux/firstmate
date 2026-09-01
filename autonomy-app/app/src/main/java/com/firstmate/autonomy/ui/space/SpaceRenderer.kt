@@ -67,10 +67,17 @@ class SpaceRenderer {
 
     val hits = mutableListOf<Hit>()
 
-    /** Goals are laid out on a golden-angle spiral, so they never form rows. */
+    /**
+     * Goals are laid out on a golden-angle spiral, so they never form rows.
+     *
+     * These are density-independent units, like everything else in the sky.
+     * A Compose canvas reports its size in raw pixels, so treating world units
+     * as pixels drew the whole field at a third of its intended size on a
+     * 3x screen - nine fingernail-sized smudges instead of a sky.
+     */
     fun goalPosition(index: Int): Pair<Float, Float> {
         val angle = index * 2.39996f
-        val radius = 300f * sqrt(index + 0.7f)
+        val radius = 240f * sqrt(index + 0.7f)
         return cos(angle) * radius to sin(angle) * radius
     }
 
@@ -91,21 +98,29 @@ class SpaceRenderer {
         hits.clear()
         drawStarfield(canvas, width, height, camera, time)
 
+        // One factor turns world units into screen pixels. Zoom alone is not
+        // enough: the canvas is measured in pixels and the sky is written in dp.
+        val scale = camera.zoom * DENSITY
+        val margin = 40f * DENSITY
+
         val offscreen = mutableListOf<Triple<Int, Float, Float>>()
         goals.forEachIndexed { index, goal ->
             val (wx, wy) = goalPosition(index)
             val drift = sin(time * 0.11f + index) * 16f to cos(time * 0.09f + index * 1.3f) * 13f
-            val sx = (wx + drift.first - camera.x) * camera.zoom + width / 2f
-            val sy = (wy + drift.second - camera.y) * camera.zoom + height / 2f
-            val radius = goalRadius(goal) * camera.zoom
-            val alpha = 0.22f + goal.liveliness(today) * 0.78f
+            val sx = (wx + drift.first - camera.x) * scale + width / 2f
+            val sy = (wy + drift.second - camera.y) * scale + height / 2f
+            val radius = goalRadius(goal) * scale
+            // A goal with nothing logged against it still has to be findable,
+            // so the floor sits well clear of black. Liveliness separates a
+            // worked goal from an untouched one; it does not hide either.
+            val alpha = 0.40f + goal.liveliness(today) * 0.60f
 
-            if (sx > -radius - 40 && sx < width + radius + 40 &&
-                sy > -radius - 40 && sy < height + radius + 40
+            if (sx > -radius - margin && sx < width + radius + margin &&
+                sy > -radius - margin && sy < height + radius + margin
             ) {
                 drawGalaxy(canvas, goal, sx, sy, radius, alpha, time)
-                if (radius > 26f) {
-                    val fade = ((radius - 26f) / 34f).coerceIn(0f, 1f)
+                if (radius > 26f * DENSITY) {
+                    val fade = ((radius - 26f * DENSITY) / (34f * DENSITY)).coerceIn(0f, 1f)
                     textPaint.textSize = 12f * DENSITY
                     textPaint.color = Sprites.withAlpha(
                         if (goal.liveliness(today) < 0.3f) 0xFF7A8494.toInt() else 0xFFE8E6F5.toInt(),
@@ -121,7 +136,7 @@ class SpaceRenderer {
                         monoPaint,
                     )
                 }
-                hits += Hit(Hit.Kind.GALAXY, index, sx, sy, max(30f, radius * 0.72f))
+                hits += Hit(Hit.Kind.GALAXY, index, sx, sy, max(30f * DENSITY, radius * 0.72f))
             } else {
                 offscreen += Triple(index, sx, sy)
             }
@@ -143,8 +158,9 @@ class SpaceRenderer {
             val y = (rng.next() - 0.5f) * 4200f
             val z = 0.25f + rng.next() * 0.75f
             val phase = rng.next() * TAU
-            val sx = (x - camera.x * z) * camera.zoom + width / 2f
-            val sy = (y - camera.y * z) * camera.zoom + height / 2f
+            val scale = camera.zoom * DENSITY
+            val sx = (x - camera.x * z) * scale + width / 2f
+            val sy = (y - camera.y * z) * scale + height / 2f
             if (sx < -4 || sx > width + 4 || sy < -4 || sy > height + 4) return@repeat
             val twinkle = 0.45f + 0.35f * sin(time * 1.4f + phase)
             paint.shader = null

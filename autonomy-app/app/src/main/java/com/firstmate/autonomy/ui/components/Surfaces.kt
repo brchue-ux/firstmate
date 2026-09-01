@@ -10,6 +10,7 @@ import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -42,6 +43,15 @@ fun AutonomyCard(
     elevation: Dp = 10.dp,
     outlined: Boolean = true,
     containerColor: androidx.compose.ui.graphics.Color = MaterialTheme.colorScheme.surfaceContainerHigh,
+    /**
+     * Inset for the card's own content.
+     *
+     * It belongs here rather than at each call site. Without it a caller that
+     * simply drops a Text in gets that text flush against a 20dp rounded
+     * corner and a hairline border, where it reads as cut off - which is what
+     * happened to every screen that did not happen to add its own padding.
+     */
+    contentPadding: PaddingValues = PaddingValues(16.dp),
     content: @Composable ColumnScope.() -> Unit,
 ) {
     Card(
@@ -63,8 +73,9 @@ fun AutonomyCard(
         } else {
             null
         },
-        content = content,
-    )
+    ) {
+        Column(Modifier.padding(contentPadding), content = content)
+    }
 }
 
 /**
@@ -107,14 +118,12 @@ private fun AutonomyCardPreview() {
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             AutonomyCard {
-                Column(Modifier.padding(20.dp)) {
-                    Text("Elevated card", style = MaterialTheme.typography.titleMedium)
-                    Text(
-                        "20dp corners, tinted shadow, hairline outline.",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
+                Text("Elevated card", style = MaterialTheme.typography.titleMedium)
+                Text(
+                    "20dp corners, tinted shadow, hairline outline.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
         }
     }

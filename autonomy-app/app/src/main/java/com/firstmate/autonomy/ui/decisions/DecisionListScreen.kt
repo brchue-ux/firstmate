@@ -148,8 +148,9 @@ private fun SelfTrustSummary(
     AutonomyCard(
         modifier = modifier,
         containerColor = MaterialTheme.colorScheme.secondaryContainer,
+        contentPadding = PaddingValues(20.dp),
     ) {
-        Column(Modifier.padding(20.dp)) {
+        Column {
             Text(
                 text = "${state.decisions.size} decisions logged",
                 style = MaterialTheme.typography.titleMedium,
@@ -183,8 +184,8 @@ fun DecisionCard(
         targetValue = if (expanded) 180f else 0f,
         label = "decisionChevron",
     )
-    AutonomyCard(modifier = modifier) {
-        Column(Modifier.padding(20.dp)) {
+    AutonomyCard(modifier = modifier, contentPadding = PaddingValues(20.dp)) {
+        Column {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(
                     Modifier

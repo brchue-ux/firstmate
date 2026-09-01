@@ -124,7 +124,10 @@ private fun SpaceField(
 
     var camX by remember { mutableFloatStateOf(0f) }
     var camY by remember { mutableFloatStateOf(0f) }
-    var zoom by remember { mutableFloatStateOf(0.55f) }
+    // A world unit is a dp, so this is a real zoom factor rather than an
+    // accidental density divisor. 0.34 fits several galaxies on a phone with
+    // the rest reachable by panning.
+    var zoom by remember { mutableFloatStateOf(0.34f) }
     var time by remember { mutableFloatStateOf(0f) }
 
     LaunchedEffect(Unit) {
@@ -168,7 +171,7 @@ private fun SpaceField(
                         if (depth != Depth.SPACE) return@detectTransformGestures
                         camX -= pan.x / zoom
                         camY -= pan.y / zoom
-                        zoom = (zoom * gestureZoom).coerceIn(0.14f, 1.7f)
+                        zoom = (zoom * gestureZoom).coerceIn(0.10f, 1.1f)
                     }
                 },
         ) {
