@@ -1,9 +1,11 @@
 projects/
 state/
-data/
-# The Android app's data layer is source code, not firstmate's private records;
-# the bare `data/` rule above would otherwise swallow the whole Room layer.
-!autonomy-app/app/src/main/java/com/firstmate/autonomy/data/
+# Anchored to the repository root. Unanchored, `data/` matches a directory of
+# that name at ANY depth, which silently excluded the Android app's Room layer
+# and then its tests - both written, neither committed, and invisible until a
+# real compiler asked for them. firstmate's private records live at the top
+# level of the home, so the root anchor is what was meant all along.
+/data/
 .no-mistakes/
 .lavish/
 .fm-secondmate-home
