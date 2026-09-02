@@ -1,0 +1,1761 @@
+#!/usr/bin/env python3
+"""Contract unit tests for the desktop-capture engine (bin/fm-deskcap-lib.py).
+
+Everything here runs without a compositor, a session bus or a display. The
+guards that matter most are the ones that made earlier attempts at this look
+like total failures:
+
+  - the portal request path must be PREDICTED from the bus name, because the
+    Response subscription has to exist before the method call;
+  - a session the compositor closed must be rebuilt, not reported as a failure;
+  - the portal's output file must be removed after it is read, so captures never
+    accumulate in the captain's home directory;
+  - a close that arrives while a frame is being pulled must still be seen, which
+    only happens if the GLib default main context is pumped during the wait;
+  - one call gets one deadline, shared by the rebuild and by both routes.
+
+Live capture against the real compositor is not asserted here - it is
+docs/verification/desktop-capture.md plus `bin/fm-deskcap-mcp.py --selftest`.
+"""
+import base64
+import contextlib
+import importlib.util
+import io
+import json
+import subprocess
+import sys
+import tempfile
+import time
+import unittest
+from pathlib import Path
+
+BIN = Path(__file__).resolve().parents[1] / "bin"
+
+
+def _load(name, filename):
+    spec = importlib.util.spec_from_file_location(name, BIN / filename)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+CAP = _load("fm_deskcap_lib", "fm-deskcap-lib.py")
+
+PNG_1X1 = bytes.fromhex(
+    "89504e470d0a1a0a0000000d4948445200000001000000010806000000"
+    "1f15c4890000000d49444154789c6360000002000100ffff03000006"
+    "00057d13a20000000049454e44ae426082"
+)
+
+
+class FakeBus:
+    def __init__(self, unique_name=":1.30893"):
+        self._unique_name = unique_name
+
+    def get_unique_name(self):
+        return self._unique_name
+
+
+class PngDimensionsTest(unittest.TestCase):
+    def test_reads_ihdr(self):
+        self.assertEqual(CAP.png_dimensions(PNG_1X1), (1, 1))
+
+    def test_rejects_non_png(self):
+        with self.assertRaises(CAP.CaptureError):
+            CAP.png_dimensions(b"not a png at all, definitely not")
+
+    def test_rejects_truncated(self):
+        with self.assertRaises(CAP.CaptureError):
+            CAP.png_dimensions(PNG_1X1[:10])
+
+    def test_rejects_zero_sized(self):
+        zeroed = PNG_1X1[:16] + (0).to_bytes(4, "big") + PNG_1X1[20:]
+        with self.assertRaises(CAP.CaptureError):
+            CAP.png_dimensions(zeroed)
+
+
+class RegionValidationTest(unittest.TestCase):
+    def test_normalizes_integers(self):
+        self.assertEqual(
+            CAP.normalize_region({"x": "10", "y": 20, "width": 30, "height": 40}),
+            {"x": 10, "y": 20, "width": 30, "height": 40},
+        )
+
+    def test_rejects_zero_and_negative_size(self):
+        for bad in ({"x": 0, "y": 0, "width": 0, "height": 5}, {"x": 0, "y": 0, "width": 5, "height": -1}):
+            with self.assertRaises(CAP.CaptureError):
+                CAP.normalize_region(bad)
+
+    def test_rejects_negative_origin(self):
+        with self.assertRaises(CAP.CaptureError):
+            CAP.normalize_region({"x": -1, "y": 0, "width": 5, "height": 5})
+
+    def test_rejects_missing_fields(self):
+        with self.assertRaises(CAP.CaptureError):
+            CAP.normalize_region({"x": 0, "y": 0, "width": 5})
+
+    def test_rejects_non_mapping(self):
+        with self.assertRaises(CAP.CaptureError):
+            CAP.normalize_region(None)
+
+    def test_fit_rejects_region_off_the_desktop(self):
+        bounds = {"width": 1920, "height": 1009}
+        with self.assertRaises(CAP.CaptureError) as ctx:
+            CAP.fit_region({"x": 0, "y": 0, "width": 5000, "height": 100}, bounds)
+        self.assertIn("1920x1009", str(ctx.exception))
+
+    def test_fit_accepts_a_region_flush_with_the_edge(self):
+        bounds = {"width": 1920, "height": 1009}
+        region = {"x": 1820, "y": 909, "width": 100, "height": 100}
+        self.assertEqual(CAP.fit_region(region, bounds), region)
+
+
+class RegionInImagePixelsTest(unittest.TestCase):
+    """A logical rectangle has to land on the same content in a scaled screenshot."""
+
+    BOUNDS = {"width": 1920, "height": 1080}
+
+    def test_an_unscaled_screenshot_needs_no_conversion(self):
+        region = {"x": 100, "y": 50, "width": 300, "height": 200}
+        self.assertEqual(CAP.region_in_image_pixels(region, self.BOUNDS, 1920, 1080), region)
+
+    def test_a_doubled_screenshot_doubles_the_rectangle(self):
+        self.assertEqual(
+            CAP.region_in_image_pixels(
+                {"x": 100, "y": 50, "width": 300, "height": 200}, self.BOUNDS, 3840, 2160
+            ),
+            {"x": 200, "y": 100, "width": 600, "height": 400},
+        )
+
+    def test_a_screenshot_of_a_different_rectangle_is_refused_not_stretched(self):
+        # A screenshot of one monitor out of several is not the desktop at
+        # another size, and placing a region on it would be silently wrong.
+        with self.assertRaises(CAP.CaptureError) as ctx:
+            CAP.region_in_image_pixels(
+                {"x": 10, "y": 10, "width": 100, "height": 100},
+                {"width": 3000, "height": 1200},
+                1920,
+                1080,
+            )
+        self.assertIn("uniform", str(ctx.exception))
+
+    def test_a_slightly_uneven_factor_from_rounded_bounds_is_still_accepted(self):
+        placed = CAP.region_in_image_pixels(
+            {"x": 0, "y": 0, "width": 100, "height": 100}, {"width": 1707, "height": 960}, 2560, 1440
+        )
+        self.assertEqual((placed["width"], placed["height"]), (150, 150))
+
+    def test_a_rectangle_flush_with_the_edge_stays_inside_the_screenshot(self):
+        placed = CAP.region_in_image_pixels(
+            {"x": 1820, "y": 980, "width": 100, "height": 100}, self.BOUNDS, 3840, 2160
+        )
+        self.assertLessEqual(placed["x"] + placed["width"], 3840)
+        self.assertLessEqual(placed["y"] + placed["height"], 2160)
+        self.assertEqual((placed["x"], placed["y"]), (3640, 1960))
+
+    def test_a_rectangle_never_collapses_to_nothing(self):
+        placed = CAP.region_in_image_pixels(
+            {"x": 0, "y": 0, "width": 3, "height": 3}, self.BOUNDS, 96, 54
+        )
+        self.assertGreaterEqual(placed["width"], 1)
+        self.assertGreaterEqual(placed["height"], 1)
+
+    def test_unknown_desktop_bounds_are_refused_rather_than_guessed(self):
+        for bad in (None, {}, {"width": 0, "height": 1080}):
+            with self.assertRaises(CAP.CaptureError):
+                CAP.region_in_image_pixels({"x": 0, "y": 0, "width": 1, "height": 1}, bad, 100, 100)
+
+
+class LogicalSizeTest(unittest.TestCase):
+    """Mutter divides a mode size by the scale with roundf, so truncating drifts."""
+
+    def test_unity_scale_is_the_mode_size(self):
+        self.assertEqual(CAP._logical_size(1920, 1.0), 1920)
+
+    def test_a_fractional_scale_rounds_rather_than_truncates(self):
+        self.assertEqual(CAP._logical_size(2560, 1.5), 1707)
+        self.assertEqual(CAP._logical_size(1440, 1.5), 960)
+
+    def test_an_integer_scale_divides_exactly(self):
+        self.assertEqual(CAP._logical_size(3840, 2.0), 1920)
+
+    def test_a_missing_scale_leaves_the_mode_size_alone(self):
+        self.assertEqual(CAP._logical_size(1920, 0), 1920)
+
+    def test_a_size_never_rounds_away_to_nothing(self):
+        self.assertGreaterEqual(CAP._logical_size(1, 8.0), 1)
+
+
+class PortalRequestPathTest(unittest.TestCase):
+    """Rule 2: the Response subscription needs the path BEFORE the call."""
+
+    def test_predicts_the_documented_request_path(self):
+        self.assertEqual(
+            CAP._portal_request_path(FakeBus(":1.30893"), "fmshot1"),
+            "/org/freedesktop/portal/desktop/request/1_30893/fmshot1",
+        )
+
+    def test_escapes_every_dot_in_the_bus_name(self):
+        self.assertEqual(
+            CAP._portal_request_path(FakeBus(":1.2.3"), "tok"),
+            "/org/freedesktop/portal/desktop/request/1_2_3/tok",
+        )
+
+
+class PortalFileHygieneTest(unittest.TestCase):
+    """The portal picks where it writes; a capture must not leave that behind."""
+
+    def test_reads_then_removes_the_portal_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "Screenshot-12.png"
+            path.write_bytes(PNG_1X1)
+            notes = []
+            self.assertEqual(CAP._take_portal_file(path.as_uri(), notes), PNG_1X1)
+            self.assertFalse(path.exists(), "the portal's output file was left on disk")
+            self.assertEqual(notes, [])
+
+    def test_rejects_a_location_it_cannot_read(self):
+        with self.assertRaises(CAP.CaptureError):
+            CAP._take_portal_file("https://example.invalid/shot.png", [])
+
+    def test_reports_a_missing_file_clearly(self):
+        with self.assertRaises(CAP.CaptureError) as ctx:
+            CAP._take_portal_file("file:///nonexistent/fm-deskcap/none.png", [])
+        self.assertIn("cannot read", str(ctx.exception))
+
+
+class ClosedSessionRebuildTest(unittest.TestCase):
+    """A headless RDP session's virtual monitor comes and goes with the client."""
+
+    def test_rebuilds_once_after_the_compositor_closes_the_session(self):
+        calls = []
+
+        def flaky(scope, region, cursor, timeout, bounds=None):
+            calls.append(scope)
+            if len(calls) == 1:
+                raise CAP.SessionClosed("closed")
+            return PNG_1X1
+
+        original = CAP._mutter_capture
+        CAP._mutter_capture = flaky
+        try:
+            self.assertEqual(CAP._mutter_attempt("screen", None, True, 1.0), PNG_1X1)
+        finally:
+            CAP._mutter_capture = original
+        self.assertEqual(len(calls), 2, "the capture was not rebuilt after the close")
+
+    def test_a_second_close_is_reported_rather_than_retried_forever(self):
+        calls = []
+
+        def always_closed(scope, region, cursor, timeout, bounds=None):
+            calls.append(scope)
+            raise CAP.SessionClosed("closed")
+
+        original = CAP._mutter_capture
+        CAP._mutter_capture = always_closed
+        try:
+            with self.assertRaises(CAP.SessionClosed):
+                CAP._mutter_attempt("screen", None, True, 1.0)
+        finally:
+            CAP._mutter_capture = original
+        self.assertEqual(len(calls), 2)
+
+    def test_the_rebuild_gets_what_is_left_of_the_budget_not_a_fresh_one(self):
+        budgets = []
+
+        def flaky(scope, region, cursor, timeout, bounds=None):
+            budgets.append(timeout)
+            if len(budgets) == 1:
+                time.sleep(0.3)
+                raise CAP.SessionClosed("closed")
+            return PNG_1X1
+
+        original = CAP._mutter_capture
+        CAP._mutter_capture = flaky
+        try:
+            self.assertEqual(CAP._mutter_attempt("screen", None, True, 5.0), PNG_1X1)
+        finally:
+            CAP._mutter_capture = original
+        self.assertEqual(budgets[0], 5.0)
+        self.assertLess(budgets[1], budgets[0], "the rebuild restarted the timeout instead of continuing it")
+
+
+class MainContextPumpTest(unittest.TestCase):
+    """Signal callbacks only run while the default main context is iterated."""
+
+    def setUp(self):
+        if CAP._GI_IMPORT_ERROR is not None:
+            self.skipTest("GObject introspection bindings unavailable")
+        CAP._pump_main_context()
+
+    def test_pumping_delivers_a_callback_queued_on_the_default_context(self):
+        seen = {"ran": False}
+
+        def mark():
+            seen["ran"] = True
+            return False
+
+        CAP.GLib.idle_add(mark)
+        self.assertFalse(seen["ran"], "a queued callback must not run before the context is iterated")
+        CAP._pump_main_context()
+        self.assertTrue(seen["ran"], "a queued callback was not delivered by the pump")
+
+    def test_pumping_returns_promptly_when_nothing_is_queued(self):
+        started = time.monotonic()
+        CAP._pump_main_context()
+        self.assertLess(time.monotonic() - started, 1.0)
+
+
+class FakeMapInfo:
+    def __init__(self, data):
+        self.data = data
+
+
+class FakeBuffer:
+    def __init__(self, data):
+        self.data = data
+        self.unmapped = False
+
+    def map(self, _flags):
+        return True, FakeMapInfo(self.data)
+
+    def unmap(self, _info):
+        self.unmapped = True
+
+
+class FakeSample:
+    def __init__(self, data):
+        self.buffer = FakeBuffer(data)
+
+    def get_buffer(self):
+        return self.buffer
+
+
+class FakeMessage:
+    def __init__(self, message_type):
+        self.type = message_type
+
+
+class FakeSink:
+    """An appsink replaying a scripted series of pull results."""
+
+    def __init__(self, samples):
+        self.samples = list(samples)
+        self.pulls = 0
+
+    def emit(self, _signal, _timeout_ns):
+        self.pulls += 1
+        if self.samples:
+            return self.samples.pop(0)
+        time.sleep(0.02)
+        return None
+
+
+class FakeGstBus:
+    def __init__(self, messages):
+        self.messages = list(messages)
+
+    def pop_filtered(self, _mask):
+        return self.messages.pop(0) if self.messages else None
+
+
+class FakePipeline:
+    def __init__(self, sink, bus):
+        self.sink = sink
+        self.bus = bus
+        self.states = []
+
+    def get_by_name(self, _name):
+        return self.sink
+
+    def set_state(self, state):
+        self.states.append(state)
+
+    def get_bus(self):
+        return self.bus
+
+
+class FakeGst:
+    MSECOND = 1000000
+    pipelines: list = []
+    next_samples: list = []
+    next_messages: list = []
+
+    class State:
+        PLAYING = "playing"
+        NULL = "null"
+
+    class MessageType:
+        ERROR = 1
+        EOS = 2
+
+    class MapFlags:
+        READ = 1
+
+    @classmethod
+    def parse_launch(cls, _description):
+        pipeline = FakePipeline(FakeSink(cls.next_samples), FakeGstBus(cls.next_messages))
+        cls.pipelines.append(pipeline)
+        return pipeline
+
+
+class ClosedDuringFramePullTest(unittest.TestCase):
+    """The window this covers is the one a headless RDP disconnect lands in."""
+
+    def setUp(self):
+        if CAP._GI_IMPORT_ERROR is not None:
+            self.skipTest("GObject introspection bindings unavailable")
+        CAP._pump_main_context()
+        FakeGst.pipelines = []
+        FakeGst.next_samples = []
+        FakeGst.next_messages = []
+        self.saved_gst = CAP.Gst
+        CAP.Gst = FakeGst
+
+    def tearDown(self):
+        CAP.Gst = self.saved_gst
+        CAP._pump_main_context()
+
+    def test_a_close_delivered_during_the_pull_ends_the_wait(self):
+        closed = {"seen": False}
+
+        def close_it():
+            closed["seen"] = True
+            return False
+
+        CAP.GLib.idle_add(close_it)
+        started = time.monotonic()
+        png = CAP._pull_png(7, 30.0, lambda: closed["seen"])
+        elapsed = time.monotonic() - started
+
+        self.assertEqual(png, b"", "a closed session must not be reported as a frame")
+        self.assertLess(elapsed, 5.0, "the close was not observed until the pull timed out")
+        self.assertEqual(len(FakeGst.pipelines), 1, "the pull never reached its wait loop")
+        self.assertEqual(FakeGst.pipelines[0].states[-1], FakeGst.State.NULL, "the pipeline was not torn down")
+
+    def test_an_already_closed_session_never_builds_a_pipeline(self):
+        self.assertEqual(CAP._pull_png(7, 30.0, lambda: True), b"")
+        self.assertEqual(FakeGst.pipelines, [])
+
+    def test_without_a_close_the_pull_still_gives_up_at_its_timeout(self):
+        started = time.monotonic()
+        self.assertEqual(CAP._pull_png(7, 0.3, lambda: False), b"")
+        self.assertLess(time.monotonic() - started, 5.0)
+
+    def test_a_frame_that_lands_with_the_eos_is_returned_not_discarded(self):
+        # pngenc posts EOS right after its single frame, so the pull that
+        # follows the EOS message is where that frame can show up.
+        FakeGst.next_samples = [None, FakeSample(PNG_1X1)]
+        FakeGst.next_messages = [FakeMessage(FakeGst.MessageType.EOS)]
+
+        started = time.monotonic()
+        png = CAP._pull_png(7, 2.0, None)
+
+        self.assertEqual(png, PNG_1X1, "the frame pulled after EOS was thrown away")
+        self.assertLess(time.monotonic() - started, 1.5, "the pull spun on instead of returning the frame")
+        self.assertTrue(FakeGst.pipelines[0].sink.samples == [], "the scripted frame was never pulled")
+
+    def test_an_eos_with_no_frame_behind_it_still_gives_up(self):
+        FakeGst.next_samples = [None, None]
+        FakeGst.next_messages = [FakeMessage(FakeGst.MessageType.EOS)]
+        self.assertEqual(CAP._pull_png(7, 2.0, None), b"")
+
+    def test_a_frame_pulled_before_any_message_is_returned(self):
+        FakeGst.next_samples = [FakeSample(PNG_1X1)]
+        self.assertEqual(CAP._pull_png(7, 2.0, None), PNG_1X1)
+        self.assertTrue(FakeGst.pipelines[0].sink.samples == [])
+
+
+class RecordingBus:
+    """A session bus that behaves the way Mutter does about ordering.
+
+    PipeWireStreamAdded is emitted while Start() is being handled, so a
+    subscription made afterwards never sees it. This fake reproduces that: it
+    only delivers to a subscription that already existed on the stream path when
+    Start was called, which is what rule 1 exists to prevent.
+    """
+
+    def __init__(self, node_id=None):
+        self.calls = []
+        self.events = []
+        self.node_id = node_id
+        self.stream_watchers = {}
+        self._next_sub = 1
+
+    def call_sync(self, _name, _path, _iface, method, args, _cancellable, _flags, timeout_ms, _extra):
+        self.calls.append(
+            {"method": method, "args": None if args is None else args.unpack(), "timeout_ms": timeout_ms}
+        )
+        self.events.append(("call", method))
+        if method == "CreateSession":
+            return CAP.GLib.Variant("(o)", ("/org/gnome/Mutter/ScreenCast/Session/u1",))
+        if method in ("RecordArea", "RecordMonitor"):
+            return CAP.GLib.Variant("(o)", ("/org/gnome/Mutter/ScreenCast/Session/u1/Stream/u1",))
+        if method == "Start" and self.node_id is not None:
+            for path, registered in self.stream_watchers.items():
+                self._announce(path, registered)
+        return CAP.GLib.Variant("()", ())
+
+    def signal_subscribe(self, name, iface, signal, path, _arg0, _flags, callback):
+        sub = self._next_sub
+        self._next_sub += 1
+        self.events.append(("subscribe", signal))
+        if signal == "PipeWireStreamAdded":
+            self.stream_watchers[path] = (sub, name, iface, callback)
+        return sub
+
+    def signal_unsubscribe(self, sub):
+        for path, registered in list(self.stream_watchers.items()):
+            if registered[0] == sub:
+                del self.stream_watchers[path]
+
+    def _announce(self, path, registered):
+        _sub, name, iface, callback = registered
+        node_id = self.node_id
+
+        def fire():
+            callback(
+                self, name, path, iface, "PipeWireStreamAdded", CAP.GLib.Variant("(ua{sv})", (node_id, {}))
+            )
+            return False
+
+        CAP.GLib.idle_add(fire)
+
+    def methods(self):
+        return [call["method"] for call in self.calls]
+
+    def args_for(self, method):
+        return [call["args"] for call in self.calls if call["method"] == method]
+
+
+class MutterStreamGeometryTest(unittest.TestCase):
+    """What the compositor route asks the compositor to record."""
+
+    TWO_MONITORS = {
+        "monitors": [
+            {"connector": "DP-1", "x": 0, "y": 0, "width": 1920, "height": 1080, "scale": 1.0, "primary": True},
+            {"connector": "DP-2", "x": 1920, "y": 0, "width": 1080, "height": 1200, "scale": 1.0, "primary": False},
+        ],
+        "primary": {"connector": "DP-1"},
+        "width": 3000,
+        "height": 1200,
+    }
+
+    def setUp(self):
+        if CAP._GI_IMPORT_ERROR is not None:
+            self.skipTest("GObject introspection bindings unavailable")
+        CAP._pump_main_context()
+        self.bus = RecordingBus(node_id=42)
+        self.saved = (CAP._session_bus, CAP._require_gst, CAP.display_state, CAP._pull_png)
+        CAP._session_bus = lambda: self.bus
+        CAP._require_gst = lambda: None
+        CAP.display_state = lambda *_args, **_kwargs: self.TWO_MONITORS
+        CAP._pull_png = lambda node_id, timeout, closed=None: PNG_1X1
+
+    def tearDown(self):
+        CAP._session_bus, CAP._require_gst, CAP.display_state, CAP._pull_png = self.saved
+        CAP._pump_main_context()
+
+    def test_screen_scope_records_the_whole_virtual_desktop(self):
+        self.assertEqual(CAP._mutter_capture("screen", None, True, 5.0), PNG_1X1)
+        areas = self.bus.args_for("RecordArea")
+        self.assertEqual(len(areas), 1, "screen scope did not record an area")
+        self.assertEqual(
+            tuple(areas[0][:4]),
+            (0, 0, 3000, 1200),
+            "screen scope recorded something other than the full virtual desktop",
+        )
+        self.assertNotIn("RecordMonitor", self.bus.methods())
+
+    def test_region_scope_records_exactly_the_requested_rectangle(self):
+        region = {"x": 10, "y": 20, "width": 30, "height": 40}
+        self.assertEqual(CAP._mutter_capture("region", region, True, 5.0), PNG_1X1)
+        self.assertEqual(tuple(self.bus.args_for("RecordArea")[0][:4]), (10, 20, 30, 40))
+
+    def test_the_stream_subscription_exists_before_start_is_called(self):
+        # Rule 1. The fake announces the node only to a subscription that
+        # already existed when Start was handled, as Mutter does, so
+        # subscribing afterwards leaves the capture with no stream.
+        CAP._mutter_capture("screen", None, True, 5.0)
+        order = self.bus.events
+        self.assertIn(("subscribe", "PipeWireStreamAdded"), order)
+        self.assertIn(("call", "Start"), order)
+        self.assertLess(
+            order.index(("subscribe", "PipeWireStreamAdded")),
+            order.index(("call", "Start")),
+            "PipeWireStreamAdded must be subscribed before Start is called",
+        )
+
+    def test_a_stream_subscribed_only_after_start_is_never_announced(self):
+        self.bus.stream_watchers = _DroppedSubscriptions()
+        with self.assertRaises(CAP.CaptureError) as ctx:
+            CAP._mutter_capture("screen", None, True, 1.0)
+        self.assertIn("never announced", str(ctx.exception))
+
+    def test_the_session_is_started_and_stopped_around_the_capture(self):
+        CAP._mutter_capture("screen", None, True, 5.0)
+        methods = self.bus.methods()
+        self.assertEqual(methods[0], "CreateSession")
+        self.assertIn("Start", methods)
+        self.assertEqual(methods[-1], "Stop", "the screen-cast session was not torn down")
+
+    def test_no_d_bus_call_outlives_the_remaining_budget(self):
+        CAP._mutter_capture("screen", None, True, 1.0)
+        for call in self.bus.calls:
+            self.assertLessEqual(
+                call["timeout_ms"], 1000, f"{call['method']} was given longer than the whole capture budget"
+            )
+
+
+class SilentStreamTest(unittest.TestCase):
+    """A screen cast that never presents a frame must not eat the whole deadline.
+
+    A completely static screen has been observed leaving the compositor route
+    waiting for a frame that never comes. The capture still has to fail, but it
+    has to fail cheaply, because the deadline it is spending is the one the
+    fallback route needs. No compositor is involved here: the bus is the same
+    ordering-faithful fake the other compositor-route tests use, and the frame
+    pull is one that consumes the wait it was handed and yields nothing, which
+    is exactly what that failure looks like from the engine's side.
+    """
+
+    LAYOUT = {"width": 1920, "height": 1009, "monitors": [], "primary": {}}
+
+    def setUp(self):
+        if CAP._GI_IMPORT_ERROR is not None:
+            self.skipTest("GObject introspection bindings unavailable")
+        CAP._pump_main_context()
+        self.bus = RecordingBus(node_id=42)
+        self.waits = []
+        self.saved = (
+            CAP._session_bus,
+            CAP._require_gst,
+            CAP.display_state,
+            CAP._pull_png,
+            CAP._portal_capture,
+            CAP._normalize_size,
+        )
+        CAP._session_bus = lambda: self.bus
+        CAP._require_gst = lambda: None
+        CAP.display_state = lambda *_a, **_k: self.LAYOUT
+        # Route timing, not output sizing; CaptureOutputSizeTest owns that.
+        CAP._normalize_size = lambda png, _expected, _notes: png
+
+        def silent_stream(_node_id, timeout, _closed=None):
+            self.waits.append(timeout)
+            time.sleep(timeout)
+            return b""
+
+        CAP._pull_png = silent_stream
+
+    def tearDown(self):
+        (
+            CAP._session_bus,
+            CAP._require_gst,
+            CAP.display_state,
+            CAP._pull_png,
+            CAP._portal_capture,
+            CAP._normalize_size,
+        ) = self.saved
+        CAP._pump_main_context()
+
+    def test_a_stream_with_no_frame_gives_up_early_and_the_fallback_serves_it(self):
+        budgets = []
+
+        def portal(_scope, _region, _cursor, timeout, _bounds=None):
+            budgets.append(timeout)
+            return PNG_1X1, []
+
+        CAP._portal_capture = portal
+        started = time.monotonic()
+        result = CAP.capture(scope="screen", timeout=15.0)
+        elapsed = time.monotonic() - started
+        self.assertEqual(result.route, "portal", "the fallback did not serve the capture")
+        self.assertTrue(
+            any("no frame" in note for note in result.notes),
+            f"the reply does not say why the primary route was abandoned: {result.notes}",
+        )
+        self.assertLess(elapsed, 5.0, "waiting for a frame that never came burned the caller's deadline")
+        self.assertGreater(
+            budgets[0], 10.0, "the fallback was left with almost none of the shared deadline"
+        )
+
+    def test_a_route_pinned_to_the_primary_still_reports_the_missing_frame(self):
+        CAP._portal_capture = lambda *a: (_ for _ in ()).throw(AssertionError("portal must not be used"))
+        started = time.monotonic()
+        with self.assertRaises(CAP.CaptureError) as ctx:
+            CAP.capture(scope="screen", route="mutter", timeout=15.0)
+        elapsed = time.monotonic() - started
+        self.assertIn("no frame", str(ctx.exception))
+        self.assertLess(elapsed, 5.0, "a pinned primary route waited out the whole deadline")
+
+    def test_the_frame_wait_leaves_the_rest_of_the_deadline_unspent(self):
+        CAP._portal_capture = lambda *a: (PNG_1X1, [])
+        CAP.capture(scope="screen", timeout=15.0)
+        self.assertTrue(self.waits, "the frame pull was never reached")
+        self.assertLess(
+            max(self.waits),
+            5.0,
+            "the frame wait was handed the whole end-to-end deadline instead of a short bound",
+        )
+
+
+# Loads the engine in a fresh interpreter where `gi` cannot be imported at all,
+# so the module-level GLib name is genuinely never bound, then prints what
+# probe() reports. That is the machine probe() exists to diagnose, and it cannot
+# be reproduced in-process because this interpreter has already imported gi.
+PROBE_WITHOUT_GI = """
+import importlib.util, json, sys
+
+
+class BlockGi:
+    def find_spec(self, name, path=None, target=None):
+        if name == "gi" or name.startswith("gi."):
+            raise ImportError("blocked: gir1.2-gst-plugins-base-1.0 is missing")
+        return None
+
+
+sys.meta_path.insert(0, BlockGi())
+spec = importlib.util.spec_from_file_location("fm_deskcap_lib", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+assert not hasattr(module, "GLib"), "the test did not actually unbind GLib"
+print(json.dumps(module.probe()))
+"""
+
+
+class ProbeWithoutBindingsTest(unittest.TestCase):
+    """probe() has to survive the machine it exists to diagnose."""
+
+    def test_a_broken_gi_import_is_reported_rather_than_raised(self):
+        done = subprocess.run(
+            [sys.executable, "-c", PROBE_WITHOUT_GI, str(BIN / "fm-deskcap-lib.py")],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        self.assertEqual(done.returncode, 0, f"probe() crashed without gi:\n{done.stderr}")
+        report = json.loads(done.stdout)
+        for key in ("bindings", "gstreamer", "display", "mutter_route", "portal_route"):
+            self.assertIn(key, report, "probe() dropped a section it is meant to report")
+        for key in ("bindings", "gstreamer", "display", "mutter_route", "portal_route"):
+            self.assertIn("gir1.2-gst-plugins-base-1.0 is missing", str(report[key]))
+
+
+class RouteSelectionTest(unittest.TestCase):
+    def setUp(self):
+        self.saved = (CAP._mutter_attempt, CAP._portal_capture, CAP.display_state, CAP._normalize_size)
+        CAP.display_state = lambda *_a, **_k: {"width": 1920, "height": 1009, "monitors": [], "primary": {}}
+        # Route selection, not output sizing; CaptureOutputSizeTest owns that.
+        CAP._normalize_size = lambda png, _expected, _notes: png
+
+    def tearDown(self):
+        CAP._mutter_attempt, CAP._portal_capture, CAP.display_state, CAP._normalize_size = self.saved
+
+    def test_auto_prefers_the_compositor_route(self):
+        CAP._mutter_attempt = lambda *a: PNG_1X1
+        CAP._portal_capture = lambda *a: (_ for _ in ()).throw(AssertionError("portal must not be used"))
+        result = CAP.capture(scope="screen")
+        self.assertEqual(result.route, "mutter")
+        self.assertEqual((result.width, result.height), (1, 1))
+
+    def test_auto_falls_back_to_the_portal_and_says_why(self):
+        CAP._mutter_attempt = lambda *a: (_ for _ in ()).throw(CAP.CaptureError("screen cast refused"))
+        CAP._portal_capture = lambda *a: (PNG_1X1, [])
+        result = CAP.capture(scope="screen")
+        self.assertEqual(result.route, "portal")
+        self.assertTrue(any("screen cast refused" in note for note in result.notes))
+
+    def test_auto_falls_back_when_the_primary_route_raises_a_raw_glib_error(self):
+        if CAP._GI_IMPORT_ERROR is not None:
+            self.skipTest("GObject introspection bindings unavailable")
+        CAP._mutter_attempt = lambda *a: (_ for _ in ()).throw(
+            CAP.GLib.Error("no element videoconvert")
+        )
+        CAP._portal_capture = lambda *a: (PNG_1X1, [])
+        result = CAP.capture(scope="screen")
+        self.assertEqual(result.route, "portal")
+        self.assertTrue(any("videoconvert" in note for note in result.notes))
+
+    def test_a_raw_glib_error_on_a_pinned_route_is_reported_as_a_capture_failure(self):
+        if CAP._GI_IMPORT_ERROR is not None:
+            self.skipTest("GObject introspection bindings unavailable")
+        CAP._mutter_attempt = lambda *a: (_ for _ in ()).throw(CAP.GLib.Error("gst init failed"))
+        with self.assertRaises(CAP.CaptureError) as ctx:
+            CAP.capture(scope="screen", route="mutter")
+        self.assertIn("gst init failed", str(ctx.exception))
+
+    def test_the_fallback_continues_the_deadline_instead_of_restarting_it(self):
+        budgets = []
+
+        def slow_mutter(scope, region, cursor, timeout, bounds=None):
+            budgets.append(timeout)
+            time.sleep(0.3)
+            raise CAP.CaptureError("screen cast refused")
+
+        def portal(scope, region, cursor, timeout, bounds=None):
+            budgets.append(timeout)
+            return PNG_1X1, []
+
+        CAP._mutter_attempt = slow_mutter
+        CAP._portal_capture = portal
+        self.assertEqual(CAP.capture(scope="screen", timeout=5.0).route, "portal")
+        self.assertLessEqual(budgets[0], 5.0)
+        self.assertLess(budgets[1], budgets[0], "the portal route was handed a fresh budget")
+
+    def test_a_malformed_rectangle_is_refused_before_the_compositor_is_asked(self):
+        def refuse(*_a, **_k):
+            raise AssertionError("the display layout was read before the rectangle was checked")
+
+        CAP.display_state = refuse
+        CAP._mutter_attempt = lambda *a: (_ for _ in ()).throw(AssertionError("no capture must be attempted"))
+        with self.assertRaises(CAP.CaptureError):
+            CAP.capture(scope="region", region={"x": 0, "y": 0, "width": 0, "height": 10})
+
+    def test_region_validation_is_inside_the_capture_deadline(self):
+        seen = {}
+
+        def recording_display_state(timeout_ms=CAP.DBUS_CALL_TIMEOUT_MS):
+            seen["timeout_ms"] = timeout_ms
+            return {"width": 1920, "height": 1009, "monitors": [], "primary": {}}
+
+        CAP.display_state = recording_display_state
+        CAP._mutter_attempt = lambda *a: PNG_1X1
+        CAP.capture(scope="region", region={"x": 0, "y": 0, "width": 10, "height": 10}, timeout=1.0)
+        self.assertLessEqual(
+            seen["timeout_ms"],
+            1000,
+            "reading the display layout was allowed to outlive the whole capture budget",
+        )
+
+    def test_a_pinned_route_does_not_fall_back(self):
+        CAP._mutter_attempt = lambda *a: (_ for _ in ()).throw(CAP.CaptureError("screen cast refused"))
+        CAP._portal_capture = lambda *a: (_ for _ in ()).throw(AssertionError("portal must not be used"))
+        with self.assertRaises(CAP.CaptureError):
+            CAP.capture(scope="screen", route="mutter")
+
+    def test_the_portal_route_is_given_the_desktop_bounds_for_a_region(self):
+        seen = {}
+
+        def portal(scope, region, cursor, timeout, bounds=None):
+            seen["bounds"] = bounds
+            return PNG_1X1, []
+
+        CAP._mutter_attempt = lambda *a: (_ for _ in ()).throw(CAP.CaptureError("no screen cast"))
+        CAP._portal_capture = portal
+        CAP.capture(scope="region", region={"x": 0, "y": 0, "width": 10, "height": 10})
+        self.assertIsNotNone(seen["bounds"], "the portal route cannot rescale without the desktop bounds")
+        self.assertEqual((seen["bounds"]["width"], seen["bounds"]["height"]), (1920, 1009))
+
+    def test_a_dependency_failure_on_every_route_is_reported_as_one(self):
+        CAP._mutter_attempt = lambda *a: (_ for _ in ()).throw(CAP.MissingDependency("no gi"))
+        CAP._portal_capture = lambda *a: (_ for _ in ()).throw(CAP.MissingDependency("no gi"))
+        with self.assertRaises(CAP.MissingDependency):
+            CAP.capture(scope="screen")
+
+    def test_a_dependency_failure_on_only_one_route_stays_an_ordinary_failure(self):
+        CAP._mutter_attempt = lambda *a: (_ for _ in ()).throw(CAP.MissingDependency("no gstreamer"))
+        CAP._portal_capture = lambda *a: (_ for _ in ()).throw(CAP.CaptureError("no portal"))
+        with self.assertRaises(CAP.CaptureError) as ctx:
+            CAP.capture(scope="screen")
+        self.assertNotIsInstance(ctx.exception, CAP.MissingDependency)
+
+    def test_both_routes_failing_reports_both(self):
+        CAP._mutter_attempt = lambda *a: (_ for _ in ()).throw(CAP.CaptureError("no screen cast"))
+        CAP._portal_capture = lambda *a: (_ for _ in ()).throw(CAP.CaptureError("no portal"))
+        with self.assertRaises(CAP.CaptureError) as ctx:
+            CAP.capture(scope="screen")
+        self.assertIn("no screen cast", str(ctx.exception))
+        self.assertIn("no portal", str(ctx.exception))
+
+    def test_region_scope_reaches_the_route_with_a_normalized_rectangle(self):
+        seen = {}
+
+        def record(scope, region, cursor, timeout, bounds=None):
+            seen.update({"scope": scope, "region": region})
+            return PNG_1X1
+
+        CAP._mutter_attempt = record
+        CAP.capture(scope="region", region={"x": "1", "y": 2, "width": 3, "height": 4})
+        self.assertEqual(seen["region"], {"x": 1, "y": 2, "width": 3, "height": 4})
+
+    def test_window_scope_is_not_offered_by_this_slice(self):
+        with self.assertRaises(CAP.CaptureError) as ctx:
+            CAP.capture(scope="window")
+        self.assertIn("window", str(ctx.exception))
+
+    def test_an_unknown_route_is_refused(self):
+        with self.assertRaises(CAP.CaptureError):
+            CAP.capture(scope="screen", route="magic")
+
+    def test_a_route_that_returns_something_other_than_a_png_fails(self):
+        CAP._mutter_attempt = lambda *a: b"\x00" * 64
+        CAP._portal_capture = lambda *a: (_ for _ in ()).throw(CAP.CaptureError("no portal"))
+        with self.assertRaises(CAP.CaptureError):
+            CAP.capture(scope="screen", route="mutter")
+
+
+class CropTest(unittest.TestCase):
+    """The portal has no region scope, so a region there is cropped afterwards."""
+
+    def setUp(self):
+        if CAP._GI_IMPORT_ERROR is not None:
+            self.skipTest("GObject introspection bindings unavailable")
+
+    def _solid_png(self, width, height):
+        pixbuf = CAP.GdkPixbuf.Pixbuf.new(CAP.GdkPixbuf.Colorspace.RGB, False, 8, width, height)
+        pixbuf.fill(0x336699FF)
+        ok, data = pixbuf.save_to_bufferv("png", [], [])
+        self.assertTrue(ok)
+        return bytes(data)
+
+    def test_crops_to_exactly_the_region(self):
+        cropped = CAP.crop_png(self._solid_png(200, 100), {"x": 10, "y": 20, "width": 50, "height": 30})
+        self.assertEqual(CAP.png_dimensions(cropped), (50, 30))
+
+    def test_refuses_a_region_larger_than_the_screenshot(self):
+        with self.assertRaises(CAP.CaptureError):
+            CAP.crop_png(self._solid_png(40, 40), {"x": 0, "y": 0, "width": 80, "height": 10})
+
+    def test_rejects_bytes_that_are_not_a_png(self):
+        with self.assertRaises(CAP.CaptureError):
+            CAP.crop_png(b"still not a png", {"x": 0, "y": 0, "width": 1, "height": 1})
+
+
+class DownscaleTest(unittest.TestCase):
+    """max_width keeps a full-display capture small for the agents this serves."""
+
+    def setUp(self):
+        if CAP._GI_IMPORT_ERROR is not None:
+            self.skipTest("GObject introspection bindings unavailable")
+
+    def _solid_png(self, width, height):
+        pixbuf = CAP.GdkPixbuf.Pixbuf.new(CAP.GdkPixbuf.Colorspace.RGB, False, 8, width, height)
+        pixbuf.fill(0x336699FF)
+        ok, data = pixbuf.save_to_bufferv("png", [], [])
+        self.assertTrue(ok)
+        return bytes(data)
+
+    def test_shrinks_to_the_ceiling_and_keeps_the_aspect_ratio(self):
+        scaled = CAP.downscale_png(self._solid_png(1920, 1009), 480)
+        self.assertEqual(CAP.png_dimensions(scaled), (480, 252))
+
+    def test_a_capture_already_under_the_ceiling_is_returned_unchanged(self):
+        original = self._solid_png(100, 50)
+        self.assertIs(CAP.downscale_png(original, 400), original)
+
+    def test_a_very_small_ceiling_still_produces_at_least_one_row(self):
+        self.assertEqual(CAP.png_dimensions(CAP.downscale_png(self._solid_png(1920, 1009), 1)), (1, 1))
+
+    def test_undecodable_bytes_fail_as_a_capture_error_not_a_raw_glib_error(self):
+        # This is the difference between an agent reading a tool error and the
+        # MCP client getting an internal error with the capture already lost.
+        with self.assertRaises(CAP.CaptureError):
+            CAP.downscale_png(b"not a png at all, definitely not", 100)
+
+    def test_a_nonsense_ceiling_is_refused(self):
+        with self.assertRaises(CAP.CaptureError):
+            CAP.downscale_png(self._solid_png(40, 40), 0)
+
+
+class PortalRegionScalingTest(unittest.TestCase):
+    """The portal hands back the framebuffer, which need not match the logical desktop."""
+
+    def setUp(self):
+        if CAP._GI_IMPORT_ERROR is not None:
+            self.skipTest("GObject introspection bindings unavailable")
+
+    def _marked_png(self, width, height, mark):
+        pixbuf = CAP.GdkPixbuf.Pixbuf.new(CAP.GdkPixbuf.Colorspace.RGB, False, 8, width, height)
+        pixbuf.fill(0x000000FF)
+        pixbuf.new_subpixbuf(mark["x"], mark["y"], mark["width"], mark["height"]).fill(0xFF0000FF)
+        ok, data = pixbuf.save_to_bufferv("png", [], [])
+        self.assertTrue(ok)
+        return bytes(data)
+
+    def _colors(self, png):
+        pixbuf = CAP._decode_png(png, "test")
+        pixels = pixbuf.get_pixels()
+        stride, channels = pixbuf.get_rowstride(), pixbuf.get_n_channels()
+        seen = set()
+        for row in range(pixbuf.get_height()):
+            for col in range(pixbuf.get_width()):
+                offset = row * stride + col * channels
+                seen.add(tuple(pixels[offset:offset + 3]))
+        return seen
+
+    def test_a_region_lands_on_the_same_content_in_a_doubled_screenshot(self):
+        bounds = {"width": 200, "height": 100}
+        screenshot = self._marked_png(400, 200, {"x": 200, "y": 100, "width": 100, "height": 50})
+        placed = CAP.region_in_image_pixels({"x": 100, "y": 50, "width": 50, "height": 25}, bounds, 400, 200)
+        cropped = CAP.crop_png(screenshot, placed)
+        self.assertEqual(CAP.png_dimensions(cropped), (100, 50))
+        self.assertEqual(self._colors(cropped), {(255, 0, 0)}, "the crop did not land on the marked area")
+
+    def test_cropping_the_unconverted_rectangle_would_miss_that_content(self):
+        screenshot = self._marked_png(400, 200, {"x": 200, "y": 100, "width": 100, "height": 50})
+        stray = CAP.crop_png(screenshot, {"x": 100, "y": 50, "width": 50, "height": 25})
+        self.assertNotIn((255, 0, 0), self._colors(stray))
+
+    def test_a_region_comes_back_at_the_requested_logical_size(self):
+        bounds = {"width": 200, "height": 100}
+        region = {"x": 100, "y": 50, "width": 50, "height": 25}
+        screenshot = self._marked_png(400, 200, {"x": 200, "y": 100, "width": 100, "height": 50})
+        placed = CAP.region_in_image_pixels(region, bounds, 400, 200)
+        reconciled = CAP.resize_png(CAP.crop_png(screenshot, placed), region["width"], region["height"])
+        self.assertEqual(CAP.png_dimensions(reconciled), (50, 25))
+        self.assertEqual(self._colors(reconciled), {(255, 0, 0)})
+
+    def test_a_screen_capture_comes_back_at_the_desktop_size(self):
+        screenshot = self._marked_png(400, 200, {"x": 0, "y": 0, "width": 400, "height": 200})
+        self.assertEqual(CAP.png_dimensions(CAP.resize_png(screenshot, 200, 100)), (200, 100))
+
+    def test_an_unscaled_capture_is_returned_byte_for_byte(self):
+        screenshot = self._marked_png(200, 100, {"x": 0, "y": 0, "width": 10, "height": 10})
+        self.assertIs(CAP.resize_png(screenshot, 200, 100), screenshot)
+
+    def test_a_resize_to_nothing_is_refused(self):
+        screenshot = self._marked_png(200, 100, {"x": 0, "y": 0, "width": 10, "height": 10})
+        for bad in ((0, 100), (200, 0), (-4, 10)):
+            with self.assertRaises(CAP.CaptureError):
+                CAP.resize_png(screenshot, *bad)
+
+
+class _DroppedSubscriptions(dict):
+    """A registry that forgets every subscription, as if each came too late."""
+
+    def __setitem__(self, key, value):
+        return None
+
+
+class PortalBus:
+    """A session bus that behaves the way the real portal does about ordering.
+
+    The portal destroys the Request object as soon as it answers, so a Response
+    subscription made after the Screenshot call can never see it. This fake
+    reproduces that: it only delivers to a subscription that already existed on
+    the predicted request path when the call was made. Subscribing afterwards
+    leaves the capture waiting, which is what rule 2 exists to prevent.
+    """
+
+    UNIQUE_NAME = ":1.42"
+
+    def __init__(self, uri):
+        self.uri = uri
+        self.events = []
+        self.responders = {}
+        self._next_sub = 1
+
+    def get_unique_name(self):
+        return self.UNIQUE_NAME
+
+    def signal_subscribe(self, name, iface, signal, path, _arg0, _flags, callback):
+        sub = self._next_sub
+        self._next_sub += 1
+        self.events.append(("subscribe", signal, path))
+        if signal == "Response":
+            self.responders[path] = (sub, name, iface, callback)
+        return sub
+
+    def signal_unsubscribe(self, sub):
+        for path, registered in list(self.responders.items()):
+            if registered[0] == sub:
+                del self.responders[path]
+
+    def call_sync(self, _name, _path, _iface, method, args, _cancellable, _flags, _timeout, _extra):
+        self.events.append(("call", method, None))
+        if method == "Screenshot":
+            token = (args.unpack()[1] or {}).get("handle_token", "")
+            path = f"/org/freedesktop/portal/desktop/request/{self.UNIQUE_NAME.lstrip(':').replace('.', '_')}/{token}"
+            registered = self.responders.get(path)
+            if registered is not None:
+                self._answer(path, registered)
+            return CAP.GLib.Variant("(o)", (path,))
+        return CAP.GLib.Variant("()", ())
+
+    def _answer(self, path, registered):
+        _sub, name, iface, callback = registered
+        uri = self.uri
+
+        def fire():
+            callback(
+                self,
+                name,
+                path,
+                iface,
+                "Response",
+                CAP.GLib.Variant("(ua{sv})", (0, {"uri": CAP.GLib.Variant("s", uri)})),
+            )
+            return False
+
+        CAP.GLib.idle_add(fire)
+
+    def order(self):
+        return [(kind, what) for kind, what, _path in self.events]
+
+
+class PortalRouteReconciliationTest(unittest.TestCase):
+    """Both routes must answer one call with the same area at the same size."""
+
+    DESKTOP = {"width": 200, "height": 100}
+
+    def setUp(self):
+        if CAP._GI_IMPORT_ERROR is not None:
+            self.skipTest("GObject introspection bindings unavailable")
+        CAP._pump_main_context()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.saved_bus = CAP._session_bus
+
+    def tearDown(self):
+        CAP._session_bus = self.saved_bus
+        self.tmp.cleanup()
+        CAP._pump_main_context()
+
+    def _png(self, width, height, mark=None):
+        pixbuf = CAP.GdkPixbuf.Pixbuf.new(CAP.GdkPixbuf.Colorspace.RGB, False, 8, width, height)
+        pixbuf.fill(0x000000FF)
+        if mark:
+            pixbuf.new_subpixbuf(mark["x"], mark["y"], mark["width"], mark["height"]).fill(0xFF0000FF)
+        ok, data = pixbuf.save_to_bufferv("png", [], [])
+        self.assertTrue(ok)
+        return bytes(data)
+
+    def _serve(self, png):
+        path = Path(self.tmp.name) / "Screenshot-1.png"
+        path.write_bytes(png)
+        self.bus = PortalBus(path.as_uri())
+        CAP._session_bus = lambda: self.bus
+        return path
+
+    def test_a_screen_capture_returns_the_framebuffer_and_removes_the_file(self):
+        # Sizing and its note are capture()'s job now, not this route's;
+        # CaptureOutputSizeTest owns both. This route returns what it was given.
+        original = self._png(400, 200)
+        path = self._serve(original)
+        png, notes = CAP._portal_capture("screen", None, True, 5.0, self.DESKTOP)
+        self.assertEqual(png, original)
+        self.assertEqual(notes, [], "the route claimed a resample it did not perform")
+        self.assertFalse(path.exists(), "the portal's output file was left on disk")
+
+    def test_an_unscaled_screen_capture_is_returned_untouched(self):
+        original = self._png(200, 100)
+        self._serve(original)
+        png, notes = CAP._portal_capture("screen", None, True, 5.0, self.DESKTOP)
+        self.assertEqual(png, original)
+        self.assertEqual(notes, [])
+
+    def test_a_scaled_region_capture_crops_the_area_the_caller_asked_for(self):
+        self._serve(self._png(400, 200, {"x": 200, "y": 100, "width": 100, "height": 50}))
+        png, _notes = CAP._portal_capture(
+            "region", {"x": 100, "y": 50, "width": 50, "height": 25}, True, 5.0, self.DESKTOP
+        )
+        pixbuf = CAP._decode_png(png, "test")
+        pixels, stride, channels = pixbuf.get_pixels(), pixbuf.get_rowstride(), pixbuf.get_n_channels()
+        corners = {
+            tuple(pixels[row * stride + col * channels : row * stride + col * channels + 3])
+            for row in (0, pixbuf.get_height() - 1)
+            for col in (0, pixbuf.get_width() - 1)
+        }
+        self.assertEqual(corners, {(255, 0, 0)}, "the crop did not land on the marked area")
+
+    def test_the_response_subscription_exists_before_the_screenshot_call(self):
+        # Rule 2. The fake only answers a subscription that already existed when
+        # the call was made, exactly as the portal does by destroying the
+        # Request object, so subscribing afterwards leaves this waiting.
+        self._serve(self._png(200, 100))
+        CAP._portal_capture("screen", None, True, 5.0, self.DESKTOP)
+        order = self.bus.order()
+        self.assertIn(("subscribe", "Response"), order)
+        self.assertIn(("call", "Screenshot"), order)
+        self.assertLess(
+            order.index(("subscribe", "Response")),
+            order.index(("call", "Screenshot")),
+            "the Response subscription must exist before Screenshot is called",
+        )
+
+    def test_a_response_subscribed_only_after_the_call_never_arrives(self):
+        # Proves the fake above really withholds the answer, so the ordering
+        # assertion is load-bearing rather than incidentally satisfied.
+        self._serve(self._png(200, 100))
+        self.bus.responders = _DroppedSubscriptions()
+        with self.assertRaises(CAP.CaptureError) as ctx:
+            CAP._portal_capture("screen", None, True, 1.0, self.DESKTOP)
+        self.assertIn("never answered", str(ctx.exception))
+
+    def test_a_screen_capture_without_the_layout_still_returns_with_a_note(self):
+        original = self._png(400, 200)
+        self._serve(original)
+        png, notes = CAP._portal_capture("screen", None, True, 5.0, None)
+        self.assertEqual(png, original, "the fallback must not be gated on the display layout")
+        self.assertTrue(any("display layout is unavailable" in note for note in notes), notes)
+
+    def test_a_region_without_the_layout_is_refused_rather_than_guessed(self):
+        self._serve(self._png(400, 200))
+        with self.assertRaises(CAP.CaptureError):
+            CAP._portal_capture("region", {"x": 0, "y": 0, "width": 10, "height": 10}, True, 5.0, None)
+
+
+class LatePortalBus(PortalBus):
+    """A portal that answers only after the caller has given up waiting.
+
+    The screenshot is written either way - the portal alone decides where, and
+    goes on writing it whether or not the answer is still wanted - so the answer
+    that arrives too late is the only thing that ever names the file to remove.
+    """
+
+    def __init__(self, uri, delay):
+        super().__init__(uri)
+        self.delay = delay
+
+    def _answer(self, path, registered):
+        _sub, name, iface, callback = registered
+        uri = self.uri
+
+        def fire():
+            callback(
+                self,
+                name,
+                path,
+                iface,
+                "Response",
+                CAP.GLib.Variant("(ua{sv})", (0, {"uri": CAP.GLib.Variant("s", uri)})),
+            )
+            return False
+
+        CAP.GLib.timeout_add(int(self.delay * 1000), fire)
+
+
+class LatePortalAnswerTest(unittest.TestCase):
+    """A portal answer that lands after the budget must leave nothing behind."""
+
+    DESKTOP = {"width": 200, "height": 100, "monitors": [], "primary": {}}
+    BUDGET = 1.0
+    LATE = 1.2
+
+    def setUp(self):
+        if CAP._GI_IMPORT_ERROR is not None:
+            self.skipTest("GObject introspection bindings unavailable")
+        CAP._pump_main_context()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.saved = (CAP._session_bus, CAP.display_state, CAP._mutter_attempt)
+        CAP.display_state = lambda *_a, **_k: self.DESKTOP
+        CAP._mutter_attempt = lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("this route is pinned to the portal")
+        )
+
+    def tearDown(self):
+        CAP._session_bus, CAP.display_state, CAP._mutter_attempt = self.saved
+        self.tmp.cleanup()
+        CAP._pump_main_context()
+
+    def _shot(self, name="Screenshot-1.png"):
+        path = Path(self.tmp.name) / name
+        path.write_bytes(PNG_1X1)
+        return path
+
+    def _use(self, bus):
+        CAP._session_bus = lambda: bus
+        return bus
+
+    def _capture(self):
+        with self.assertRaises(CAP.CaptureError) as ctx:
+            CAP.capture(scope="screen", route="portal", timeout=self.BUDGET)
+        self.assertIn("never answered", str(ctx.exception))
+        return str(ctx.exception)
+
+    def test_a_screenshot_written_after_the_budget_is_not_left_behind(self):
+        path = self._shot()
+        self._use(LatePortalBus(path.as_uri(), self.LATE))
+        self._capture()
+        self.assertFalse(path.exists(), "the portal's screenshot was left in the captain's home")
+
+    def test_nothing_else_in_that_directory_is_removed(self):
+        path = self._shot()
+        bystander = Path(self.tmp.name) / "Screenshot-holiday.png"
+        bystander.write_bytes(PNG_1X1)
+        self._use(LatePortalBus(path.as_uri(), self.LATE))
+        self._capture()
+        self.assertTrue(bystander.exists(), "a file this capture never asked for was removed")
+
+    def test_a_location_that_never_arrives_is_reported_rather_than_guessed(self):
+        path = self._shot()
+        bus = self._use(LatePortalBus(path.as_uri(), self.LATE))
+        bus.responders = _DroppedSubscriptions()
+        started = time.monotonic()
+        message = self._capture()
+        elapsed = time.monotonic() - started
+        self.assertIn("could not remove", message)
+        self.assertTrue(path.exists(), "a file the portal never named was removed anyway")
+        self.assertLess(
+            elapsed,
+            self.BUDGET + CAP.PORTAL_CLEANUP_SECONDS + 1.0,
+            "waiting for a location that never comes is not bounded",
+        )
+
+    def test_a_removal_that_fails_is_reported_on_the_failure_not_raised(self):
+        undeletable = Path(self.tmp.name) / "Screenshot-1.png"
+        undeletable.mkdir()
+        self._use(LatePortalBus(undeletable.as_uri(), self.LATE))
+        self.assertIn("could not remove", self._capture())
+
+
+class CaptureOutputSizeTest(unittest.TestCase):
+    """One call answers at one size, whichever route produced the pixels."""
+
+    DESKTOP = {"width": 40, "height": 20, "monitors": [], "primary": {}}
+
+    def setUp(self):
+        if CAP._GI_IMPORT_ERROR is not None:
+            self.skipTest("GObject introspection bindings unavailable")
+        self.saved = (CAP._mutter_attempt, CAP._portal_capture, CAP.display_state)
+        CAP.display_state = lambda *_a, **_k: self.DESKTOP
+
+    def tearDown(self):
+        CAP._mutter_attempt, CAP._portal_capture, CAP.display_state = self.saved
+
+    def _png(self, width, height):
+        pixbuf = CAP.GdkPixbuf.Pixbuf.new(CAP.GdkPixbuf.Colorspace.RGB, False, 8, width, height)
+        pixbuf.fill(0x336699FF)
+        ok, data = pixbuf.save_to_bufferv("png", [], [])
+        self.assertTrue(ok)
+        return bytes(data)
+
+    def _use(self, route, png):
+        oversized = lambda *a, **k: png  # noqa: E731 - one-line route stub
+        if route == "mutter":
+            CAP._mutter_attempt = oversized
+            CAP._portal_capture = lambda *a, **k: (_ for _ in ()).throw(AssertionError("unused"))
+        else:
+            CAP._mutter_attempt = lambda *a, **k: (_ for _ in ()).throw(CAP.CaptureError("no screen cast"))
+            CAP._portal_capture = lambda *a, **k: (png, [])
+
+    def test_an_oversized_frame_is_brought_to_the_desktop_size_on_either_route(self):
+        for route in ("mutter", "portal"):
+            with self.subTest(route=route):
+                self._use(route, self._png(80, 40))
+                result = CAP.capture(scope="screen")
+                self.assertEqual(
+                    (result.width, result.height),
+                    (40, 20),
+                    f"the {route} route's own frame size leaked through",
+                )
+
+    def test_an_oversized_region_is_brought_to_the_requested_size_on_either_route(self):
+        for route in ("mutter", "portal"):
+            with self.subTest(route=route):
+                self._use(route, self._png(20, 10))
+                result = CAP.capture(scope="region", region={"x": 0, "y": 0, "width": 10, "height": 5})
+                self.assertEqual((result.width, result.height), (10, 5))
+
+    def test_a_frame_already_at_the_right_size_is_returned_byte_for_byte(self):
+        original = self._png(40, 20)
+        self._use("mutter", original)
+        self.assertIs(CAP.capture(scope="screen").png, original, "an unscaled capture was re-encoded")
+
+    def test_an_undersized_frame_is_also_brought_up_to_the_expected_size(self):
+        self._use("mutter", self._png(20, 10))
+        result = CAP.capture(scope="screen")
+        self.assertEqual((result.width, result.height), (40, 20))
+
+    def test_a_resample_is_reported_whichever_route_produced_the_image(self):
+        for route in ("mutter", "portal"):
+            with self.subTest(route=route):
+                self._use(route, self._png(80, 40))
+                result = CAP.capture(scope="screen")
+                self.assertTrue(
+                    any("resampled" in note for note in result.notes),
+                    f"a {route}-route resample was not reported: {result.notes}",
+                )
+
+    def test_a_capture_that_needed_no_resample_says_nothing_about_one(self):
+        self._use("mutter", self._png(40, 20))
+        self.assertEqual(CAP.capture(scope="screen").notes, [])
+
+    def test_a_resample_that_failed_does_not_leave_its_claim_on_the_fallback(self):
+        # The mutter frame is the right shape but undecodable, so the resample
+        # raises and the portal serves the call untouched. The reply must not
+        # tell the agent an image it never resampled was resampled.
+        header_only = self._png(80, 40)[:40] + b"\x00" * 64
+        self.assertEqual(CAP.png_dimensions(header_only), (80, 40))
+        CAP._mutter_attempt = lambda *a, **k: header_only
+        CAP._portal_capture = lambda *a, **k: (self._png(40, 20), [])
+
+        result = CAP.capture(scope="screen")
+
+        self.assertEqual(result.route, "portal")
+        self.assertEqual((result.width, result.height), (40, 20))
+        self.assertFalse(
+            any("resampled" in note for note in result.notes),
+            f"a resample that never happened was reported: {result.notes}",
+        )
+
+    def test_an_image_of_the_wrong_shape_is_refused_rather_than_stretched(self):
+        # A screenshot covering one monitor out of several, not the desktop at
+        # another size: stretching it would return distorted content.
+        self._use("mutter", self._png(32, 20))
+        with self.assertRaises(CAP.CaptureError) as ctx:
+            CAP.capture(scope="screen", route="mutter")
+        self.assertIn("uniform", str(ctx.exception))
+
+    def test_a_wrongly_shaped_region_result_is_refused_too(self):
+        self._use("mutter", self._png(20, 5))
+        with self.assertRaises(CAP.CaptureError) as ctx:
+            CAP.capture(
+                scope="region", region={"x": 0, "y": 0, "width": 10, "height": 5}, route="mutter"
+            )
+        self.assertIn("uniform", str(ctx.exception))
+
+    def test_a_thin_region_rounded_by_a_fractional_scale_is_still_accepted(self):
+        # A 1920x1080 panel at scale 1.25 is 1536x864 logical, and Mutter sizes
+        # an area stream as roundf(area * scale): a 400x30 region comes back
+        # 500x38 because roundf(37.5) is 38. That half pixel is 1.3% of a 30px
+        # axis, which a purely relative tolerance reads as a wrong rectangle.
+        CAP.display_state = lambda *_a, **_k: {
+            "width": 1536, "height": 864, "monitors": [], "primary": {}
+        }
+        for actual, requested in (
+            ((500, 38), (400, 30)),
+            ((450, 38), (300, 25)),
+            ((125, 38), (100, 30)),
+        ):
+            with self.subTest(actual=actual, requested=requested):
+                self._use("mutter", self._png(*actual))
+                result = CAP.capture(
+                    scope="region",
+                    region={"x": 0, "y": 0, "width": requested[0], "height": requested[1]},
+                    route="mutter",
+                )
+                self.assertEqual((result.width, result.height), requested)
+
+    def test_a_whole_desktop_at_a_fractional_scale_is_still_accepted(self):
+        CAP.display_state = lambda *_a, **_k: {
+            "width": 1536, "height": 864, "monitors": [], "primary": {}
+        }
+        self._use("mutter", self._png(1920, 1080))
+        result = CAP.capture(scope="screen", route="mutter")
+        self.assertEqual((result.width, result.height), (1536, 864))
+
+    def test_one_monitor_of_a_wider_desktop_is_still_refused(self):
+        # The case the guard exists for: hundreds of pixels out, not one.
+        CAP.display_state = lambda *_a, **_k: {
+            "width": 3000, "height": 1200, "monitors": [], "primary": {}
+        }
+        self._use("portal", self._png(1920, 1080))
+        with self.assertRaises(CAP.CaptureError) as ctx:
+            CAP.capture(scope="screen", route="portal")
+        self.assertIn("uniform", str(ctx.exception))
+
+
+class LayoutUnavailableTest(unittest.TestCase):
+    """The fallback route must not be gated on a second Mutter interface."""
+
+    def setUp(self):
+        self.saved = (CAP._mutter_attempt, CAP._portal_capture, CAP.display_state)
+
+        def refuse(*_a, **_k):
+            raise CAP.CaptureError("cannot read the display layout: Timeout was reached")
+
+        CAP.display_state = refuse
+        CAP._mutter_attempt = lambda *a, **k: (_ for _ in ()).throw(CAP.CaptureError("no screen cast"))
+
+    def tearDown(self):
+        CAP._mutter_attempt, CAP._portal_capture, CAP.display_state = self.saved
+
+    def test_a_pinned_portal_screen_capture_still_succeeds(self):
+        CAP._portal_capture = lambda *a, **k: (PNG_1X1, [])
+        result = CAP.capture(scope="screen", route="portal")
+        self.assertEqual(result.route, "portal")
+        self.assertTrue(
+            any("display layout could not be read" in note for note in result.notes), result.notes
+        )
+
+    def test_the_route_is_told_the_layout_is_unavailable(self):
+        seen = {}
+
+        def portal(scope, region, cursor, timeout, bounds=None):
+            seen["bounds"] = bounds
+            return PNG_1X1, []
+
+        CAP._portal_capture = portal
+        CAP.capture(scope="screen", route="portal")
+        self.assertIsNone(seen["bounds"])
+
+    def test_a_region_still_fails_because_it_has_nothing_to_validate_against(self):
+        CAP._portal_capture = lambda *a, **k: (PNG_1X1, [])
+        with self.assertRaises(CAP.CaptureError) as ctx:
+            CAP.capture(scope="region", region={"x": 0, "y": 0, "width": 10, "height": 10}, route="portal")
+        self.assertIn("display layout", str(ctx.exception))
+
+
+class NoOpResampleCostTest(unittest.TestCase):
+    """An image already at the target size must not be decoded at all."""
+
+    def setUp(self):
+        self.saved = CAP._decode_png
+
+        def forbidden(*_a, **_k):
+            raise AssertionError("a no-op resample decoded the image anyway")
+
+        CAP._decode_png = forbidden
+
+    def tearDown(self):
+        CAP._decode_png = self.saved
+
+    def test_a_resize_to_the_current_size_returns_the_bytes_untouched(self):
+        self.assertIs(CAP.resize_png(PNG_1X1, 1, 1), PNG_1X1)
+
+    def test_a_max_width_above_the_capture_returns_the_bytes_untouched(self):
+        self.assertIs(CAP.downscale_png(PNG_1X1, 64), PNG_1X1)
+
+    def test_a_bad_target_size_is_still_refused_without_decoding(self):
+        with self.assertRaises(CAP.CaptureError):
+            CAP.resize_png(PNG_1X1, 0, 10)
+        with self.assertRaises(CAP.CaptureError):
+            CAP.downscale_png(PNG_1X1, 0)
+
+
+class SelftestCaptureFileTest(unittest.TestCase):
+    """A selftest capture is a picture of the captain's live desktop."""
+
+    def setUp(self):
+        self.mcp = _load("fm_deskcap_mcp", "fm-deskcap-mcp.py")
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_a_capture_is_written_only_the_owner_can_read(self):
+        path = self.mcp._save_capture(self.dir, "shot.png", PNG_1X1)
+        self.assertEqual(path.read_bytes(), PNG_1X1)
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+
+    def test_a_pre_created_symlink_cannot_redirect_the_write(self):
+        target = self.dir / "somewhere-else.png"
+        (self.dir / "shot.png").symlink_to(target)
+        with self.assertRaises(OSError):
+            self.mcp._save_capture(self.dir, "shot.png", PNG_1X1)
+        self.assertFalse(target.exists(), "the capture was written through a symlink")
+
+    def test_an_existing_file_is_not_silently_overwritten(self):
+        (self.dir / "shot.png").write_bytes(b"someone else's bytes")
+        with self.assertRaises(OSError):
+            self.mcp._save_capture(self.dir, "shot.png", PNG_1X1)
+        self.assertEqual((self.dir / "shot.png").read_bytes(), b"someone else's bytes")
+
+
+class SelftestCleanupTest(unittest.TestCase):
+    """A selftest writes pictures of the captain's desktop, so it must tidy up.
+
+    The capture engine is stubbed, so this drives the real self-check end to end
+    without a compositor and asserts what is left on the filesystem afterwards.
+    """
+
+    def setUp(self):
+        self.mcp = _load("fm_deskcap_mcp", "fm-deskcap-mcp.py")
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        # The self-check picks its own directory under the system temp root, so
+        # point that root at a private one this test can inspect.
+        self.saved_tempdir = tempfile.tempdir
+        tempfile.tempdir = self.tmp.name
+        self.calls = []
+
+    def tearDown(self):
+        tempfile.tempdir = self.saved_tempdir
+        self.tmp.cleanup()
+
+    def _stub_capture(self, fail_after=None, raise_after=None):
+        engine = self.mcp.CAPTURE
+
+        def capture(**kwargs):
+            self.calls.append(kwargs)
+            if fail_after is not None and len(self.calls) > fail_after:
+                raise engine.CaptureError("no monitor is available")
+            if raise_after is not None and len(self.calls) > raise_after:
+                raise OSError(28, "No space left on device")
+            return engine.Capture(PNG_1X1, "mutter", kwargs.get("scope", "screen"), 1.0, [])
+
+        engine.capture = capture
+
+    def _run(self, **kwargs):
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            code = self.mcp._selftest(**kwargs)
+        return code, buffer.getvalue()
+
+    def _left_behind(self):
+        return sorted(p.name for p in self.root.rglob("*.png"))
+
+    def test_a_run_that_captured_everything_leaves_no_images_behind(self):
+        self._stub_capture()
+        code, output = self._run()
+        self.assertEqual(code, 0, output)
+        self.assertEqual(self._left_behind(), [], "a successful selftest left captures on disk")
+        self.assertEqual(list(self.root.iterdir()), [], "a successful selftest left its directory")
+        self.assertIn("removed", output)
+
+    def test_the_keep_flag_retains_the_images_and_says_where(self):
+        self._stub_capture()
+        code, output = self._run(keep_captures=True)
+        self.assertEqual(code, 0, output)
+        kept = self._left_behind()
+        self.assertTrue(kept, "--keep-captures removed the captures anyway")
+        directories = [p for p in self.root.iterdir() if p.is_dir()]
+        self.assertEqual(len(directories), 1)
+        self.assertIn(str(directories[0]), output, "the report did not say where captures landed")
+        self.assertIn("kept", output)
+
+    def test_a_failed_run_keeps_its_captures_as_evidence(self):
+        self._stub_capture(fail_after=1)
+        code, output = self._run()
+        self.assertEqual(code, 1)
+        self.assertEqual(self._left_behind(), ["screen-auto.png"])
+        self.assertIn("kept", output)
+
+    def test_a_run_that_failed_everywhere_leaves_nothing_at_all(self):
+        self._stub_capture(fail_after=0)
+        code, output = self._run()
+        self.assertEqual(code, 1)
+        self.assertEqual(list(self.root.iterdir()), [], "a failed selftest left an empty directory")
+
+    def test_an_unexpected_error_still_accounts_for_what_was_written(self):
+        self._stub_capture(raise_after=1)
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            with self.assertRaises(OSError):
+                self.mcp._selftest()
+        output = buffer.getvalue()
+        directories = [p for p in self.root.iterdir() if p.is_dir()]
+        self.assertEqual(self._left_behind(), ["screen-auto.png"])
+        self.assertIn(str(directories[0]), output, "an aborted run did not say where captures landed")
+        self.assertIn("kept", output)
+
+
+class McpToolArgumentTest(unittest.TestCase):
+    """A bad argument must reach the agent as a tool error, not an internal error."""
+
+    def setUp(self):
+        if CAP._GI_IMPORT_ERROR is not None:
+            self.skipTest("GObject introspection bindings unavailable")
+        self.mcp = _load("fm_deskcap_mcp", "fm-deskcap-mcp.py")
+        engine = self.mcp.CAPTURE
+        # A real decodable PNG, because max_width actually re-encodes the bytes.
+        pixbuf = CAP.GdkPixbuf.Pixbuf.new(CAP.GdkPixbuf.Colorspace.RGB, False, 8, 8, 4)
+        pixbuf.fill(0x336699FF)
+        ok, data = pixbuf.save_to_bufferv("png", [], [])
+        self.assertTrue(ok)
+        self.png = bytes(data)
+        engine.capture = lambda **kwargs: engine.Capture(
+            self.png, "mutter", kwargs.get("scope", "screen"), 1.0, []
+        )
+
+    def _call(self, arguments):
+        return self.mcp.McpServer().handle(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": "desktop_screenshot", "arguments": arguments},
+            }
+        )
+
+    def test_a_non_numeric_max_width_is_a_tool_error_not_an_internal_error(self):
+        reply = self._call({"scope": "screen", "max_width": "half"})
+        self.assertNotIn("error", reply, "a bad max_width must not become a JSON-RPC error")
+        self.assertTrue(reply["result"]["isError"])
+        self.assertIn("max_width", reply["result"]["content"][0]["text"])
+
+    def test_a_structured_max_width_is_a_tool_error_too(self):
+        reply = self._call({"scope": "screen", "max_width": [800]})
+        self.assertNotIn("error", reply)
+        self.assertTrue(reply["result"]["isError"])
+
+    def test_a_zero_max_width_is_refused_rather_than_silently_ignored(self):
+        reply = self._call({"scope": "screen", "max_width": 0})
+        self.assertNotIn("error", reply)
+        self.assertTrue(reply["result"]["isError"])
+
+    def test_a_usable_max_width_shrinks_the_image_it_returns(self):
+        reply = self._call({"scope": "screen", "max_width": 4})
+        self.assertFalse(reply["result"]["isError"], reply["result"]["content"][0]["text"])
+        image = reply["result"]["content"][1]
+        self.assertEqual(image["type"], "image")
+        self.assertEqual(CAP.png_dimensions(base64.b64decode(image["data"])), (4, 2))
+
+    def test_a_max_width_above_the_capture_leaves_it_alone(self):
+        reply = self._call({"scope": "screen", "max_width": 4000})
+        self.assertFalse(reply["result"]["isError"])
+        image = reply["result"]["content"][1]
+        self.assertEqual(CAP.png_dimensions(base64.b64decode(image["data"])), (8, 4))
+
+    def test_no_max_width_returns_the_image_untouched(self):
+        reply = self._call({"scope": "screen"})
+        self.assertFalse(reply["result"]["isError"])
+        self.assertEqual(reply["result"]["content"][1]["type"], "image")
+
+
+class CliExitStatusTest(unittest.TestCase):
+    """The engine's header documents these, and that header is what --help prints."""
+
+    def setUp(self):
+        self.saved = CAP.capture
+        self.tmp = tempfile.TemporaryDirectory()
+        self.out = str(Path(self.tmp.name) / "out.png")
+
+    def tearDown(self):
+        CAP.capture = self.saved
+        self.tmp.cleanup()
+
+    def _run(self, argv):
+        with contextlib.redirect_stderr(io.StringIO()):
+            return CAP.main(argv)
+
+    def test_a_written_capture_exits_zero(self):
+        CAP.capture = lambda **kwargs: CAP.Capture(PNG_1X1, "mutter", "screen", 1.0, [])
+        self.assertEqual(self._run(["screen", self.out]), 0)
+        self.assertTrue(Path(self.out).exists())
+
+    def test_a_capture_that_failed_on_every_route_exits_one(self):
+        CAP.capture = lambda **kwargs: (_ for _ in ()).throw(CAP.CaptureError("no route worked"))
+        self.assertEqual(self._run(["screen", self.out]), 1)
+        self.assertFalse(Path(self.out).exists())
+
+    def test_a_missing_runtime_dependency_exits_two(self):
+        CAP.capture = lambda **kwargs: (_ for _ in ()).throw(CAP.MissingDependency("install python3-gi"))
+        self.assertEqual(self._run(["screen", self.out]), 2)
+        self.assertFalse(Path(self.out).exists())
+
+
+class MonitorResolutionTest(unittest.TestCase):
+    """Connector -> current mode, from the DisplayConfig reply shape."""
+
+    SPECS = [
+        (("Meta-0", "MetaVendor", "Virtual remote monitor", "0x0a"),
+         [("1920x1009@60", 1920, 1009, 60.0, 1.0, [1.0], {"is-current": True})],
+         {}),
+        (("DP-1", "Vendor", "Panel", "0x0b"),
+         [("2560x1440@60", 2560, 1440, 60.0, 1.0, [1.0], {}),
+          ("1920x1080@60", 1920, 1080, 60.0, 1.0, [1.0], {"is-current": True})],
+         {}),
+    ]
+
+    def test_picks_the_current_mode(self):
+        self.assertEqual(
+            CAP.monitors_for(self.SPECS, ["DP-1"]),
+            [{"connector": "DP-1", "width": 1920, "height": 1080}],
+        )
+
+    def test_preserves_the_requested_order_and_drops_unknown_connectors(self):
+        self.assertEqual(
+            [m["connector"] for m in CAP.monitors_for(self.SPECS, ["DP-1", "HDMI-9", "Meta-0"])],
+            ["DP-1", "Meta-0"],
+        )
+
+    def test_falls_back_to_the_first_mode_when_none_is_current(self):
+        specs = [(("X-1", "v", "d", "0x0"), [("m", 800, 600, 60.0, 1.0, [1.0], {})], {})]
+        self.assertEqual(CAP.monitors_for(specs, ["X-1"])[0]["width"], 800)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=1)
