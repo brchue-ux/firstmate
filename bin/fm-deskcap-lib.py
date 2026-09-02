@@ -88,6 +88,14 @@ portal both spend what is left of it rather than each starting a fresh budget,
 and every D-Bus call is capped by the remainder, so a wedged compositor cannot
 stack timeouts against a caller serving requests in sequence.
 
+Inside that budget, the wait for the primary route's FIRST frame is separately
+capped at FIRST_FRAME_SECONDS. A screen cast that is going to present a frame
+presents it in milliseconds, but a completely static screen has been seen to
+present nothing at all, and spending the whole deadline on that would leave the
+fallback nothing to run in. Only that wait is shortened: the end-to-end deadline
+is unchanged, a route pinned to `mutter` still reports the same no-frame failure,
+and whatever is left of the budget goes to the portal.
+
 Environment: only XDG_RUNTIME_DIR and DBUS_SESSION_BUS_ADDRESS are required. No
 WAYLAND_DISPLAY, no DISPLAY, no desktop session inheritance - an agent process
 running as the captain's user can capture from a bare SSH environment.
@@ -136,6 +144,14 @@ DBUS_CALL_TIMEOUT_MS = 10000
 # spent, so a late attempt fails fast instead of not being tried at all.
 MIN_ATTEMPT_SECONDS = 0.5
 MIN_CALL_TIMEOUT_MS = 100
+# How long the primary route waits for the FIRST frame off a screen-cast stream
+# before giving up and leaving the rest of the budget to the fallback. A stream
+# that works presents that frame in a fraction of a second - the whole compositor
+# route measures well under 200 ms end to end in docs/verification/desktop-capture.md
+# - so this is an order of magnitude of headroom over an ordinary capture. What
+# it bounds is a stream that presents nothing at all, which has been seen on a
+# completely static screen and used to cost the caller the entire deadline.
+FIRST_FRAME_SECONDS = 2.0
 # How far an image may sit from what one rescale factor predicts for it before
 # it is treated as covering a different rectangle rather than the same one at
 # another size. A compositor rounds each axis of a stream independently and the
@@ -655,7 +671,10 @@ def _mutter_capture(
         if closed["seen"]:
             raise SessionClosed("the compositor closed the screen-cast session before it produced a frame")
 
-        png = _pull_png(int(node["id"]), _remaining(deadline), lambda: closed["seen"])
+        # A frame that is coming arrives in milliseconds, so waiting the whole
+        # remaining deadline for one that never arrives only delays the fallback.
+        frame_wait = min(FIRST_FRAME_SECONDS, _remaining(deadline))
+        png = _pull_png(int(node["id"]), frame_wait, lambda: closed["seen"])
         if not png and closed["seen"]:
             raise SessionClosed("the compositor closed the screen-cast session mid-capture")
         if not png:

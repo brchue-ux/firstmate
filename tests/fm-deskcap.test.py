@@ -607,6 +607,99 @@ class MutterStreamGeometryTest(unittest.TestCase):
             )
 
 
+class SilentStreamTest(unittest.TestCase):
+    """A screen cast that never presents a frame must not eat the whole deadline.
+
+    A completely static screen has been observed leaving the compositor route
+    waiting for a frame that never comes. The capture still has to fail, but it
+    has to fail cheaply, because the deadline it is spending is the one the
+    fallback route needs. No compositor is involved here: the bus is the same
+    ordering-faithful fake the other compositor-route tests use, and the frame
+    pull is one that consumes the wait it was handed and yields nothing, which
+    is exactly what that failure looks like from the engine's side.
+    """
+
+    LAYOUT = {"width": 1920, "height": 1009, "monitors": [], "primary": {}}
+
+    def setUp(self):
+        if CAP._GI_IMPORT_ERROR is not None:
+            self.skipTest("GObject introspection bindings unavailable")
+        CAP._pump_main_context()
+        self.bus = RecordingBus(node_id=42)
+        self.waits = []
+        self.saved = (
+            CAP._session_bus,
+            CAP._require_gst,
+            CAP.display_state,
+            CAP._pull_png,
+            CAP._portal_capture,
+            CAP._normalize_size,
+        )
+        CAP._session_bus = lambda: self.bus
+        CAP._require_gst = lambda: None
+        CAP.display_state = lambda *_a, **_k: self.LAYOUT
+        # Route timing, not output sizing; CaptureOutputSizeTest owns that.
+        CAP._normalize_size = lambda png, _expected, _notes: png
+
+        def silent_stream(_node_id, timeout, _closed=None):
+            self.waits.append(timeout)
+            time.sleep(timeout)
+            return b""
+
+        CAP._pull_png = silent_stream
+
+    def tearDown(self):
+        (
+            CAP._session_bus,
+            CAP._require_gst,
+            CAP.display_state,
+            CAP._pull_png,
+            CAP._portal_capture,
+            CAP._normalize_size,
+        ) = self.saved
+        CAP._pump_main_context()
+
+    def test_a_stream_with_no_frame_gives_up_early_and_the_fallback_serves_it(self):
+        budgets = []
+
+        def portal(_scope, _region, _cursor, timeout, _bounds=None):
+            budgets.append(timeout)
+            return PNG_1X1, []
+
+        CAP._portal_capture = portal
+        started = time.monotonic()
+        result = CAP.capture(scope="screen", timeout=15.0)
+        elapsed = time.monotonic() - started
+        self.assertEqual(result.route, "portal", "the fallback did not serve the capture")
+        self.assertTrue(
+            any("no frame" in note for note in result.notes),
+            f"the reply does not say why the primary route was abandoned: {result.notes}",
+        )
+        self.assertLess(elapsed, 5.0, "waiting for a frame that never came burned the caller's deadline")
+        self.assertGreater(
+            budgets[0], 10.0, "the fallback was left with almost none of the shared deadline"
+        )
+
+    def test_a_route_pinned_to_the_primary_still_reports_the_missing_frame(self):
+        CAP._portal_capture = lambda *a: (_ for _ in ()).throw(AssertionError("portal must not be used"))
+        started = time.monotonic()
+        with self.assertRaises(CAP.CaptureError) as ctx:
+            CAP.capture(scope="screen", route="mutter", timeout=15.0)
+        elapsed = time.monotonic() - started
+        self.assertIn("no frame", str(ctx.exception))
+        self.assertLess(elapsed, 5.0, "a pinned primary route waited out the whole deadline")
+
+    def test_the_frame_wait_leaves_the_rest_of_the_deadline_unspent(self):
+        CAP._portal_capture = lambda *a: (PNG_1X1, [])
+        CAP.capture(scope="screen", timeout=15.0)
+        self.assertTrue(self.waits, "the frame pull was never reached")
+        self.assertLess(
+            max(self.waits),
+            5.0,
+            "the frame wait was handed the whole end-to-end deadline instead of a short bound",
+        )
+
+
 # Loads the engine in a fresh interpreter where `gi` cannot be imported at all,
 # so the module-level GLib name is genuinely never bound, then prints what
 # probe() reports. That is the machine probe() exists to diagnose, and it cannot

@@ -75,6 +75,22 @@ The only listed file predates every capture above, and the directory's own times
 A later sweep, taken after the display had blanked, returned an all-black 1920x1009 PNG on both routes.
 Both routes agreeing on black while the compositor route's screen cast still succeeded is the expected reading of a blanked display rather than a failed capture or a torn-down monitor.
 
+## A pinned compositor route sometimes finds no frame on a static screen
+
+Measured on 2026-09-02 against a substitute desktop, not the captain's own: a nested headless `gnome-shell` with a 1280x720 virtual monitor and `xdg-desktop-portal-gnome` on a private session bus.
+That desktop is completely static, with nothing on it that repaints.
+
+Twelve captures pinned to `--route mutter` at `region` scope produced one failure reporting that the stream produced no frame; twelve pinned `screen` captures at the same time produced none.
+The same failure appeared twice more during MCP stdio sessions against that desktop.
+Under the default `auto` route it was never user-visible: fifteen region calls with the portal available were all served, none of them needing the fallback.
+
+This could NOT be reproduced against the captain's real session, because that session is disconnected and its virtual monitor is torn down, so live capture cannot be run at all right now.
+Whether his real display is affected is therefore unknown, and nothing here should be read as evidence that it is or is not.
+
+What changed in response is only the cost: the compositor route now waits `FIRST_FRAME_SECONDS` for its first frame instead of the caller's whole end-to-end deadline, so the fallback starts within about two seconds rather than after fifteen, with the rest of the budget still to spend.
+The underlying reason the compositor withholds the frame was deliberately not investigated.
+The short wait and the pinned route's failure message are covered hermetically by `tests/fm-deskcap.test.py`, which drives `capture()` against a frame pull that never yields.
+
 ## What is not verified here
 
 - The rebuild after the compositor closes a screen-cast session is covered by unit tests over the retry contract, not by a real RDP disconnect and reconnect.

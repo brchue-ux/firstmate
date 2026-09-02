@@ -72,6 +72,10 @@ Both routes are implemented from the start rather than the fallback being retrof
 - Rotated outputs are not supported.
   The desktop bounds this server derives do not swap axes for a rotated monitor the way the compositor does, so on a rotated display both scopes would work from the wrong geometry.
   No rotated display has been tested; treat a rotated output as out of scope rather than as expected to work.
+- A capture pinned to the `mutter` route can occasionally find no frame at all on a completely static screen, and comes back saying the stream produced no frame.
+  The default `auto` setting covers that: the compositor route waits a couple of seconds for its first frame rather than the whole call deadline, then the portal fallback serves the capture with what is left of the budget.
+  Pin a route only to diagnose one, and expect this failure mode when you do.
+  The rate it was seen at, and where it could not be reproduced, are in [verification/desktop-capture.md](verification/desktop-capture.md).
 - The `portal` route always composites the pointer, so `cursor: false` is ignored there and the reply says so.
 - A region must fit inside the desktop; one that does not is refused rather than clamped.
 - A blanked or idle display captures as a genuinely black image on both routes.
