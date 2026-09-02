@@ -347,6 +347,34 @@ def _discard_captures(directory: Path, saved: Iterable[Path]) -> bool:
     return removed
 
 
+def _settle_captures(
+    directory: Path, saved: list[Path], keep_captures: bool, failures: int, aborted: bool
+) -> bool:
+    """Keep or remove the selftest's captures, saying plainly which happened.
+
+    These files are pictures of the captain's live desktop, so they only stay on
+    disk when the operator asked for them or when the run did not finish clean
+    and they are evidence. No path may leave them behind without saying so.
+    """
+    if saved and (keep_captures or failures or aborted):
+        if aborted:
+            why = "the run ended before it finished"
+        elif failures:
+            why = "the run failed"
+        else:
+            why = "--keep-captures was given"
+        print(f"\nkept {len(saved)} capture(s) in {directory} because {why}")
+        return True
+    if not _discard_captures(directory, saved):
+        print(f"\ncaptures may still be on disk under {directory}; remove them by hand")
+        return False
+    if saved:
+        print(f"\nremoved {len(saved)} capture(s) and {directory}")
+    else:
+        print(f"\nno captures were written; removed {directory}")
+    return True
+
+
 def _selftest(keep_captures: bool = False) -> int:
     """Capture both scopes for real and report what came back."""
     print("# tools")
@@ -356,41 +384,35 @@ def _selftest(keep_captures: bool = False) -> int:
     print(f"\ncaptures are being written to {outdir}")
     failures = 0
     saved: list[Path] = []
+    aborted = False
     cases: list[tuple[str, dict[str, Any]]] = [
         ("screen", {"scope": "screen"}),
         ("region", {"scope": "region", "x": 0, "y": 0, "width": 320, "height": 240}),
     ]
-    for route in CAPTURE.ROUTES:
-        for label, arguments in cases:
-            call = dict(arguments, route=route)
-            print(f"\n# {label} via {route}")
-            try:
-                content = tool_desktop_screenshot(call)
-            except CAPTURE.CaptureError as err:
-                print(f"failed: {err}")
-                failures += 1
-                continue
-            print(content[0]["text"])
-            png = base64.b64decode(content[1]["data"])
-            out = _save_capture(outdir, f"{label}-{route}.png", png)
-            saved.append(out)
-            print(f"saved {out}")
+    try:
+        for route in CAPTURE.ROUTES:
+            for label, arguments in cases:
+                call = dict(arguments, route=route)
+                print(f"\n# {label} via {route}")
+                try:
+                    content = tool_desktop_screenshot(call)
+                except CAPTURE.CaptureError as err:
+                    print(f"failed: {err}")
+                    failures += 1
+                    continue
+                print(content[0]["text"])
+                png = base64.b64decode(content[1]["data"])
+                out = _save_capture(outdir, f"{label}-{route}.png", png)
+                saved.append(out)
+                print(f"saved {out}")
+    except BaseException as err:  # noqa: BLE001 - an escape must not strand the captures
+        aborted = True
+        print(f"\nended early: {type(err).__name__}: {err}")
+        raise
+    finally:
+        settled = _settle_captures(outdir, saved, keep_captures, failures, aborted)
 
-    # These files are pictures of the captain's live desktop, so they only stay
-    # on disk when the operator asked for them or when a failure makes them
-    # evidence. Everything else is cleaned up before this returns.
-    if saved and (failures or keep_captures):
-        why = "the run failed" if failures else "--keep-captures was given"
-        print(f"\nkept {len(saved)} capture(s) in {outdir} because {why}")
-        return 1 if failures else 0
-    if not _discard_captures(outdir, saved):
-        print(f"\ncaptures may still be on disk under {outdir}; remove them by hand")
-        return 1
-    if saved:
-        print(f"\nremoved {len(saved)} capture(s) and {outdir}")
-    else:
-        print(f"\nno captures were written; removed {outdir}")
-    return 1 if failures else 0
+    return 1 if failures or not settled else 0
 
 
 def main(argv: list[str] | None = None) -> int:

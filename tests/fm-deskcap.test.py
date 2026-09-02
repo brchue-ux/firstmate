@@ -1347,6 +1347,94 @@ class SelftestCaptureFileTest(unittest.TestCase):
         self.assertEqual((self.dir / "shot.png").read_bytes(), b"someone else's bytes")
 
 
+class SelftestCleanupTest(unittest.TestCase):
+    """A selftest writes pictures of the captain's desktop, so it must tidy up.
+
+    The capture engine is stubbed, so this drives the real self-check end to end
+    without a compositor and asserts what is left on the filesystem afterwards.
+    """
+
+    def setUp(self):
+        self.mcp = _load("fm_deskcap_mcp", "fm-deskcap-mcp.py")
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        # The self-check picks its own directory under the system temp root, so
+        # point that root at a private one this test can inspect.
+        self.saved_tempdir = tempfile.tempdir
+        tempfile.tempdir = self.tmp.name
+        self.calls = []
+
+    def tearDown(self):
+        tempfile.tempdir = self.saved_tempdir
+        self.tmp.cleanup()
+
+    def _stub_capture(self, fail_after=None, raise_after=None):
+        engine = self.mcp.CAPTURE
+
+        def capture(**kwargs):
+            self.calls.append(kwargs)
+            if fail_after is not None and len(self.calls) > fail_after:
+                raise engine.CaptureError("no monitor is available")
+            if raise_after is not None and len(self.calls) > raise_after:
+                raise OSError(28, "No space left on device")
+            return engine.Capture(PNG_1X1, "mutter", kwargs.get("scope", "screen"), 1.0, [])
+
+        engine.capture = capture
+
+    def _run(self, **kwargs):
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            code = self.mcp._selftest(**kwargs)
+        return code, buffer.getvalue()
+
+    def _left_behind(self):
+        return sorted(p.name for p in self.root.rglob("*.png"))
+
+    def test_a_run_that_captured_everything_leaves_no_images_behind(self):
+        self._stub_capture()
+        code, output = self._run()
+        self.assertEqual(code, 0, output)
+        self.assertEqual(self._left_behind(), [], "a successful selftest left captures on disk")
+        self.assertEqual(list(self.root.iterdir()), [], "a successful selftest left its directory")
+        self.assertIn("removed", output)
+
+    def test_the_keep_flag_retains_the_images_and_says_where(self):
+        self._stub_capture()
+        code, output = self._run(keep_captures=True)
+        self.assertEqual(code, 0, output)
+        kept = self._left_behind()
+        self.assertTrue(kept, "--keep-captures removed the captures anyway")
+        directories = [p for p in self.root.iterdir() if p.is_dir()]
+        self.assertEqual(len(directories), 1)
+        self.assertIn(str(directories[0]), output, "the report did not say where captures landed")
+        self.assertIn("kept", output)
+
+    def test_a_failed_run_keeps_its_captures_as_evidence(self):
+        self._stub_capture(fail_after=1)
+        code, output = self._run()
+        self.assertEqual(code, 1)
+        self.assertEqual(self._left_behind(), ["screen-auto.png"])
+        self.assertIn("kept", output)
+
+    def test_a_run_that_failed_everywhere_leaves_nothing_at_all(self):
+        self._stub_capture(fail_after=0)
+        code, output = self._run()
+        self.assertEqual(code, 1)
+        self.assertEqual(list(self.root.iterdir()), [], "a failed selftest left an empty directory")
+
+    def test_an_unexpected_error_still_accounts_for_what_was_written(self):
+        self._stub_capture(raise_after=1)
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            with self.assertRaises(OSError):
+                self.mcp._selftest()
+        output = buffer.getvalue()
+        directories = [p for p in self.root.iterdir() if p.is_dir()]
+        self.assertEqual(self._left_behind(), ["screen-auto.png"])
+        self.assertIn(str(directories[0]), output, "an aborted run did not say where captures landed")
+        self.assertIn("kept", output)
+
+
 class McpToolArgumentTest(unittest.TestCase):
     """A bad argument must reach the agent as a tool error, not an internal error."""
 
