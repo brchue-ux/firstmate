@@ -52,6 +52,9 @@ It needs no permission dialog, it is the only route with a native region scope, 
 `portal` is the fallback and uses `org.freedesktop.portal.Screenshot`.
 It captures the whole display only, so a region is cropped afterwards, and the portal alone chooses where it writes its file.
 The server reads those bytes back and then removes that exact file, so repeated captures do not accumulate in the captain's home directory.
+That holds when the capture times out too.
+A portal that answers after the capture has given up still wrote a file, and only its answer says where, so a timed-out portal capture waits about half a second longer for that answer purely to remove the file it names.
+The capture still fails, no other file in that directory is touched, and if the location never arrives or the file cannot be removed the failure message says so.
 
 `auto` tries the compositor route and falls back to the portal, recording in the reply's text why it fell back.
 Both routes are implemented from the start rather than the fallback being retrofitted, because nothing in the compositor's screen-cast API performs a permission check today, and a future GNOME release that adds one would close the primary route without warning.

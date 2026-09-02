@@ -96,6 +96,13 @@ fallback nothing to run in. Only that wait is shortened: the end-to-end deadline
 is unchanged, a route pinned to `mutter` still reports the same no-frame failure,
 and whatever is left of the budget goes to the portal.
 
+A portal capture that runs out of budget waits PORTAL_CLEANUP_SECONDS longer
+before it reports the failure, because the portal writes its screenshot whether
+or not the answer is still wanted and only that answer says where it landed. The
+grace is spent on removing that file, never on serving the capture: the call
+fails exactly as it did, and if the location never arrives or the file cannot be
+removed, the failure says so instead of raising anything else.
+
 Environment: only XDG_RUNTIME_DIR and DBUS_SESSION_BUS_ADDRESS are required. No
 WAYLAND_DISPLAY, no DISPLAY, no desktop session inheritance - an agent process
 running as the captain's user can capture from a bare SSH environment.
@@ -152,6 +159,12 @@ MIN_CALL_TIMEOUT_MS = 100
 # it bounds is a stream that presents nothing at all, which has been seen on a
 # completely static screen and used to cost the caller the entire deadline.
 FIRST_FRAME_SECONDS = 2.0
+# How long a failed portal capture keeps its Response subscription open purely
+# to learn where the portal wrote, so that file can be removed. The portal
+# answers in about 100 ms once it answers at all, so this is ample for one that
+# came in just too late, and it is spent only on cleanup: the capture has
+# already failed, and no answer arriving in here can serve it.
+PORTAL_CLEANUP_SECONDS = 0.5
 # How far an image may sit from what one rescale factor predicts for it before
 # it is treated as covering a different rectangle rather than the same one at
 # another size. A compositor rounds each axis of a stream independently and the
@@ -817,7 +830,16 @@ def _portal_capture(
             raise CaptureError(f"the desktop portal refused a screenshot: {err.message}") from err
 
         if not _run_until(lambda: "code" in answer, _remaining(deadline)):
-            raise CaptureError("the desktop portal never answered the screenshot request")
+            # The portal writes its screenshot whether or not the answer is
+            # still wanted, and only that answer says where, so the
+            # subscription is held open a moment longer to learn the location
+            # and remove the file rather than leave it in the captain's home.
+            # That grace buys no more time to produce a capture - this call has
+            # already failed and still fails - so the capture deadline itself is
+            # not extended.
+            leftover = _discard_late_portal_file(answer, PORTAL_CLEANUP_SECONDS)
+            message = "the desktop portal never answered the screenshot request"
+            raise CaptureError(f"{message} ({leftover})" if leftover else message)
         if answer["code"] != 0:
             raise CaptureError(
                 f"the desktop portal declined the screenshot (response code {answer['code']})"
@@ -842,6 +864,35 @@ def _portal_capture(
             "was returned at whatever size the portal produced rather than in logical pixels"
         )
     return png, notes
+
+
+def _discard_late_portal_file(answer: dict[str, Any], grace: float) -> str | None:
+    """Remove the screenshot an answer that came too late named, if it named one.
+
+    The capture has already failed by the time this runs and still fails; the
+    only job here is that the file the portal went on to write does not survive.
+    Nothing but the exact file this request caused is touched, and a location
+    that never arrives or a removal that fails is reported back for the failure
+    message rather than raised, because there is nothing left to retry.
+    """
+    if not _run_until(lambda: "code" in answer, grace):
+        return "it may still write a screenshot this capture could not remove"
+    if answer.get("code") != 0:
+        return None
+    uri = (answer.get("results") or {}).get("uri")
+    if not uri:
+        return None
+    parsed = urlparse(uri)
+    if parsed.scheme != "file":
+        return f"it left a screenshot at {uri} this capture could not remove"
+    path = Path(unquote(parsed.path))
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return None
+    except OSError as err:
+        return f"it left a screenshot at {path} this capture could not remove: {err}"
+    return None
 
 
 def _take_portal_file(uri: str, notes: list[str]) -> bytes:

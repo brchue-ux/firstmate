@@ -1195,6 +1195,110 @@ class PortalRouteReconciliationTest(unittest.TestCase):
             CAP._portal_capture("region", {"x": 0, "y": 0, "width": 10, "height": 10}, True, 5.0, None)
 
 
+class LatePortalBus(PortalBus):
+    """A portal that answers only after the caller has given up waiting.
+
+    The screenshot is written either way - the portal alone decides where, and
+    goes on writing it whether or not the answer is still wanted - so the answer
+    that arrives too late is the only thing that ever names the file to remove.
+    """
+
+    def __init__(self, uri, delay):
+        super().__init__(uri)
+        self.delay = delay
+
+    def _answer(self, path, registered):
+        _sub, name, iface, callback = registered
+        uri = self.uri
+
+        def fire():
+            callback(
+                self,
+                name,
+                path,
+                iface,
+                "Response",
+                CAP.GLib.Variant("(ua{sv})", (0, {"uri": CAP.GLib.Variant("s", uri)})),
+            )
+            return False
+
+        CAP.GLib.timeout_add(int(self.delay * 1000), fire)
+
+
+class LatePortalAnswerTest(unittest.TestCase):
+    """A portal answer that lands after the budget must leave nothing behind."""
+
+    DESKTOP = {"width": 200, "height": 100, "monitors": [], "primary": {}}
+    BUDGET = 1.0
+    LATE = 1.2
+
+    def setUp(self):
+        if CAP._GI_IMPORT_ERROR is not None:
+            self.skipTest("GObject introspection bindings unavailable")
+        CAP._pump_main_context()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.saved = (CAP._session_bus, CAP.display_state, CAP._mutter_attempt)
+        CAP.display_state = lambda *_a, **_k: self.DESKTOP
+        CAP._mutter_attempt = lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("this route is pinned to the portal")
+        )
+
+    def tearDown(self):
+        CAP._session_bus, CAP.display_state, CAP._mutter_attempt = self.saved
+        self.tmp.cleanup()
+        CAP._pump_main_context()
+
+    def _shot(self, name="Screenshot-1.png"):
+        path = Path(self.tmp.name) / name
+        path.write_bytes(PNG_1X1)
+        return path
+
+    def _use(self, bus):
+        CAP._session_bus = lambda: bus
+        return bus
+
+    def _capture(self):
+        with self.assertRaises(CAP.CaptureError) as ctx:
+            CAP.capture(scope="screen", route="portal", timeout=self.BUDGET)
+        self.assertIn("never answered", str(ctx.exception))
+        return str(ctx.exception)
+
+    def test_a_screenshot_written_after_the_budget_is_not_left_behind(self):
+        path = self._shot()
+        self._use(LatePortalBus(path.as_uri(), self.LATE))
+        self._capture()
+        self.assertFalse(path.exists(), "the portal's screenshot was left in the captain's home")
+
+    def test_nothing_else_in_that_directory_is_removed(self):
+        path = self._shot()
+        bystander = Path(self.tmp.name) / "Screenshot-holiday.png"
+        bystander.write_bytes(PNG_1X1)
+        self._use(LatePortalBus(path.as_uri(), self.LATE))
+        self._capture()
+        self.assertTrue(bystander.exists(), "a file this capture never asked for was removed")
+
+    def test_a_location_that_never_arrives_is_reported_rather_than_guessed(self):
+        path = self._shot()
+        bus = self._use(LatePortalBus(path.as_uri(), self.LATE))
+        bus.responders = _DroppedSubscriptions()
+        started = time.monotonic()
+        message = self._capture()
+        elapsed = time.monotonic() - started
+        self.assertIn("could not remove", message)
+        self.assertTrue(path.exists(), "a file the portal never named was removed anyway")
+        self.assertLess(
+            elapsed,
+            self.BUDGET + CAP.PORTAL_CLEANUP_SECONDS + 1.0,
+            "waiting for a location that never comes is not bounded",
+        )
+
+    def test_a_removal_that_fails_is_reported_on_the_failure_not_raised(self):
+        undeletable = Path(self.tmp.name) / "Screenshot-1.png"
+        undeletable.mkdir()
+        self._use(LatePortalBus(undeletable.as_uri(), self.LATE))
+        self.assertIn("could not remove", self._capture())
+
+
 class CaptureOutputSizeTest(unittest.TestCase):
     """One call answers at one size, whichever route produced the pixels."""
 
