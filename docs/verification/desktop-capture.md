@@ -43,8 +43,8 @@ Two captures of that region, one per route, were also read visually and show the
 
 ## Latency
 
-Re-measured on 2026-09-01 against the current code, after the route reconciliation and the shared-boundary size normalization were added.
-These figures describe that code, not the original implementation.
+Re-measured on 2026-09-01 after the route reconciliation and the shared-boundary size normalization were added, so these figures describe that code rather than the original implementation.
+Two changes landed after the sweep and were not re-measured: the bounded first-frame wait and the portal's cleanup grace, both of which only shorten or lengthen a failing capture and leave every successful path here untouched.
 The captain's virtual output follows his RDP client's size and was 3440x1369 at this measurement rather than the 1920x1009 recorded above, so the whole-display rows cover about 2.4 times as many pixels as the earlier sweep did and are not comparable with it.
 
 Twenty captures per case, end to end through `capture()`, on an otherwise busy machine:

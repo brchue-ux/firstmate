@@ -109,7 +109,9 @@ running as the captain's user can capture from a bare SSH environment.
 
 CLI:
   fm-deskcap-lib.py screen <out.png|-> [--route auto|mutter|portal] [--no-cursor]
+                                       [--timeout <seconds>]
   fm-deskcap-lib.py region <x> <y> <w> <h> <out.png|-> [--route ...] [--no-cursor]
+                                                      [--timeout <seconds>]
   fm-deskcap-lib.py probe [--json]
 
 Exit status: 0 capture written, 1 capture failed on every attempted route,
