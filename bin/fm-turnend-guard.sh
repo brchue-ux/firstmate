@@ -88,6 +88,8 @@ done
 . "$SCRIPT_DIR/fm-supervision-lib.sh"
 # shellcheck source=bin/fm-primary-scope-lib.sh
 . "$SCRIPT_DIR/fm-primary-scope-lib.sh"
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$SCRIPT_DIR/fm-session-lock-lib.sh"
 
 # Read the whole turn-end hook payload once; never block on unreadable/absent
 # stdin.
@@ -153,8 +155,36 @@ if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
   exit 0
 fi
 
+# Read-only explanation of WHY the Stop auto-arm is not claiming this home,
+# for the block banner only. The guard's own decision never depends on it.
+#
+# The auto-arm stays inert when state/.lock names a live harness that is not
+# this session's ancestor. That is correct for a genuinely competing session and
+# it is also what a re-hosted session looks like when the re-host record cannot
+# prove itself (bin/fm-session-lock-lib.sh). Both leave the model repairing by
+# hand every turn with nothing on screen saying why, so name the condition here
+# instead of leaving the loop unexplained. Runs only on the blocking path, which
+# is rare, because the ancestry walk forks.
+autoarm_inert_reason() {
+  local lock_pid mine
+  [ "$CLAUDE_MODE" -eq 1 ] || return 0
+  if [ -e "$STATE/.afk" ]; then
+    printf 'Away mode owns supervision here, so the Stop auto-arm stays out of it; the away daemon is what must be running.\n'
+    return 0
+  fi
+  lock_pid=$(cat "$STATE/.lock" 2>/dev/null || true)
+  case "$lock_pid" in
+    ''|*[!0-9]*) return 0 ;;
+  esac
+  fm_harness_pid_alive "$lock_pid" || return 0
+  mine=$(fm_harness_ancestry_pid 2>/dev/null || true)
+  [ -n "$mine" ] && [ "$mine" != "$lock_pid" ] || return 0
+  printf 'This home records session pid %s as its owner and that process is still alive, so the Stop auto-arm treats this session as a competing one and stays inert - arming by hand repairs one turn and changes nothing.\n' "$lock_pid"
+  printf 'If that owner is genuinely another firstmate session in this home, report it rather than re-arming; if it is a leftover host process of this same session, it is a stuck owner record and needs a deliberate re-anchor, not another arm.\n'
+}
+
 block_stop() {
-  local afk x_mode reason rule
+  local afk x_mode reason rule inert
   afk=0
   [ -e "$STATE/.afk" ] && afk=1
   x_mode=0
@@ -172,6 +202,12 @@ block_stop() {
     fi
     if [ "$CLAUDE_MODE" -eq 1 ]; then
       printf '●  The Stop-owned auto-arm did not claim this home either, so recovery is NOT already under way.\n'
+      inert=$(autoarm_inert_reason)
+      if [ -n "$inert" ]; then
+        printf '%s' "$inert" | while IFS= read -r line; do
+          printf '●  %s\n' "$line"
+        done
+      fi
     fi
     printf '●  %s\n' "$reason"
     printf '●%s\n' "$rule"

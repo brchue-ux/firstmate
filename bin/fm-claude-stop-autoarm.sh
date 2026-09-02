@@ -13,8 +13,16 @@
 #   - Identity: only when THIS session's harness ancestor holds state/.lock.
 #     When an existing numeric owner fails the shared harness-liveness predicate,
 #     the hook delegates guarded recovery to bin/fm-lock.sh and then re-verifies
-#     ownership. A live owner, missing lock, malformed lock, or unresolved
-#     ancestry remains inert, so a competing session never arms or rewakes.
+#     ownership. A missing lock, malformed lock, or unresolved ancestry remains
+#     inert. A LIVE owner also remains inert - a competing session never arms or
+#     rewakes - with one proven exception: when the Stop payload's session id
+#     matches this home's re-host record and that record still names the current
+#     lock pid, the live owner is an earlier host process of THIS session
+#     (bin/fm-session-lock-lib.sh, "session re-host record"), and the hook
+#     re-anchors the lock through bin/fm-lock.sh --adopt-session. Without that
+#     exception a re-hosted session reads as a competing one and this hook goes
+#     silently inert for the rest of the session, leaving the home with no
+#     watcher at all; docs/turnend-guard.md records the 2026-09-01 incident.
 #   - AFK: while state/.afk exists the away daemon owns the watcher and triage;
 #     this hook exits 0 and NEVER rewakes the primary (checked again at
 #     translation time so a mid-cycle AFK transition is honored).
@@ -70,9 +78,19 @@ EPOCH="$STATE/.claude-autoarm-epoch"
 # shellcheck source=bin/fm-session-lock-lib.sh
 . "$SCRIPT_DIR/fm-session-lock-lib.sh"
 
-# Consume the Stop payload once. The decisions below are state-based; the
-# payload is read so a slow writer can never wedge on a full pipe.
-cat >/dev/null 2>&1 || true
+# Consume the Stop payload once, so a slow writer can never wedge on a full
+# pipe. Every decision below is state-based except the re-host proof, which
+# needs the payload's own session id. Without jq, or with an unusable id, that
+# one proof is simply unavailable and the identity gate behaves as it always
+# did - never more permissively.
+PAYLOAD=$(cat 2>/dev/null || true)
+SESSION_ID=
+if [ -n "$PAYLOAD" ] && command -v jq >/dev/null 2>&1; then
+  SESSION_ID=$(printf '%s' "$PAYLOAD" \
+    | jq -r 'if type == "object" and ((.session_id | type) == "string") then .session_id else empty end' \
+      2>/dev/null || true)
+  fm_session_lock_id_valid "$SESSION_ID" || SESSION_ID=
+fi
 
 # --- scope: genuine primary checkout only -----------------------------------
 fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
@@ -84,12 +102,19 @@ fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 # idle or away home remains byte-for-byte inert. Missing or malformed locks are
 # uncertainty rather than stale-owner evidence and remain inert.
 RECOVER_SESSION_LOCK=0
+ADOPT_SESSION=
 if ! fm_session_lock_owned_by_self "$STATE"; then
   LOCK_PID=$(cat "$STATE/.lock" 2>/dev/null || true)
   case "$LOCK_PID" in
     ''|*[!0-9]*) exit 0 ;;
   esac
-  fm_harness_pid_alive "$LOCK_PID" && exit 0
+  if fm_harness_pid_alive "$LOCK_PID"; then
+    if [ -n "$SESSION_ID" ] && fm_session_lock_rehost_proven "$STATE" "$SESSION_ID"; then
+      ADOPT_SESSION=$SESSION_ID
+    else
+      exit 0
+    fi
+  fi
   RECOVER_SESSION_LOCK=1
 fi
 
@@ -125,8 +150,22 @@ trap 'fm_lock_release "$OWNER_LOCK"' EXIT
 # remain the single acquisition owner, then re-verify current-session identity
 # before touching any auto-arm state.
 if [ "$RECOVER_SESSION_LOCK" -eq 1 ]; then
-  "$SCRIPT_DIR/fm-lock.sh" >/dev/null 2>&1 || exit 0
+  if [ -n "$ADOPT_SESSION" ]; then
+    "$SCRIPT_DIR/fm-lock.sh" --adopt-session "$ADOPT_SESSION" >/dev/null 2>&1 || exit 0
+  else
+    "$SCRIPT_DIR/fm-lock.sh" >/dev/null 2>&1 || exit 0
+  fi
   fm_session_lock_owned_by_self "$STATE" || exit 0
+fi
+
+# Ownership is verified for this firing, so record which session owns this home
+# and at which harness pid. This is the only writer of that record on the
+# ordinary path, and it refreshes on every owned firing, so a session id that
+# changes while ancestry is intact - a compaction, for instance - is picked up
+# within one turn end.
+if [ -n "$SESSION_ID" ]; then
+  fm_session_lock_record_owner "$STATE" "$SESSION_ID" \
+    "$(cat "$STATE/.lock" 2>/dev/null || true)" || true
 fi
 
 write_epoch() {  # <outcome>

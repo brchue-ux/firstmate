@@ -138,6 +138,17 @@ fi
 [ "$(sed -n 's/^.*outcome=\([a-z][a-z]*\) .*$/\1/p' "$HOME_DIR/state/.claude-autoarm-epoch" 2>/dev/null)" = rewake ] \
   || fail "auto-arm epoch ledger must record the rewake outcome"
 [ ! -e "$HOME_DIR/state/.claude-autoarm.lock" ] || fail "auto-arm owner lock was left behind"
+# The re-host record is what lets a session that Claude Code re-hosts into
+# another process keep supervising this home instead of reading as a competing
+# session (docs/turnend-guard.md). It is only as good as the payload field it
+# reads, so prove against the real product that the id it recorded is the id
+# this session actually reported, and that it names the lock this run holds.
+RECORDED_SESSION=$(sed -n '1s/^session=//p' "$HOME_DIR/state/.lock-session" 2>/dev/null || true)
+[ -n "$RECORDED_SESSION" ] || fail "no owning session was recorded for the re-host record: $(cat "$HOME_DIR/state/.lock-session" 2>/dev/null)"
+grep -q "\"session_id\":\"$RECORDED_SESSION\"" "$TRANSCRIPT" \
+  || fail "recorded session id $RECORDED_SESSION is not the session id Claude reported"
+[ "$(sed -n '2s/^harness_pid=//p' "$HOME_DIR/state/.lock-session" 2>/dev/null)" = "$(cat "$HOME_DIR/state/.lock" 2>/dev/null)" ] \
+  || fail "re-host record does not name the session lock this run holds"
 
 # Live-owner negative control: a separate supported-harness process owns a
 # second isolated home while another Stop hook fires from the same primary
@@ -161,4 +172,4 @@ printf '%s\n' '{"session_id":"live-owner-control"}' \
 [ ! -s "$LAB/live-owner.out" ] && [ ! -s "$LAB/live-owner.err" ] || fail "competing Stop hook produced a rewake while another live session owned the home"
 wait "$LIVE_OWNER_PID"
 
-printf 'ok - Claude %s live E2E reclaimed a stale session lock through session start, completed two tokenless Stop-owned rewake cycles, and preserved the competing-live-owner boundary\n' "$CLAUDE_VERSION"
+printf 'ok - Claude %s live E2E reclaimed a stale session lock through session start, completed two tokenless Stop-owned rewake cycles, recorded this session as the home owner, and preserved the competing-live-owner boundary\n' "$CLAUDE_VERSION"

@@ -95,7 +95,42 @@ The secondmate-home scope and manual-repair wake path were measured with Claude 
 The current Stop-owned main/secondmate inclusion and child-worktree exclusion are covered deterministically by `tests/fm-claude-stop-autoarm.test.sh`.
 On 2026-07-28 with Claude Code 2.1.205, `fm_harness_ancestry_pid()` in `bin/fm-session-lock-lib.sh` was fixed to resolve the outermost pid of a contiguous nested-harness run instead of the first match, so the Stop auto-arm correctly reaches the session's true lock owner through Claude Code's multi-level `bg-spare` hook worker chain.
 
-The Claude product live path ran with Claude Code 2.1.219 on 2026-07-24:
+### Claude Stop hook dispatch and session re-hosting, 2026-09-01
+
+Two facts about Claude Code 2.1.246 were measured directly on 2026-09-01, in a throwaway project with two logging `Stop` hooks registered in the same array, the first blocking with exit 2 for its first two firings.
+
+```sh
+/home/bchue/.local/share/claude/versions/2.1.246 -p "Reply with exactly: OK" \
+  --model claude-haiku-4-5-20251001 --permission-mode bypassPermissions
+```
+
+Observed hook log, three stops:
+
+```text
+A fired 1788305794.572887285
+B fired 1788305794.574727383
+A fired 1788305797.377415299
+B fired 1788305797.380016232
+A fired 1788305799.266675607
+B fired 1788305799.268234972
+```
+
+The second hook fired about two milliseconds after the first on every stop, including the two stops the first hook blocked.
+A blocking `Stop` hook therefore does not suppress a later hook in the same array, and the entries are dispatched together rather than in sequence.
+
+A second run in the same version, with the real tracked `Stop` registration against an isolated clone carrying `state/probe.meta` and a session lock naming the driving process, completed one auto-arm cycle to `outcome=rewake` and claimed the next one, with no blind-turn banner across three turns.
+That confirms the cooperative split works whenever the hook's ancestry resolves to the recorded lock owner.
+
+The failure that motivated this record is the case where it does not.
+The affected home's Stop hook stopped claiming at 18:51:41 local time and its epoch ledger `state/.claude-autoarm-epoch` never advanced again while the guard blocked on every subsequent turn.
+`state/.lock` named pid 1924102, a live `claude` process running binary `2.1.246`, while every transcript entry that session wrote from 16:00:32 onwards recorded `"version": "2.1.257"` and `"sessionKind": "bg"`.
+A process cannot record a version it is not running, so the process executing that session's turns was not the process the lock named.
+A `claude daemon run` under `systemd --user` had started at 18:44:36 with a `claude bg-pty-host` child, one minute after 2.1.258 was installed at 18:43 and seven minutes before the ledger froze.
+The recorded owner was alive, so `fm_harness_pid_alive` reported it as a live harness and the auto-arm's ownership gate exited 0 silently on every stop from then on.
+
+`state/.lock-session` and `bin/fm-lock.sh --adopt-session` close that gap; the deterministic coverage is in `tests/fm-claude-stop-autoarm.test.sh` and `tests/fm-turnend-guard.test.sh`.
+
+The Claude product live path ran with Claude Code 2.1.219 on 2026-07-24 and again with 2.1.258 on 2026-09-01:
 
 ```sh
 claude --version
@@ -108,6 +143,14 @@ Observed output:
 2.1.219 (Claude Code)
 ok - Claude 2.1.219 (Claude Code) live E2E reclaimed a stale session lock through session start, completed two tokenless Stop-owned rewake cycles, and preserved the competing-live-owner boundary
 ```
+
+```text
+2.1.258 (Claude Code)
+ok - Claude 2.1.258 (Claude Code) live E2E reclaimed a stale session lock through session start, completed two tokenless Stop-owned rewake cycles, recorded this session as the home owner, and preserved the competing-live-owner boundary
+```
+
+The 2026-09-01 run additionally proves against the real product that the id the auto-arm records in `state/.lock-session` is the `session_id` Claude reported for that session, and that the record names the session lock the run holds.
+That is the field the re-host proof depends on, so it is checked against the product rather than assumed.
 
 Current entry points:
 

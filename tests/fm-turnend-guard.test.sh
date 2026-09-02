@@ -108,6 +108,7 @@ install_guard_scripts() {
   cp "$ROOT/bin/fm-primary-scope-lib.sh" "$dir/bin/fm-primary-scope-lib.sh"
   cp "$ROOT/bin/fm-supervision-lib.sh" "$dir/bin/fm-supervision-lib.sh"
   cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/fm-wake-lib.sh"
+  cp "$ROOT/bin/fm-session-lock-lib.sh" "$dir/bin/fm-session-lock-lib.sh"
   mkdir -p "$dir/docs"
   cp -R "$ROOT/docs/supervision-protocols" "$dir/docs/supervision-protocols"
   chmod +x "$dir/bin/fm-turnend-guard.sh" "$dir/bin/fm-turnend-guard-grok.sh" "$dir/bin/fm-operational-input.sh" "$dir/bin/fm-supervision-instructions.sh" "$dir/bin/fm-harness.sh"
@@ -295,6 +296,56 @@ test_hook_blocks_when_unhealthy_in_primary() {
   assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
   assert_contains "$out" "TURN WOULD END BLIND" "block banner must read as an alarm"
   pass "fm-turnend-guard: blocks with the exact required reason in the primary when unhealthy"
+}
+
+test_hook_block_banner_names_a_live_recorded_owner() {
+  local dir home fakebin fake_claude owner out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-live-owner-banner")
+  home=$(cd "$dir" && pwd)
+  : > "$dir/state/task1.meta"
+  fakebin=$(fm_fakebin "$TMP_ROOT/hook-live-owner-bin")
+  ln -s /bin/bash "$fakebin/claude"
+  fake_claude="$fakebin/claude"
+  # A live recorded owner that is not this session: the shape that makes the
+  # Stop auto-arm inert every turn. The guard's decision is unchanged - it still
+  # blocks - but the banner must say why, because arming by hand repairs one
+  # turn and the next turn blocks identically.
+  "$fake_claude" -c 'sleep 60; :' >/dev/null 2>&1 &
+  owner=$!
+  printf '%s\n' "$owner" > "$dir/state/.lock"
+  # shellcheck disable=SC2016 # $1 is deliberate: it expands inside the fake harness child
+  out=$(printf '{"stop_hook_active":false}' \
+    | CLAUDECODE=1 FM_HOME="$home" FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 "$fake_claude" -c \
+        'bash "$1/bin/fm-turnend-guard.sh" --claude' _ "$dir" 2>&1); status=$?
+  kill "$owner" 2>/dev/null || true
+  wait "$owner" 2>/dev/null || true
+  expect_code 2 "$status" "a live recorded owner must still block a blind turn end"
+  assert_contains "$out" "TURN WOULD END BLIND" "the guard must keep blocking, not explain instead of blocking"
+  assert_contains "$out" "records session pid $owner as its owner" "the banner must name the live recorded owner that keeps the auto-arm inert"
+  assert_contains "$out" "arming by hand repairs one turn and changes nothing" "the banner must say why re-arming does not end the loop"
+  pass "fm-turnend-guard: the block banner names a live recorded owner instead of leaving the re-arm loop unexplained"
+}
+
+test_hook_block_banner_stays_quiet_when_this_session_owns_the_home() {
+  local dir home fakebin fake_claude out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-own-owner-banner")
+  home=$(cd "$dir" && pwd)
+  : > "$dir/state/task1.meta"
+  fakebin=$(fm_fakebin "$TMP_ROOT/hook-own-owner-bin")
+  ln -s /bin/bash "$fakebin/claude"
+  fake_claude="$fakebin/claude"
+  # shellcheck disable=SC2016 # $$ and $1 are deliberate: they expand inside the fake harness child
+  out=$(printf '{"stop_hook_active":false}' \
+    | CLAUDECODE=1 FM_HOME="$home" FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 "$fake_claude" -c '
+        printf "%s\n" "$$" > "$1/state/.lock"
+        bash "$1/bin/fm-turnend-guard.sh" --claude
+      ' _ "$dir" 2>&1); status=$?
+  expect_code 2 "$status" "an ordinary blind turn end must still block"
+  assert_contains "$out" "TURN WOULD END BLIND" "the ordinary block banner must be unchanged"
+  case "$out" in
+    *"as its owner"*) fail "the owner diagnosis fired for a home this session already owns: $out" ;;
+  esac
+  pass "fm-turnend-guard: the owner diagnosis stays out of an ordinary blind turn end this session owns"
 }
 
 test_hook_blocks_from_fm_home_state() {
@@ -1117,6 +1168,8 @@ test_hook_blocks_when_dead_lock_has_fresh_beacon
 test_hook_silent_with_live_lock_and_fresh_beacon
 test_hook_blocks_with_live_lock_and_stale_beacon
 test_hook_blocks_when_unhealthy_in_primary
+test_hook_block_banner_names_a_live_recorded_owner
+test_hook_block_banner_stays_quiet_when_this_session_owns_the_home
 test_hook_blocks_from_fm_home_state
 test_hook_x_mode_reason_sources_cadence
 test_hook_ignores_repo_state_when_fm_home_set

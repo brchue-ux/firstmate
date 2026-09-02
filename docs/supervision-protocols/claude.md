@@ -14,6 +14,8 @@ When this session owns supervision and away mode is not active:
    Both forms attach to a watcher that is already healthy rather than replacing it, so replacing a live watcher takes a deliberate `bin/fm-watch-arm.sh --restart --force`.
    Source `__FM_X_MODE_ENV__` first when X mode is active.
    A shell `&`, a truncating pipe, or bundling is denied automatically by the PreToolUse seatbelt (`bin/fm-arm-pretool-check.sh`) registered in `.claude/settings.json`.
+   When the guard's block names a live recorded owner for this home, a manual arm repairs one turn and the next turn blocks identically: the Stop hook is inert because this home records a different live session as its owner.
+   Report that condition instead of re-arming turn after turn; [`../turnend-guard.md`](../turnend-guard.md) owns the re-host contract and the deliberate re-anchor path.
 6. Treat `watcher: started ...` and `watcher: attached ...` inside arm output as proof that one live cycle exists.
    On attach, the arm follows verified identity-matched successors instead of exiting when the first cycle ends.
 7. The durable wake queue preserves actionable events between a rewake and the next Stop-launched arm, while the bounded turn-end guard prevents a blind Stop when recovery did not start.

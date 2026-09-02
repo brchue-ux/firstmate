@@ -94,3 +94,80 @@ fm_session_lock_owned_by_self() {
   my_pid=$(fm_harness_ancestry_pid) || return 1
   [ "$my_pid" = "$lock_pid" ]
 }
+
+# ---- session re-host record --------------------------------------------------
+#
+# Why this exists
+# ---------------
+# state/.lock records ONE number: the harness ancestor pid of whatever process
+# acquired it. That is enough only while a session keeps the same host process
+# for its whole life, and Claude Code does not promise that. A session can be
+# RE-HOSTED: the same conversation keeps running while the process that executes
+# its turns changes - a daemon-hosted background session, a respawned bg-spare
+# worker, or a host respawned by an in-place version upgrade. The process that
+# first took the lock can stay alive afterwards as an ordinary client that no
+# longer runs anything for this home.
+#
+# After a re-host, hooks fire from a chain that no longer contains the recorded
+# pid, so fm_session_lock_owned_by_self reports false and fm_harness_pid_alive
+# reports the recorded pid as a live harness. Ancestry alone therefore reads a
+# re-host as "another live session owns this home" for a session that IS this
+# home's session, and every ownership-gated hook goes silently inert - the home
+# then supervises nothing until someone acts by hand.
+#
+# This record closes that gap without widening the competing-session boundary.
+# It names the harness session id that owned the home the last time ancestry and
+# the lock agreed, together with the lock pid at that moment. A re-host claim is
+# honored only when BOTH still match the current situation, so another session
+# can never present it: the recorded id is not that session's id. A record whose
+# pid no longer matches the lock proves nothing and is ignored.
+FM_SESSION_LOCK_REHOST_FILE=.lock-session
+
+# Reject anything that is not a plain harness session identifier.
+fm_session_lock_id_valid() {  # <session-id>
+  case "${1:-}" in
+    '') return 1 ;;
+    *[!A-Za-z0-9._:-]*) return 1 ;;
+  esac
+  return 0
+}
+
+# Record <session-id> as this home's owning session at harness pid <pid>.
+# Callers record only after ownership is verified, never speculatively.
+fm_session_lock_record_owner() {  # <state-dir> <session-id> <harness-pid>
+  local state=$1 session=$2 pid=$3 file tmp
+  fm_session_lock_id_valid "$session" || return 1
+  case "$pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  file="$state/$FM_SESSION_LOCK_REHOST_FILE"
+  tmp="$file.tmp.$$"
+  if ! { printf 'session=%s\nharness_pid=%s\n' "$session" "$pid"; } > "$tmp" 2>/dev/null; then
+    rm -f "$tmp" 2>/dev/null || true
+    return 1
+  fi
+  mv -f "$tmp" "$file" 2>/dev/null || {
+    rm -f "$tmp" 2>/dev/null || true
+    return 1
+  }
+  return 0
+}
+
+# True when the record proves the live lock owner is an earlier host process of
+# THIS session, so re-anchoring the lock continues one session rather than
+# taking a home from another one. Every other situation fails closed.
+fm_session_lock_rehost_proven() {  # <state-dir> <session-id>
+  local state=$1 session=$2 file recorded_session recorded_pid lock_pid
+  fm_session_lock_id_valid "$session" || return 1
+  file="$state/$FM_SESSION_LOCK_REHOST_FILE"
+  [ ! -L "$file" ] || return 1
+  [ -f "$file" ] || return 1
+  recorded_session=$(sed -n '1s/^session=//p' "$file" 2>/dev/null || true)
+  recorded_pid=$(sed -n '2s/^harness_pid=//p' "$file" 2>/dev/null || true)
+  [ "$recorded_session" = "$session" ] || return 1
+  case "$recorded_pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  lock_pid=$(cat "$state/.lock" 2>/dev/null || true)
+  [ "$recorded_pid" = "$lock_pid" ]
+}

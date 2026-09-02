@@ -56,6 +56,25 @@ The Claude mode waits up to `FM_CLAUDE_AUTOARM_SYNC_WAIT_MS` (default 800 millis
 When none of those proofs appears, it re-blocks up to `FM_CLAUDE_TURNEND_BLOCK_BUDGET` times (default 3, below Claude's 8-block override), then allows degraded with a visible `systemMessage`.
 Any allow resets the budget.
 
+Both Claude `Stop` entries are dispatched together, not in sequence.
+A blocking exit from the guard does not suppress the `asyncRewake` auto-arm registered after it, so the cooperative split above depends on array order for readability only, never for correctness.
+The single-flight owner lock `state/.claude-autoarm.lock` is what bounds concurrency: Claude Code fires one auto-arm process per stop with no deduplication, exactly one claims the lock and translates its cycle, and every other firing exits 0.
+
+The auto-arm acts only for the session that holds `state/.lock`, so a competing session in the same home never arms or rewakes.
+One situation looks identical to a competing session and is not one.
+A Claude session can be re-hosted: the same conversation keeps running while the process that executes its turns changes, and the process that originally took the lock stays alive as a client that no longer runs anything for this home.
+A daemon-hosted background session, a respawned `bg-spare` worker, and an in-place version upgrade all produce that shape.
+Ancestry then resolves to a pid the lock does not name while the recorded pid is still a live harness, so before this was handled the auto-arm went inert for the rest of the session, the guard blocked every turn, and each manual repair fixed exactly one turn.
+`bin/fm-session-lock-lib.sh` owns the distinction through the re-host record `state/.lock-session`, which names the session id that owned the home the last time ancestry and the lock agreed together with the lock pid at that moment.
+A live owner is re-anchored through `bin/fm-lock.sh --adopt-session <session-id>` only when the record names the current payload's session id and still names the current lock pid, so a different session can never present it and a record describing a situation that has moved on proves nothing.
+The auto-arm refreshes the record on every firing that wins the single-flight claim, which is how a session id that changes while ancestry is intact, such as after a compaction, is picked up within one turn end.
+Two situations therefore still reach the guard rather than self-healing: a session id that changes during the one window where ancestry is already broken, and a home where the lock genuinely belongs to a second live firstmate session.
+Both are conditions to report, not to re-arm through, which is why the guard names them.
+Without `jq`, or with an unusable payload session id, the proof is simply unavailable and the ownership gate is exactly as strict as it was before.
+
+The guard's own decision never consults that record.
+On the blocking path only, it reads `state/.lock` and names a live recorded owner that is not this session, because that condition makes re-arming by hand a repair that lasts one turn and the loop otherwise carries no explanation of itself.
+
 OpenCode, Pi, and pi-signed expose passive callbacks for this purpose.
 Their adapters fail open at the hook boundary to protect the user session but schedule one bounded follow-up when the predicate blocks.
 The generated prompts use the canonical `turn-end-guard` kind after the U+2063 `FIRSTMATE_OP: ` prefix, so Ahoy does not treat them as captain messages.
@@ -91,7 +110,8 @@ That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it alwa
 
 ## Regression coverage
 
-`tests/fm-turnend-guard.test.sh` covers the predicate, main and secondmate primary scope, child-worktree exclusion, `FM_HOME` and `FM_STATE_OVERRIDE` precedence, the cooperative `--claude` claim wait, epoch allow, re-block budget, Pi logical-run latching, missing-`jq` behavior, all five primary registrations, Grok native and legacy selection, typed field precedence, malformed input, and exactly-one-path safety.
+`tests/fm-turnend-guard.test.sh` covers the predicate, main and secondmate primary scope, child-worktree exclusion, `FM_HOME` and `FM_STATE_OVERRIDE` precedence, the cooperative `--claude` claim wait, epoch allow, re-block budget, the live-recorded-owner banner and its absence for a home this session owns, Pi logical-run latching, missing-`jq` behavior, all five primary registrations, Grok native and legacy selection, typed field precedence, malformed input, and exactly-one-path safety.
+`tests/fm-claude-stop-autoarm.test.sh` covers the re-host contract: a proven re-host re-anchors a live-owner lock and resumes supervision, a record naming another session or a pid the lock has moved off proves nothing, a payload with no usable session id cannot widen the gate, and every owned firing refreshes the record.
 `tests/fm-kimi-harness.test.sh` covers the separate Kimi crew hook's format preservation, idempotence, refusal cases, token guard, spawn registration, and teardown cleanup.
 `tests/fm-supervision-instructions.test.sh` covers recovery-line ownership and pi-signed's identity-preserving reuse of Pi's protocol.
 `FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh` is the opt-in isolated Pi path.

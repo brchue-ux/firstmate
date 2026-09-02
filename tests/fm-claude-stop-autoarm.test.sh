@@ -281,6 +281,134 @@ test_inert_when_lock_held_by_other_harness() {
   pass "auto-arm: inert without arm, rewake, or lock replacement when another live harness owns the home"
 }
 
+# --- session re-host: the 2026-09-01 permanently-inert incident ----------------
+#
+# A live recorded owner is normally a competing session. It is also exactly what
+# a RE-HOSTED session looks like: the same Firstmate session continuing in a
+# different Claude Code process (a daemon-hosted background session, a respawned
+# bg-spare worker, an upgraded host) while the process that took the lock is
+# still alive. Ancestry alone cannot tell them apart, so before the re-host
+# record existed the hook went inert for the rest of the session and the home
+# supervised nothing until someone armed by hand every single turn.
+
+# Start a fake harness that outlives the hook run and record it as the owner.
+# Prints its pid; callers must kill it.
+start_live_owner() {  # <fixture-dir>
+  local dir=$1 pid
+  # The trailing no-op keeps the fake harness alive instead of letting bash
+  # exec the final sleep into a non-harness process. Its descriptors are
+  # detached so a caller reading this function's stdout through a command
+  # substitution is not held open for the owner's whole lifetime.
+  "$FAKE_CLAUDE" -c 'sleep 60; :' >/dev/null 2>&1 &
+  pid=$!
+  printf '%s\n' "$pid" > "$dir/state/.lock"
+  printf '%s\n' "$pid"
+}
+
+write_rehost_record() {  # <fixture-dir> <session-id> <harness-pid>
+  printf 'session=%s\nharness_pid=%s\n' "$2" "$3" > "$1/state/.lock-session"
+}
+
+record_field() {  # <fixture-dir> <field>
+  sed -n "s/^$2=//p" "$1/state/.lock-session" 2>/dev/null || true
+}
+
+test_rehosted_session_reanchors_a_live_owner_lock() {
+  local dir owner out status lock_after
+  dir=$(make_primary_dir "$TMP_ROOT/rehost-claim")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  owner=$(start_live_owner "$dir")
+  write_rehost_record "$dir" sess-rehost "$owner"
+  out=$(printf '%s\n' '{"session_id":"sess-rehost"}' \
+    | FM_HOME="$dir" "$FAKE_CLAUDE" -c '
+        printf "%s\n" "$$" > "$FM_HOME/state/new-host"
+        "$FM_HOME/bin/fm-claude-stop-autoarm.sh"
+      ' 2>&1); status=$?
+  lock_after=$(cat "$dir/state/.lock" 2>/dev/null || true)
+  kill "$owner" 2>/dev/null || true
+  wait "$owner" 2>/dev/null || true
+  expect_code 2 "$status" "a proven re-host of this session must arm and rewake instead of staying inert"
+  [ "$lock_after" = "$(cat "$dir/state/new-host")" ] \
+    || fail "re-host did not re-anchor the lock to the current host: expected $(cat "$dir/state/new-host"), got $lock_after"
+  [ -e "$dir/state/arm-ran" ] || fail "proven re-host did not arm"
+  [ "$(epoch_outcome "$dir")" = rewake ] || fail "proven re-host must record outcome=rewake"
+  [ "$(record_field "$dir" harness_pid)" = "$lock_after" ] \
+    || fail "re-host record was not refreshed to the new host pid"
+  pass "auto-arm: a proven re-host of this same session re-anchors the live-owner lock and resumes supervision"
+}
+
+test_live_owner_with_a_different_session_stays_inert() {
+  local dir owner out status lock_after
+  dir=$(make_primary_dir "$TMP_ROOT/rehost-other-session")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  owner=$(start_live_owner "$dir")
+  write_rehost_record "$dir" sess-incumbent "$owner"
+  out=$(printf '%s\n' '{"session_id":"sess-intruder"}' \
+    | FM_HOME="$dir" "$FAKE_CLAUDE" -c '"$FM_HOME/bin/fm-claude-stop-autoarm.sh"' 2>&1); status=$?
+  lock_after=$(cat "$dir/state/.lock" 2>/dev/null || true)
+  kill "$owner" 2>/dev/null || true
+  wait "$owner" 2>/dev/null || true
+  expect_code 0 "$status" "a record naming another session must not admit this one"
+  [ "$lock_after" = "$owner" ] || fail "a different session took the lock: expected $owner, got $lock_after"
+  [ ! -e "$dir/state/arm-ran" ] || fail "a different session armed against a live owner"
+  [ ! -e "$dir/state/.claude-autoarm-epoch" ] || fail "a different session wrote an epoch against a live owner"
+  pass "auto-arm: the re-host record admits only the session it names, never a competing one"
+}
+
+test_rehost_record_that_no_longer_matches_the_lock_proves_nothing() {
+  local dir owner out status lock_after
+  dir=$(make_primary_dir "$TMP_ROOT/rehost-stale-record")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  owner=$(start_live_owner "$dir")
+  # The record names the right session but a host pid the lock has since moved
+  # off, so it describes a situation that no longer exists.
+  write_rehost_record "$dir" sess-rehost 4242
+  out=$(printf '%s\n' '{"session_id":"sess-rehost"}' \
+    | FM_HOME="$dir" "$FAKE_CLAUDE" -c '"$FM_HOME/bin/fm-claude-stop-autoarm.sh"' 2>&1); status=$?
+  lock_after=$(cat "$dir/state/.lock" 2>/dev/null || true)
+  kill "$owner" 2>/dev/null || true
+  wait "$owner" 2>/dev/null || true
+  expect_code 0 "$status" "a record whose pid no longer matches the lock must prove nothing"
+  [ "$lock_after" = "$owner" ] || fail "a stale record was accepted as a re-host proof"
+  [ ! -e "$dir/state/arm-ran" ] || fail "a stale record let the hook arm against a live owner"
+  pass "auto-arm: a re-host record that no longer names the current lock pid is ignored"
+}
+
+test_payload_without_a_session_id_cannot_claim_a_re_host() {
+  local dir owner out status lock_after
+  dir=$(make_primary_dir "$TMP_ROOT/rehost-no-id")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  owner=$(start_live_owner "$dir")
+  write_rehost_record "$dir" sess-rehost "$owner"
+  out=$(printf '%s\n' '{"stop_hook_active":false}' \
+    | FM_HOME="$dir" "$FAKE_CLAUDE" -c '"$FM_HOME/bin/fm-claude-stop-autoarm.sh"' 2>&1); status=$?
+  lock_after=$(cat "$dir/state/.lock" 2>/dev/null || true)
+  kill "$owner" 2>/dev/null || true
+  wait "$owner" 2>/dev/null || true
+  expect_code 0 "$status" "a payload with no usable session id must not widen the live-owner gate"
+  [ "$lock_after" = "$owner" ] || fail "an unidentified firing replaced a live owner"
+  [ ! -e "$dir/state/arm-ran" ] || fail "an unidentified firing armed against a live owner"
+  pass "auto-arm: without a usable payload session id the live-owner gate is exactly as strict as before"
+}
+
+test_owned_firing_records_the_owning_session() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/rehost-record-write")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "an ordinary owned firing must still arm and rewake"
+  [ "$(record_field "$dir" session)" = sess-autoarm ] \
+    || fail "owned firing did not record the payload session id: $(cat "$dir/state/.lock-session" 2>/dev/null)"
+  [ "$(record_field "$dir" harness_pid)" = "$(cat "$dir/state/.lock")" ] \
+    || fail "recorded harness pid does not match the session lock"
+  pass "auto-arm: every owned firing refreshes the re-host record, so a later re-host can prove itself"
+}
+
 test_inert_when_afk() {
   local dir out status
   dir=$(make_primary_dir "$TMP_ROOT/afk")
@@ -483,6 +611,11 @@ test_inert_without_session_lock
 test_reclaims_stale_session_lock_before_arming
 test_guard_sees_early_owner_claim_during_slow_stale_lock_recovery
 test_inert_when_lock_held_by_other_harness
+test_rehosted_session_reanchors_a_live_owner_lock
+test_live_owner_with_a_different_session_stays_inert
+test_rehost_record_that_no_longer_matches_the_lock_proves_nothing
+test_payload_without_a_session_id_cannot_claim_a_re_host
+test_owned_firing_records_the_owning_session
 test_inert_when_afk
 test_stale_lock_recovery_preserves_afk_and_need_gates
 test_resolves_outermost_claude_pid_in_nested_bgspare_chain
