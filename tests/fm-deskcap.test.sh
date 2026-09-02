@@ -15,6 +15,8 @@
 #       work, so the caller gets a useful message rather than a compositor error
 #   (d) a notification produces no response and bad JSON produces a parse error,
 #       so one confused client cannot wedge the server
+#   (e) a non-empty batch comes back as one JSON-RPC array, since that framing is
+#       what an older batching client parses
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -27,22 +29,45 @@ LIB="$ROOT/bin/fm-deskcap-lib.py"
 TMP_ROOT=$(fm_test_tmproot fm-deskcap)
 mkdir -p "$TMP_ROOT"
 
-# A tiny reader over the server's newline-delimited replies, so each assertion
-# below can name one field of one reply instead of re-parsing JSON in bash.
+# A tiny reader over the server's replies, so each assertion below can name one
+# field of one reply instead of re-parsing JSON in bash. A batch is answered as
+# one array frame, so it looks inside those too.
 cat >"$TMP_ROOT/field.py" <<'PY'
 import json, sys
 wanted, expr = sys.argv[1], sys.argv[2]
+
+
+def find():
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        frame = json.loads(line)
+        for message in (frame if isinstance(frame, list) else [frame]):
+            if isinstance(message, dict) and str(message.get("id")) == wanted:
+                return message.get("result", message.get("error"))
+    return None
+
+
+r = find()
+print("<no reply>" if r is None else eval(expr))  # noqa: S307 - a test-local expression over a parsed reply
+PY
+
+# The framing itself: one line per top-level reply the server wrote, as either
+# `object:<id>` or `array:<id>,<id>`. This is what tells a batch answered as a
+# single JSON-RPC array apart from one answered as loose newline-delimited
+# objects, which no batching client would accept.
+cat >"$TMP_ROOT/frames.py" <<'PY'
+import json, sys
 for line in sys.stdin:
     line = line.strip()
     if not line:
         continue
-    message = json.loads(line)
-    if str(message.get("id")) == wanted:
-        r = message.get("result", message.get("error"))
-        print(eval(expr))  # noqa: S307 - a test-local expression over a parsed reply
-        break
-else:
-    print("<no reply>")
+    frame = json.loads(line)
+    if isinstance(frame, list):
+        print("array:" + ",".join(str(m.get("id")) for m in frame))
+    else:
+        print("object:" + str(frame.get("id")))
 PY
 
 # --- engine contract units --------------------------------------------------
@@ -64,6 +89,11 @@ mcp() {
 # field <responses> <id> <python-expression over `r`> -> the evaluated value.
 field() {
   printf '%s\n' "$1" | python3 "$TMP_ROOT/field.py" "$2" "$3"
+}
+
+# frames <responses> -> one `object:<id>` or `array:<id>,...` line per reply.
+frames() {
+  printf '%s\n' "$1" | python3 "$TMP_ROOT/frames.py"
 }
 
 INIT='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}'
@@ -121,13 +151,27 @@ assert_contains "$out" '"code": -32600' "a bare literal must be an invalid reque
 [ "$(field "$out" 10 'r')" = "{}" ] || fail "the server must keep serving after a bare literal"
 pass "a bare non-object is an invalid request and does not wedge the server"
 
-# Batches left the spec in 2025-06-18 but older clients still send them, so a
-# stray literal inside one must not take the process down with it.
+# Batches left the spec in 2025-06-18 but older clients still send them. Such a
+# client reads exactly one array back per batch, so the framing is asserted here
+# and not just the contents; a stray literal inside one must also not take the
+# process down with it.
 out=$(mcp "$INIT" '[12, {"jsonrpc":"2.0","id":13,"method":"ping"}]' '{"jsonrpc":"2.0","id":14,"method":"ping"}')
+[ "$(frames "$out")" = "$(printf 'object:1\narray:None,13\nobject:14')" ] \
+  || fail "a batch must be answered as one array holding every response"
 assert_contains "$out" '"code": -32600' "a non-object batch element must be an invalid request"
 [ "$(field "$out" 13 'r')" = "{}" ] || fail "valid entries in the same batch must still be served"
 [ "$(field "$out" 14 'r')" = "{}" ] || fail "a malformed batch element must not wedge the server"
-pass "a malformed batch element is refused without wedging the server"
+pass "a batch is answered as a single array and a stray element does not wedge it"
+
+# A notification carries no id, so it contributes no entry to the array, and a
+# batch of nothing but notifications is answered with silence rather than [].
+out=$(mcp "$INIT" '[{"jsonrpc":"2.0","method":"ping"},{"jsonrpc":"2.0","id":16,"method":"ping"}]')
+[ "$(frames "$out")" = "$(printf 'object:1\narray:16')" ] \
+  || fail "a notification inside a batch must not contribute a response entry"
+out=$(mcp "$INIT" '[{"jsonrpc":"2.0","method":"ping"},{"jsonrpc":"2.0","method":"notifications/initialized"}]' '{"jsonrpc":"2.0","id":17,"method":"ping"}')
+[ "$(frames "$out")" = "$(printf 'object:1\nobject:17')" ] \
+  || fail "a batch of only notifications must produce no reply at all"
+pass "notifications add no batch entry and an all-notification batch is silent"
 
 out=$(mcp "$INIT" '[]' '{"jsonrpc":"2.0","id":15,"method":"ping"}')
 assert_contains "$out" '"code": -32600' "an empty batch must be an invalid request"
@@ -137,6 +181,19 @@ pass "an empty batch is an invalid request rather than silence"
 out=$(mcp '{"jsonrpc":"2.0","method":"notifications/initialized"}' "$INIT")
 [ "$(printf '%s\n' "$out" | grep -c .)" = "1" ] || fail "a notification must not produce a response"
 pass "a notification produces no response"
+
+# Wrongly shaped params are the client's mistake, so they come back as the
+# protocol's invalid-params code rather than as an internal error naming a
+# Python exception type that leaked out of the handler.
+out=$(mcp "$INIT" \
+  '{"jsonrpc":"2.0","id":18,"method":"tools/call","params":{"name":["desktop_screenshot"]}}' \
+  '{"jsonrpc":"2.0","id":19,"method":"tools/call","params":[]}' \
+  '{"jsonrpc":"2.0","id":20,"method":"tools/call","params":{"name":"desktop_screenshot","arguments":[]}}')
+for id in 18 19 20; do
+  [ "$(field "$out" "$id" 'r["code"]')" = "-32602" ] \
+    || fail "malformed tools/call params must map to -32602, not to an internal error"
+done
+pass "malformed tools/call params are an invalid-params error"
 
 out=$(mcp "$INIT" '{"jsonrpc":"2.0","id":8,"method":"resources/list"}' '{"jsonrpc":"2.0","id":9,"method":"prompts/list"}')
 [ "$(field "$out" 8 'r["resources"]')" = "[]" ] || fail "resources/list should answer with an empty list"

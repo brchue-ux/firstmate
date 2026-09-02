@@ -83,3 +83,5 @@ Both routes are implemented from the start rather than the fallback being retrof
   The measured table in [verification/desktop-capture.md](verification/desktop-capture.md) records all four cases with the display size and date they were taken on.
 
 Current measured behavior is recorded in [verification/desktop-capture.md](verification/desktop-capture.md), reproducible with `bin/fm-deskcap-mcp.py --selftest`.
+That self-check writes its captures to a fresh temporary directory and removes them again once it has captured everything it asked for, because they are pictures of the captain's live desktop.
+They stay on disk only when a capture failed, or when `--keep-captures` asks for them.

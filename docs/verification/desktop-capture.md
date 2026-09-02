@@ -2,6 +2,7 @@
 
 Active evidence for the guarantees in [../desktop-capture.md](../desktop-capture.md).
 Reproduce the live part with `bin/fm-deskcap-mcp.py --selftest`; the hermetic part is `tests/fm-deskcap.test.sh`.
+That self-check removes its captures once it has captured everything it asked for, so add `--keep-captures` to keep the PNGs for inspection.
 
 Machine and date: `homeserver`, Ubuntu 26.04 LTS, GNOME Shell / Mutter 50.1, on 2026-08-27, with the latency section re-measured on 2026-09-01.
 The session under test is a headless GNOME Remote Login (RDP) Wayland session with one synthetic monitor on connector `Meta-0` and no physical monitor connected.

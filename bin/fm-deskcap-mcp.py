@@ -30,7 +30,15 @@ CLI:
   fm-deskcap-mcp.py --selftest    capture both scopes for real and report
   fm-deskcap-mcp.py --probe       report route availability without capturing
 
-Exit status: 0 success, 1 a selftest capture failed, 2 bad arguments.
+  --keep-captures                 keep the selftest's PNGs instead of removing
+                                  them. A selftest writes pictures of the
+                                  captain's live desktop, so a run that captured
+                                  everything it asked for deletes them again;
+                                  they are kept only for a failed run or when
+                                  this flag asks for them.
+
+Exit status: 0 success, 1 a selftest capture failed or its captures could not be
+removed, 2 bad arguments.
 """
 from __future__ import annotations
 
@@ -168,6 +176,19 @@ def tool_desktop_screenshot(arguments: dict[str, Any]) -> list[dict[str, Any]]:
 TOOLS = {"desktop_screenshot": tool_desktop_screenshot}
 
 
+class InvalidParams(Exception):
+    """A request whose `params` are the wrong JSON shape for its method."""
+
+
+def _object_params(message: dict[str, Any]) -> dict[str, Any]:
+    params = message.get("params")
+    if params is None:
+        return {}
+    if not isinstance(params, dict):
+        raise InvalidParams("params must be a JSON object")
+    return params
+
+
 class McpServer:
     """Newline-delimited JSON-RPC 2.0, the shape MCP stdio clients speak."""
 
@@ -186,7 +207,7 @@ class McpServer:
 
         try:
             if method == "initialize":
-                result = self._initialize(message.get("params") or {})
+                result = self._initialize(_object_params(message))
             elif method in ("notifications/initialized", "initialized"):
                 return None
             elif method == "ping":
@@ -194,7 +215,7 @@ class McpServer:
             elif method == "tools/list":
                 result = {"tools": _tool_definitions()}
             elif method == "tools/call":
-                result = self._call_tool(message.get("params") or {})
+                result = self._call_tool(_object_params(message))
             elif method in ("resources/list", "prompts/list"):
                 # Not in the declared capabilities, but some clients probe anyway.
                 key = "resources" if method.startswith("resources") else "prompts"
@@ -203,6 +224,13 @@ class McpServer:
                 return None
             else:
                 return _rpc_error(message_id, -32601, f"unknown method: {method}")
+        except InvalidParams as err:
+            # A wrongly shaped request is the client's mistake, so it gets the
+            # protocol's own invalid-params code rather than a Python exception
+            # name wrapped in an internal error.
+            if is_notification:
+                return None
+            return _rpc_error(message_id, -32602, f"invalid params: {err}")
         except CAPTURE.CaptureError as err:
             if is_notification:
                 return None
@@ -230,10 +258,18 @@ class McpServer:
         }
 
     def _call_tool(self, params: dict[str, Any]) -> dict[str, Any]:
-        handler = TOOLS.get(params.get("name"))
+        name = params.get("name")
+        if not isinstance(name, str):
+            raise InvalidParams("tools/call needs a tool name string")
+        handler = TOOLS.get(name)
         if handler is None:
-            raise CAPTURE.CaptureError(f"unknown tool: {params.get('name')}")
-        return {"content": handler(params.get("arguments") or {}), "isError": False}
+            raise CAPTURE.CaptureError(f"unknown tool: {name}")
+        arguments = params.get("arguments")
+        if arguments is None:
+            arguments = {}
+        if not isinstance(arguments, dict):
+            raise InvalidParams("tools/call arguments must be a JSON object")
+        return {"content": handler(arguments), "isError": False}
 
     def serve(self, stdin: Iterable[str], stdout: Any) -> None:
         for line in stdin:
@@ -246,12 +282,16 @@ class McpServer:
                 _write(stdout, _rpc_error(None, -32700, f"parse error: {err}"))
                 continue
             if isinstance(message, list):
-                # Batches left the spec in 2025-06-18; older clients still send them.
+                # Batches left the spec in 2025-06-18; older clients still send
+                # them, and such a client expects exactly one array back. A batch
+                # that was nothing but notifications gets no reply at all, since
+                # an empty array is itself an invalid response.
                 if not message:
                     _write(stdout, _rpc_error(None, -32600, "invalid request"))
                     continue
-                for response in filter(None, (self.handle(item) for item in message)):
-                    _write(stdout, response)
+                responses = [r for r in (self.handle(item) for item in message) if r is not None]
+                if responses:
+                    _write(stdout, responses)
                 continue
             response = self.handle(message)
             if response is not None:
@@ -270,7 +310,7 @@ def _tool_error(message: str) -> dict[str, Any]:
     return {"content": [{"type": "text", "text": message}], "isError": True}
 
 
-def _write(stream: Any, payload: dict[str, Any]) -> None:
+def _write(stream: Any, payload: dict[str, Any] | list[dict[str, Any]]) -> None:
     stream.write(json.dumps(payload) + "\n")
     stream.flush()
 
@@ -290,7 +330,24 @@ def _save_capture(directory: Path, name: str, png: bytes) -> Path:
     return path
 
 
-def _selftest() -> int:
+def _discard_captures(directory: Path, saved: Iterable[Path]) -> bool:
+    """Remove exactly the files this selftest wrote, then its directory."""
+    removed = True
+    for path in saved:
+        try:
+            path.unlink()
+        except OSError as err:
+            print(f"could not remove {path}: {err}")
+            removed = False
+    try:
+        directory.rmdir()
+    except OSError as err:
+        print(f"could not remove {directory}: {err}")
+        removed = False
+    return removed
+
+
+def _selftest(keep_captures: bool = False) -> int:
     """Capture both scopes for real and report what came back."""
     print("# tools")
     for tool in _tool_definitions():
@@ -298,6 +355,7 @@ def _selftest() -> int:
     outdir = Path(tempfile.mkdtemp(prefix="fm-deskcap-selftest-"))
     print(f"\ncaptures are being written to {outdir}")
     failures = 0
+    saved: list[Path] = []
     cases: list[tuple[str, dict[str, Any]]] = [
         ("screen", {"scope": "screen"}),
         ("region", {"scope": "region", "x": 0, "y": 0, "width": 320, "height": 240}),
@@ -315,7 +373,23 @@ def _selftest() -> int:
             print(content[0]["text"])
             png = base64.b64decode(content[1]["data"])
             out = _save_capture(outdir, f"{label}-{route}.png", png)
+            saved.append(out)
             print(f"saved {out}")
+
+    # These files are pictures of the captain's live desktop, so they only stay
+    # on disk when the operator asked for them or when a failure makes them
+    # evidence. Everything else is cleaned up before this returns.
+    if saved and (failures or keep_captures):
+        why = "the run failed" if failures else "--keep-captures was given"
+        print(f"\nkept {len(saved)} capture(s) in {outdir} because {why}")
+        return 1 if failures else 0
+    if not _discard_captures(outdir, saved):
+        print(f"\ncaptures may still be on disk under {outdir}; remove them by hand")
+        return 1
+    if saved:
+        print(f"\nremoved {len(saved)} capture(s) and {outdir}")
+    else:
+        print(f"\nno captures were written; removed {outdir}")
     return 1 if failures else 0
 
 
@@ -327,13 +401,21 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--selftest", action="store_true", help="capture both scopes for real and report")
     parser.add_argument("--probe", action="store_true", help="report route availability without capturing")
+    parser.add_argument(
+        "--keep-captures",
+        action="store_true",
+        help=(
+            "keep the selftest's PNGs of the captain's desktop on disk; without "
+            "it a run that captured everything removes them again"
+        ),
+    )
     args = parser.parse_args(argv)
 
     if args.probe:
         print(json.dumps(CAPTURE.probe(), indent=2))
         return 0
     if args.selftest:
-        return _selftest()
+        return _selftest(keep_captures=args.keep_captures)
 
     McpServer().serve(sys.stdin, sys.stdout)
     return 0
