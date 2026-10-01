@@ -550,8 +550,88 @@ test_resolve_matches_quoted_blocked_by_edges() {
   pass "resolve matches first/middle/last in quoted blocked_by and rejects a genuinely absent id"
 }
 
+# A ship task finished with "done:" and only THEN needed a captain call, so
+# firstmate filed the decision after the finish. The worker never opened a keyed
+# status decision, so `complete` has nothing to transfer and the status log keeps
+# its finished line. The read-only `parked` query recognizes that state from the
+# filed hold alone, fm-crew-state.sh keeps reporting the real terminal state in
+# that same condition, and resolving the decision ends the parked answer.
+test_finished_task_parked_on_filed_decision_keeps_terminal_state() {
+  local home id status before out
+  home=$(make_home parked-finish)
+  id=sample-finish
+  status="$home/state/$id.status"
+  fm_git_identity
+  mkdir -p "$home/wt"
+  git -C "$home/wt" init -q
+  git -C "$home/wt" commit -q --allow-empty -m init
+  git -C "$home/wt" checkout -q -b "fm/$id"
+  # An idle, live tmux pane and no no-mistakes run: crew state comes from the log.
+  cat > "$home/fakebin/tmux" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-}" in
+  display-message) printf '%%1\n' ;;
+  capture-pane) printf 'all quiet\n> \n' ;;
+esac
+exit 0
+EOF
+  chmod +x "$home/fakebin/tmux"
+  fm_write_meta "$home/state/$id.meta" \
+    "window=fm:fm-$id" \
+    "worktree=$home/wt" \
+    "project=$home/projects/sample" \
+    "harness=claude" \
+    "kind=ship" \
+    "mode=local-only"
+  printf 'done: ready in branch fm/%s\n' "$id" > "$status"
+  before=$(cat "$status")
+  if run_decisions "$home" parked "$id" > "$home/early-parked.out" 2>&1; then
+    fail "a finished task with no filed decision answered parked"
+  fi
+
+  run_decisions "$home" hold "$id" crop --title "Pick the sample crop" \
+    --reason "Three sample crops were rendered and the captain picks one" --repo sample >/dev/null \
+    || fail "could not file the post-finish captain decision"
+  run_decisions "$home" complete "$id" crop >/dev/null || fail "could not complete the post-finish inventory"
+  [ "$(cat "$status")" = "$before" ] || fail "filing a decision after the finish changed the status log"
+
+  out=$(run_decisions "$home" parked "$id") || fail "a finished task with an active filed decision was not parked"
+  [ "$out" = "$id-decision-crop" ] || fail "parked did not name the active hold (got: $out)"
+  out=$(PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-crew-state.sh" "$id")
+  [ "$out" = "state: done · source: status-log · ready in branch fm/$id" ] \
+    || fail "crew state lost the parked task's terminal state (got: $out)"
+
+  # Only a FINISHED crew is parked: a later question or resumed work is not.
+  printf 'needs-decision: the crop also needs a new aspect ratio\n' >> "$status"
+  if run_decisions "$home" parked "$id" >/dev/null 2>&1; then
+    fail "a crew with a newer needs-decision answered parked"
+  fi
+  printf '%s\nworking: applying the follow-up\n' "$before" > "$status"
+  if run_decisions "$home" parked "$id" >/dev/null 2>&1; then
+    fail "a resumed crew answered parked"
+  fi
+  printf 'failed: render crashed after the crops were filed\n' > "$status"
+  run_decisions "$home" parked "$id" >/dev/null || fail "a failed crew with an active filed decision was not parked"
+  printf '%s\n' "$before" > "$status"
+
+  tasks_in "$home" add sample-finish-followup "Apply the chosen sample crop" \
+    --kind ship --repo sample --blocked-by "$id-decision-crop" >/dev/null \
+    || fail "could not route follow-up work behind the decision"
+  printf 'Use the middle crop.\n' > "$home/crop-decision.txt"
+  run_decisions "$home" resolve "$id" crop --decision-file "$home/crop-decision.txt" \
+    --routed-to sample-finish-followup >/dev/null || fail "could not resolve the post-finish decision"
+  if run_decisions "$home" parked "$id" >/dev/null 2>&1; then
+    fail "a resolved decision still answered parked"
+  fi
+  out=$(PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-crew-state.sh" "$id")
+  [ "$out" = "state: done · source: status-log · ready in branch fm/$id" ] \
+    || fail "crew state changed once the decision resolved (got: $out)"
+  pass "a finished task parked on a post-finish filed decision keeps its terminal crew state and stops being parked once resolved"
+}
+
 test_uninventoried_report_decision_refuses_completion
 
+test_finished_task_parked_on_filed_decision_keeps_terminal_state
 test_scout_teardown_always_requires_inventory_verification
 test_structured_holds_survive_teardown_and_route_resolution
 test_origin_slug_validation_precedes_path_construction

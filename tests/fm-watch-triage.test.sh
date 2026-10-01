@@ -70,6 +70,10 @@ file_mtime() {
   if [ "$(uname)" = Darwin ]; then stat -f %m "$1" 2>/dev/null; else stat -c %Y "$1" 2>/dev/null; fi
 }
 
+age_of_file() {  # seconds since <file>'s mtime
+  echo $(( $(date +%s) - $(file_mtime "$1") ))
+}
+
 # Set <file>'s mtime to exactly <epoch> seconds, for aging a busy-turn marker by
 # a precise amount (touch -t takes a local-time stamp, not an epoch, on both
 # platforms, so convert via BSD `date -r` or GNU `date -d @`).
@@ -103,6 +107,84 @@ prime_turnend_seen() {  # <file>
 }
 
 reap() { kill "$1" 2>/dev/null || true; wait "$1" 2>/dev/null || true; }
+
+# Wait up to <limit> 0.1s ticks for <file> to hold exactly <want> while <pid>
+# stays alive; 0 once it does, 1 if the watcher died or the limit passed.
+wait_file_is() {  # <pid> <file> <want> [limit]
+  local pid=$1 file=$2 want=$3 limit=${4:-80} i=0
+  while [ "$i" -lt "$limit" ]; do
+    kill -0 "$pid" 2>/dev/null || return 1
+    [ "$(cat "$file" 2>/dev/null || true)" = "$want" ] && return 0
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
+# Run the real bin/fm-decision-hold.sh against a case dir that doubles as the
+# fixture FM_HOME, so a finished task's captain decision is filed through the
+# same tasks-axi path firstmate uses.
+decision_hold_in() {  # <case-dir> <fm-decision-hold args...>
+  local dir=$1
+  shift
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" FM_DATA_OVERRIDE="$dir/data" \
+    FM_CONFIG_OVERRIDE="$dir/config" "$ROOT/bin/fm-decision-hold.sh" "$@"
+}
+
+# A finished ship task sitting idle on <status-line>, its pane already one poll
+# into an unchanged hash. With <hold>=hold, firstmate then files a captain
+# decision for it AFTER it finished - the ordering whose captain-held transfer
+# never fires because the worker never opened a keyed status decision.
+# Echoes the case dir; <dir>/state holds the task as "parked" on window
+# test:fm-parked.
+make_parked_case() {  # <name> <status-line> <hold|nohold>
+  local name=$1 line=$2 hold=$3 dir state key sig
+  dir=$(make_case "$name"); state="$dir/state"
+  mkdir -p "$dir/data" "$dir/config"
+  cp "$ROOT/.tasks.toml" "$dir/.tasks.toml"
+  printf '## In flight\n\n## Queued\n\n## Done\n' > "$dir/data/backlog.md"
+  fm_write_meta "$state/parked.meta" "window=test:fm-parked" "kind=ship" "project=$dir/projects/sample"
+  printf '%s\n' "$line" > "$state/parked.status"
+  if [ "$hold" = hold ]; then
+    decision_hold_in "$dir" hold parked crop --title "Pick the sample crop" \
+      --reason "Three sample crops were rendered and the captain picks one" --repo sample >/dev/null \
+      || fail "could not file the fixture captain decision"
+    decision_hold_in "$dir" complete parked crop >/dev/null \
+      || fail "could not complete the fixture decision inventory"
+  fi
+  sig=$(seen_sig "$state/parked.status"); printf '%s' "$sig" > "$state/.seen-parked_status"
+  # The finished line was already surfaced through the signal path, so the
+  # heartbeat backstop has nothing outstanding for it.
+  printf '%s' "$(last_status_line "$state/parked.status")" > "$state/.hb-surfaced-parked"
+  key=test_fm-parked
+  printf 'finished, idle footer 0' > "$dir/pane.txt"
+  hash_text "finished, idle footer 0" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  printf '%s\n' "$dir"
+}
+
+# Start a watcher over a make_parked_case dir; <dir> doubles as FM_HOME so the
+# watcher reads the fixture backlog. Extra env assignments follow.
+watch_parked_bg() {  # <dir> <out> [extra env assignments...]
+  local dir=$1 out=$2
+  shift 2
+  PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" \
+    FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
+    FM_FAKE_TMUX_WINDOW=test:fm-parked FM_FAKE_TMUX_CAPTURE="$dir/pane.txt" FM_FAKE_TMUX_CURRENT_COMMAND=claude \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 env "$@" "$WATCH" > "$out" &
+}
+
+# Repaint the fixture pane footer to <token> and wait for the running watcher
+# to classify the new stable hash, as a finished Claude pane's live spinner and
+# cost line do between otherwise identical polls.
+# Fails when the watcher woke instead of absorbing that hash.
+churn_parked_pane() {  # <dir> <pid> <out> <token>
+  local dir=$1 pid=$2 out=$3 token=$4
+  printf 'finished, idle footer %s' "$token" > "$dir/pane.txt"
+  wait_file_is "$pid" "$dir/state/.stale-test_fm-parked" "$(hash_text "finished, idle footer $token")" 80 || return 1
+  wait_live "$pid" 5 || return 1
+  [ ! -s "$out" ]
+}
 
 # --- pure classifier predicates (fm-classify-lib.sh) ------------------------
 
@@ -555,6 +637,189 @@ test_stale_terminal_status_overridden_by_active_run() {
   grep -F "possible wedge" "$out" >/dev/null || fail "escalation did not flag a possible wedge"
   unset FM_FAKE_CREW_STATE
   pass "a stale terminal-looking status is overridden and absorbed while a run is actively working, then wedge-escalated"
+}
+
+# --- terminal stale, finished crew parked on a firstmate-filed captain decision ---
+# The live 2026-09-30 case: a ship task finished with "done: ready in branch ..."
+# and firstmate filed a captain decision for it afterwards. The worker never
+# opened a keyed status decision, so fm-decision-hold.sh's captain-held transfer
+# had nothing to transfer and the last status line stayed "done:". Its idle
+# Claude pane repaints a spinner and cost line every so often, so each repaint
+# settled into a NEW stable hash and the terminal-stale path - one-shot per
+# distinct hash - re-surfaced the same unchanged finish again and again. A filed
+# decision must give it the declared-pause cadence instead: absorbed across any
+# number of repainted hashes, re-surfaced once per FM_PAUSE_RESURFACE_SECS.
+test_terminal_stale_parked_on_filed_decision_absorbed_across_hash_churn() {
+  local dir state out drain_out key pid token
+  command -v tasks-axi >/dev/null 2>&1 || { echo "skip: tasks-axi not found (parked-decision cadence)"; return 0; }
+  dir=$(make_parked_case parked-churn 'done: ready in branch fm/parked' hold); state="$dir/state"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; key=test_fm-parked
+  [ "$(last_status_line "$state/parked.status")" = 'done: ready in branch fm/parked' ] \
+    || fail "filing the decision after the finish changed the task's last status line"
+  # The crew is finished, not running anything.
+  export FM_FAKE_CREW_STATE='state: done · source: status-log · ready in branch fm/parked'
+
+  # Phase A: four distinct repainted hashes in a row, all absorbed.
+  watch_parked_bg "$dir" "$out" FM_PAUSE_RESURFACE_SECS=999
+  pid=$!
+  for token in 0 1 2 3; do
+    if ! churn_parked_pane "$dir" "$pid" "$out" "$token"; then
+      reap "$pid"; fail "a parked finished task re-surfaced on repainted hash $token: $(cat "$out")"
+    fi
+  done
+  wait_live "$pid" 15 || { reap "$pid"; fail "watcher exited after the last repaint: $(cat "$out")"; }
+  [ ! -s "$out" ] || fail "a parked finished task printed a wake reason during absorb"
+  [ ! -s "$state/.wake-queue" ] || fail "a parked finished task enqueued a wake during absorb"
+  [ -e "$state/.parked-$key" ] || fail "parked absorb did not record its cadence flag"
+  [ -e "$state/.parked-resurfaced-$key" ] || fail "parked absorb did not anchor its re-surface cadence"
+  [ ! -e "$state/.stale-since-$key" ] || fail "a parked absorb must not start the wedge timer"
+  reap "$pid"
+
+  # Phase B: past the cadence the parked task re-surfaces once, named as a
+  # parked captain decision rather than a wedge.
+  set_mtime $(( $(date +%s) - 500 )) "$state/.parked-resurfaced-$key"
+  : > "$out"
+  watch_parked_bg "$dir" "$out" FM_PAUSE_RESURFACE_SECS=240
+  pid=$!
+  wait_for_exit "$pid" 40 || { reap "$pid"; fail "a parked task was not re-surfaced past its cadence"; }
+  grep -F "stale: test:fm-parked" "$out" >/dev/null || fail "the parked re-surface did not print a stale wake"
+  grep -F "parked on captain decision parked-decision-crop" "$out" >/dev/null \
+    || fail "the parked re-surface did not name the filed decision: $(cat "$out")"
+  grep -F "possible wedge" "$out" >/dev/null && fail "a parked finished task was mislabeled a possible wedge"
+  [ "$(age_of_file "$state/.parked-resurfaced-$key")" -lt 60 ] || fail "the parked re-surface did not re-arm its cadence"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the parked re-surface failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "test:fm-parked" >/dev/null || fail "parked re-surface was not queued"
+
+  # Phase C: the re-armed cadence absorbs further repaints again.
+  : > "$out"
+  watch_parked_bg "$dir" "$out" FM_PAUSE_RESURFACE_SECS=240
+  pid=$!
+  for token in 4 5; do
+    if ! churn_parked_pane "$dir" "$pid" "$out" "$token"; then
+      reap "$pid"; fail "a re-armed parked task re-surfaced on repainted hash $token: $(cat "$out")"
+    fi
+  done
+  [ ! -s "$out" ] || fail "a re-armed parked task printed a wake reason"
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "a finished task parked on a firstmate-filed captain decision is absorbed across repainted hashes and re-surfaced only on the pause cadence"
+}
+
+# Once the captain answers and the hold is resolved, the parked task must leave
+# the cadence at once: the unchanged hash it was absorbed on surfaces on the
+# next poll as an ordinary terminal stale, and later repaints surface per hash
+# exactly as before, with no parked suppressor left behind.
+test_parked_decision_closed_resumes_ordinary_terminal_surfacing() {
+  local dir state out key pid
+  command -v tasks-axi >/dev/null 2>&1 || { echo "skip: tasks-axi not found (parked-decision close)"; return 0; }
+  dir=$(make_parked_case parked-closed 'done: ready in branch fm/parked' hold); state="$dir/state"
+  out="$dir/watch.out"; key=test_fm-parked
+  export FM_FAKE_CREW_STATE='state: done · source: status-log · ready in branch fm/parked'
+
+  watch_parked_bg "$dir" "$out" FM_PAUSE_RESURFACE_SECS=999
+  pid=$!
+  if ! churn_parked_pane "$dir" "$pid" "$out" 1; then
+    reap "$pid"; fail "a parked task re-surfaced before its decision closed: $(cat "$out")"
+  fi
+  [ -e "$state/.parked-$key" ] || { reap "$pid"; fail "fixture did not reach the parked cadence"; }
+
+  # The captain answers: route the decision to follow-up work and close the hold
+  # through the same owner firstmate uses, while the watcher keeps polling.
+  (cd "$dir" && tasks-axi add parked-followup "Apply the chosen sample crop" --kind ship --repo sample \
+    --blocked-by parked-decision-crop >/dev/null) || { reap "$pid"; fail "could not route follow-up work behind the hold"; }
+  printf 'Use the middle crop.\n' > "$dir/decision.txt"
+  decision_hold_in "$dir" resolve parked crop --decision-file "$dir/decision.txt" \
+    --routed-to parked-followup >/dev/null || { reap "$pid"; fail "could not resolve the fixture captain decision"; }
+
+  wait_for_exit "$pid" 40 || { reap "$pid"; fail "a parked task whose decision closed did not surface its unchanged hash"; }
+  grep -Fx "stale: test:fm-parked" "$out" >/dev/null || fail "the closed decision did not surface as an ordinary terminal stale: $(cat "$out")"
+  [ ! -e "$state/.parked-$key" ] || fail "the closed decision left its parked flag behind"
+  [ ! -e "$state/.parked-resurfaced-$key" ] || fail "the closed decision left its parked cadence marker behind"
+  [ "$(cat "$state/.stale-$key")" = "$(hash_text "finished, idle footer 1")" ] \
+    || fail "the closed-decision surface did not record its hash as surfaced"
+
+  # A later repaint is an ordinary new terminal stale again.
+  : > "$out"
+  watch_parked_bg "$dir" "$out" FM_PAUSE_RESURFACE_SECS=999
+  pid=$!
+  printf 'finished, idle footer 2' > "$dir/pane.txt"
+  wait_for_exit "$pid" 40 || { reap "$pid"; fail "a repaint after the decision closed was absorbed"; }
+  grep -Fx "stale: test:fm-parked" "$out" >/dev/null || fail "a repaint after the decision closed did not surface: $(cat "$out")"
+  unset FM_FAKE_CREW_STATE
+  pass "a resolved captain decision drops the parked cadence and the task resumes ordinary terminal surfacing at once"
+}
+
+# The parked cadence absorbs only a FINISHED crew with an ACTIVE firstmate-filed
+# decision and no positive working evidence. Everything the stale path exists to
+# catch still escalates exactly as before: a frozen run behind a stale done:
+# line, a crew that resumed and then stopped, a crew that asked a new question,
+# and any finished crew with no filed decision.
+test_parked_decision_absorb_never_masks_a_wedged_or_unfinished_worker() {
+  local dir state out key pid
+  command -v tasks-axi >/dev/null 2>&1 || { echo "skip: tasks-axi not found (parked-decision narrowness)"; return 0; }
+  key=test_fm-parked
+
+  # (a) Filed decision, but an actively running pipeline froze on a static pane:
+  # the provably-working override still wins, and the wedge timer escalates.
+  dir=$(make_parked_case parked-wedged-run 'done: ready in branch fm/parked' hold); state="$dir/state"
+  out="$dir/watch.out"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  watch_parked_bg "$dir" "$out" FM_STALE_ESCALATE_SECS=999
+  pid=$!
+  wait_live "$pid" 30 || { reap "$pid"; fail "a working run behind a filed decision was not absorbed as working: $(cat "$out")"; }
+  [ -s "$state/.stale-since-$key" ] || { reap "$pid"; fail "a working run behind a filed decision did not start the wedge timer"; }
+  [ ! -e "$state/.parked-$key" ] || { reap "$pid"; fail "a working run was absorbed as parked instead of timed as a possible wedge"; }
+  reap "$pid"
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  : > "$out"
+  watch_parked_bg "$dir" "$out" FM_STALE_ESCALATE_SECS=240
+  pid=$!
+  wait_for_exit "$pid" 40 || { reap "$pid"; fail "a frozen run behind a filed decision never wedge-escalated"; }
+  grep -F "possible wedge" "$out" >/dev/null || fail "a frozen run behind a filed decision was not escalated as a possible wedge: $(cat "$out")"
+
+  # (b) Filed decision, but the crew resumed (working:) and then stopped with no
+  # running pipeline: surfaced at once, never parked.
+  dir=$(make_parked_case parked-resumed-stopped 'done: ready in branch fm/parked' hold); state="$dir/state"
+  out="$dir/watch.out"
+  printf 'working: applying the follow-up\n' >> "$state/parked.status"
+  printf '%s' "$(seen_sig "$state/parked.status")" > "$state/.seen-parked_status"
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+  watch_parked_bg "$dir" "$out" FM_PAUSE_RESURFACE_SECS=999 FM_STALE_ESCALATE_SECS=999
+  pid=$!
+  wait_for_exit "$pid" 40 || { reap "$pid"; fail "a resumed-then-stopped crew with a filed decision was absorbed"; }
+  grep -Fx "stale: test:fm-parked" "$out" >/dev/null || fail "a resumed-then-stopped crew did not surface at once: $(cat "$out")"
+  [ ! -e "$state/.parked-$key" ] || fail "a non-finished crew was recorded as parked"
+
+  # (c) Filed decision, then the crew asked a new question: surfaced, never parked.
+  dir=$(make_parked_case parked-new-question 'done: ready in branch fm/parked' hold); state="$dir/state"
+  out="$dir/watch.out"
+  printf 'needs-decision: the crop also needs a new aspect ratio\n' >> "$state/parked.status"
+  printf '%s' "$(seen_sig "$state/parked.status")" > "$state/.seen-parked_status"
+  printf '%s' "$(last_status_line "$state/parked.status")" > "$state/.hb-surfaced-parked"
+  watch_parked_bg "$dir" "$out" FM_PAUSE_RESURFACE_SECS=999
+  pid=$!
+  wait_for_exit "$pid" 40 || { reap "$pid"; fail "a crew with an open needs-decision behind a filed decision was absorbed"; }
+  grep -Fx "stale: test:fm-parked" "$out" >/dev/null || fail "an open needs-decision did not surface: $(cat "$out")"
+  [ ! -e "$state/.parked-$key" ] || fail "a crew waiting on firstmate was recorded as parked"
+
+  # (d) A finished crew with NO filed decision keeps today's one-shot-per-hash
+  # terminal surfacing, repaint after repaint.
+  dir=$(make_parked_case parked-no-decision 'done: ready in branch fm/parked' nohold); state="$dir/state"
+  out="$dir/watch.out"
+  export FM_FAKE_CREW_STATE='state: done · source: status-log · ready in branch fm/parked'
+  watch_parked_bg "$dir" "$out" FM_PAUSE_RESURFACE_SECS=999
+  pid=$!
+  wait_for_exit "$pid" 40 || { reap "$pid"; fail "a finished crew with no filed decision was absorbed"; }
+  grep -Fx "stale: test:fm-parked" "$out" >/dev/null || fail "a finished crew with no filed decision did not surface: $(cat "$out")"
+  : > "$out"
+  printf 'finished, idle footer 1' > "$dir/pane.txt"
+  watch_parked_bg "$dir" "$out" FM_PAUSE_RESURFACE_SECS=999
+  pid=$!
+  wait_for_exit "$pid" 40 || { reap "$pid"; fail "a repainted finished crew with no filed decision was absorbed"; }
+  grep -Fx "stale: test:fm-parked" "$out" >/dev/null || fail "a repainted finished crew with no filed decision did not surface again"
+  [ ! -e "$state/.parked-$key" ] || fail "a finished crew with no filed decision was recorded as parked"
+  unset FM_FAKE_CREW_STATE
+  pass "the parked cadence never absorbs a frozen run, a resumed or questioning crew, or a finish with no filed decision"
 }
 
 # --- non-terminal stale, crew provably working: absorbed, then wedge-escalated ---
@@ -1910,6 +2175,9 @@ test_actionable_signal_surfaced
 test_terminal_stale_surfaced
 test_capture_failure_surfaces_missing_window
 test_stale_terminal_status_overridden_by_active_run
+test_terminal_stale_parked_on_filed_decision_absorbed_across_hash_churn
+test_parked_decision_closed_resumes_ordinary_terminal_surfacing
+test_parked_decision_absorb_never_masks_a_wedged_or_unfinished_worker
 test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active
