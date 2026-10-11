@@ -27,7 +27,10 @@
 #                          from every later poll. Only when neither
 #                          absorb class applies does the log's last line decide:
 #                          terminal (captain-relevant) or non-terminal (no verb),
-#                          both surfaced at once. A provably-working stale past the
+#                          both surfaced at once - except a finished (done/failed)
+#                          crew parked on a captain decision firstmate filed for it,
+#                          which takes the same long re-surface cadence until that
+#                          decision closes. A provably-working stale past the
 #                          wedge threshold also surfaces, with an "escalation N"
 #                          count in the reason; at FM_WEDGE_DEMAND_INSPECT_COUNT
 #                          consecutive escalations on the SAME pane, the reason
@@ -166,6 +169,8 @@ BUSY_TURN_MAX_SECS=${FM_BUSY_TURN_MAX_SECS:-3600}
 # pane is absorbed rather than wedge-escalated.
 # A captain-held or paused crew whose agent has confidently exited uses the same
 # bounded cadence, while a live or ambiguously read agent still surfaces once.
+# A finished crew parked on a firstmate-filed captain decision uses it too (see
+# handle_parked_stale).
 # These cases re-surface once for a recheck every PAUSE_RESURFACE_SECS - far
 # longer than the wedge threshold, but finite so a forgotten hold cannot rot invisibly.
 PAUSE_RESURFACE_SECS=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT}
@@ -359,6 +364,63 @@ handle_paused_stale() {  # <window> <task> <hash>
     wake "$reason"
   fi
   triage_log "absorbed stale (paused, awaiting external, age ${age}s): $win"
+}
+
+# Print the captain decision holds <task> is parked on and return 0 when it is a
+# finished crew whose decision firstmate filed after it finished; return 1
+# otherwise. bin/fm-decision-hold.sh's read-only `parked` query owns that test.
+# It costs one tasks-axi read per inventoried decision, so callers run it only on
+# a terminal stale's first sight of a hash and on the unchanged polls of a window
+# already absorbed as parked.
+parked_captain_holds() {  # <task>
+  local home=$FM_HOME
+  FM_HOME="$home" FM_HOME_BINDING="$home" FM_STATE_OVERRIDE="$STATE" \
+    "$SCRIPT_DIR/fm-decision-hold.sh" parked "$1" 2>/dev/null
+}
+
+# Absorb a terminal stale whose finished crew is parked on a firstmate-filed
+# captain decision, and re-surface it once every PAUSE_RESURFACE_SECS for a
+# recheck - the declared-pause cadence - instead of once per distinct hash. An
+# idle finished pane can repaint its footer (a spinner, a cost line) into a new
+# stable hash many times an hour, so the cadence is anchored on the
+# .parked-resurfaced-<key> marker, which hash churn never resets. The first
+# parked sighting only arms that marker, because the finish already surfaced
+# through its own status signal before firstmate filed the decision.
+handle_parked_stale() {  # <window> <hash> <holds>
+  local win=$1 h=$2 holds=$3 key rf reason
+  key=$(printf '%s' "$win" | tr ':/.' '___')
+  printf '%s' "$h" > "$STATE/.stale-$key"
+  rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
+  rf="$STATE/.parked-resurfaced-$key"
+  if [ ! -e "$STATE/.parked-$key" ] || [ ! -e "$rf" ]; then
+    : > "$STATE/.parked-$key"
+    date +%s > "$rf"
+  elif [ "$(age_of "$rf")" -ge "$PAUSE_RESURFACE_SECS" ]; then
+    reason="stale: $win (finished, parked on captain decision $holds - rechecked on a long cadence, not a wedge; confirm the decision is still pending)"
+    fm_wake_append stale "$win" "$reason" || exit 1
+    date +%s > "$rf"
+    wake "$reason"
+  fi
+  triage_log "absorbed stale (finished, parked on captain decision $holds): $win"
+}
+
+# Surface a terminal stale once for <hash>, the ordinary one-shot-per-hash
+# terminal behavior. It also drops any parked cadence, so a decision that closed
+# while its hash sat absorbed leaves no suppressor behind.
+surface_terminal_stale() {  # <window> <task> <hash>
+  local win=$1 task=$2 h=$3 key
+  key=$(printf '%s' "$win" | tr ':/.' '___')
+  fm_wake_append stale "$win" "stale: $win" || exit 1
+  printf '%s' "$h" > "$STATE/.stale-$key"
+  rm -f "$STATE/.stale-since-$key" "$STATE/.parked-$key" "$STATE/.parked-resurfaced-$key"
+  mark_surfaced "$STATE/$task.status"
+  wake "stale: $win"
+}
+
+clear_parked_tracking() {  # <window>
+  local win=$1 key
+  key=$(printf '%s' "$win" | tr ':/.' '___')
+  rm -f "$STATE/.parked-$key" "$STATE/.parked-resurfaced-$key" "$STATE/.stale-$key"
 }
 
 clear_pause_state() {  # <window>
@@ -1054,17 +1116,20 @@ EOF
           # line. On a NEW hash, give an active run/busy pane (the same
           # authoritative source fm-crew-state.sh itself already prioritizes
           # over the log) a chance to override before trusting the log.
+          # Only then, a finished crew parked on a captain decision firstmate
+          # filed after the finish takes the bounded parked cadence; the
+          # captain-held transfer cannot reach that ordering because the worker
+          # never opened a keyed status decision.
           if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
-            if crew_is_provably_working "$(window_to_task "$w" "$STATE")"; then
+            if crew_is_provably_working "$task"; then
+              rm -f "$STATE/.parked-$key" "$STATE/.parked-resurfaced-$key"
               printf '%s' "$h" > "$sf"
               date +%s > "$ssf"
               triage_log "absorbed stale (provably working, overriding a stale captain-relevant status): $w"
+            elif holds=$(parked_captain_holds "$task"); then
+              handle_parked_stale "$w" "$h" "$holds"
             else
-              fm_wake_append stale "$w" "stale: $w" || exit 1
-              printf '%s' "$h" > "$sf"
-              rm -f "$ssf"
-              mark_surfaced "$STATE/$(window_to_task "$w" "$STATE").status"
-              wake "stale: $w"
+              surface_terminal_stale "$w" "$task" "$h"
             fi
           elif [ -e "$ssf" ]; then
             # This exact hash was already overridden as provably-working (a
@@ -1072,11 +1137,22 @@ EOF
             # without re-reading the crew state every poll, and without
             # letting the still-captain-relevant log line re-surface it.
             wedge_timer_check "$w" "$ssf" "stale (overridden terminal status)" "$ewf"
+          elif [ -e "$STATE/.parked-$key" ]; then
+            # This exact hash is absorbed as parked. Keep the cadence while the
+            # decision is still held; the poll after it closes, surface this
+            # same hash as an ordinary terminal stale.
+            if holds=$(parked_captain_holds "$task"); then
+              handle_parked_stale "$w" "$h" "$holds"
+            else
+              surface_terminal_stale "$w" "$task" "$h"
+            fi
           fi
           # else: already surfaced as genuinely terminal on a prior poll of
           # this same hash - nothing left to do (matches the original,
           # unmodified terminal-status behavior).
         else
+          # A non-terminal status ends any parked absorb; reclassify this hash.
+          [ -e "$STATE/.parked-$key" ] && clear_parked_tracking "$w"
           # Non-terminal stale: a crew gone quiet without a captain-relevant status.
           # Decided once per distinct stale hash (the costly state reads run only
           # on first sight, never every poll) via pause_state_class, which returns:

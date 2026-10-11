@@ -23,6 +23,11 @@ For an open keyed status decision, it appends a `captain-held [key=<key>]: ...` 
 Scout teardown calls the script's read-only `verify` subcommand after checking for the report and before removing any source state.
 The `--force` path remains the explicit captain-approved discard escape hatch.
 
+The read-only `parked` subcommand answers whether a finished task is parked on a decision firstmate filed after it finished.
+That ordering never opens a keyed status decision, so `complete` appends no transfer and the task's last status line stays `done:` or `failed:`.
+It reads the origin's recorded `decision_keys=` and reports the holds that tasks-axi still shows actively held for the captain, and `bin/fm-watch.sh` uses that answer to keep such a task on the bounded pause re-surface cadence until the decision closes.
+It never appends a status event, so `bin/fm-crew-state.sh` keeps reporting the task's real terminal state.
+
 The `resolve` subcommand requires a decision file and at least one existing dependent task whose structured `blocked-by` edge points to the hold.
 It records the decision digest and routed task identities as a retry identity in the hold body, clears each dependency edge through tasks-axi, and marks the hold Done only after those writes succeed.
 An exact retry can finish a partial routing operation, while a changed decision or routed-task set is rejected.
@@ -92,4 +97,31 @@ $ git diff --check
 
 $ for test_script in tests/*.test.sh; do bash "$test_script"; done
 ALL 71 TEST SCRIPTS PASSED
+```
+
+Post-finish parked-decision verification date: 2026-09-30.
+This regression covers a task that finished before firstmate filed its captain decision, so no keyed status decision was ever open and `complete` appended no transfer.
+It proves the `parked` query, the unchanged terminal crew state, the watcher's bounded cadence across repainted pane hashes, the return to ordinary surfacing once the decision resolves, and that a frozen run, a resumed or questioning crew, and a finish with no filed decision still surface as before.
+
+```text
+$ bash tests/fm-decision-hold-lifecycle.test.sh
+ok - report-only unresolved decision is reproduced and completion refuses before loss
+ok - a finished task parked on a post-finish filed decision keeps its terminal crew state and stops being parked once resolved
+ok - non-forced scout teardown always requires durable inventory verification
+ok - captain holds are idempotent, distinct, teardown-safe, Bearings-visible, and durably routed before close
+ok - completion and verification validate origins before constructing paths
+ok - ended visual review follows the same decision-hold completion owner
+ok - resolved findings and decision-like prose do not create false holds
+ok - terminal single-owner stale status decisions do not block empty inventory
+ok - main-home and secondmate-home captain holds remain correctly routed
+ok - resolve matches first/middle/last in quoted blocked_by and rejects a genuinely absent id
+
+$ bash tests/fm-watch-triage.test.sh | grep -F parked
+ok - crew_is_provably_working: only working+run-step/pane is provable; idle/finished/parked/failed/unknown surface
+ok - a finished task parked on a firstmate-filed captain decision is absorbed across repainted hashes and re-surfaced only on the pause cadence
+ok - a resolved captain decision drops the parked cadence and the task resumes ordinary terminal surfacing at once
+ok - the parked cadence never absorbs a frozen run, a resumed or questioning crew, or a finish with no filed decision
+
+$ bin/fm-lint.sh
+fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
 ```

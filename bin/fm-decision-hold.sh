@@ -22,6 +22,7 @@
 #     --title <title> --reason <reason> [--repo <repo>]
 #   fm-decision-hold.sh complete <origin-id> (--none | <decision-key>...)
 #   fm-decision-hold.sh verify <origin-id>
+#   fm-decision-hold.sh parked <origin-id>
 #   fm-decision-hold.sh resolve <origin-id> <decision-key> \
 #     --decision-file <path> --routed-to <task-id> [--routed-to <task-id>...]
 #
@@ -32,6 +33,15 @@
 # complete against the surviving report and holds without recreating task state.
 # `verify` is read-only and is called by scout teardown so teardown cannot erase a
 # source before this gate has succeeded.
+#
+# `parked` is read-only and is the watcher's test for a finished task parked on a
+# captain decision filed after it finished, which the captain-held transfer
+# cannot reach because no keyed status decision was ever open. It exits 0 and
+# prints the active hold ids only when the origin is a live non-secondmate task
+# whose last status verb is done or failed, whose metadata records a completed
+# decision inventory, and at least one inventoried hold is still actively held
+# for the captain. Every other answer, including an unreadable backlog, exits 1
+# so the caller keeps its ordinary surfacing.
 #
 # `resolve` requires every --routed-to task to exist and to be blocked by the hold.
 # It writes the captain decision and routed identities into the hold body, clears
@@ -370,6 +380,35 @@ EOF
   printf 'verified: %s unresolved-decision inventory\n' "$origin"
 }
 
+command_parked() {
+  local origin=${1:-} meta last keys key id active=''
+  [ "$#" -eq 1 ] || { usage >&2; exit 2; }
+  validate_slug origin-id "$origin"
+  meta="$STATE/$origin.meta"
+  [ -f "$meta" ] || return 1
+  [ "$(meta_value "$meta" kind)" != secondmate ] || return 1
+  last=$(last_status_line "$STATE/$origin.status")
+  case "$(status_line_verb "$last")" in
+    done|failed) ;;
+    *) return 1 ;;
+  esac
+  [ "$(meta_value "$meta" decisions_reviewed)" = 1 ] || return 1
+  keys=$(meta_value "$meta" decision_keys)
+  [ -n "$keys" ] || return 1
+  command -v tasks-axi >/dev/null 2>&1 || return 1
+  while IFS= read -r key; do
+    [ -n "$key" ] || continue
+    id=$(hold_id "$origin" "$key")
+    if (verify_hold_active "$id") >/dev/null 2>&1; then
+      active="${active}${active:+,}$id"
+    fi
+  done <<EOF
+$(printf '%s\n' "$keys" | tr ',' '\n')
+EOF
+  [ -n "$active" ] || return 1
+  printf '%s\n' "$active"
+}
+
 command_resolve() {
   local origin=${1:-} key=${2:-} decision_file='' id='' decision='' decision_digest='' body='' routed='' routed_csv='' dep show blocked state hold_show hold_body resolution_recorded=0
   [ "$#" -ge 2 ] || { usage >&2; exit 2; }
@@ -461,6 +500,7 @@ case "${1:-}" in
   hold) shift; command_hold "$@" ;;
   complete) shift; command_complete "$@" ;;
   verify) shift; command_verify "$@" ;;
+  parked) shift; command_parked "$@" ;;
   resolve) shift; command_resolve "$@" ;;
   -h|--help) usage ;;
   *) usage >&2; exit 2 ;;
